@@ -1,0 +1,186 @@
+# KeyValet
+
+**Give your AI agents a valet key, not your master key.**
+
+KeyValet is a local credential broker for AI agents on macOS. It lets agents such as Claude Code, Cursor and Codex *use* your API keys, OAuth accounts and other secrets over [MCP](https://modelcontextprotocol.io) — without the secrets ever entering the model's context. You approve each credential with Touch ID, and every use is logged with its stated purpose.
+
+[简体中文](README.zh-CN.md) · [Security model](SECURITY.md)
+
+> **Status:** early (0.1). macOS only. User-facing messages are currently in Chinese — English localization is a welcome contribution.
+
+---
+
+## Why
+
+AI agents increasingly call real services on your behalf. Today the options are poor:
+
+| Approach | Problem |
+|---|---|
+| `.env` files / pasting keys into chat | The agent reads plaintext keys; they leak into logs, commits, prompt injections |
+| Password-manager CLIs | Not agent-aware: no purpose, no per-use approval, still returns plaintext |
+| Hosted agent-auth platforms | Your tokens live in someone else's cloud |
+| Team secret managers | Built for servers and teams, heavy for one developer |
+
+KeyValet's answer: **secrets stay on your machine, owned by root. Agents ask; you approve with a fingerprint; the broker makes the call.**
+
+## How it works
+
+```
+ AI agent ──MCP──▶ KeyValet server (your user)
+                        │  sudo -n (rule allows ONLY the helper)
+                        ▼
+                  root helper ── Touch ID gate ("Use credential X — purpose: …")
+                        │
+          ┌─────────────┼───────────────────────┐
+   encrypted vault   HTTPS proxy            protocol engines
+   /var/db/keyvalet  (inject key/token,     (OAuth refresh, service accounts,
+   (root, 0700)       allowed hosts only,    GitHub App, JWT, TOTP, AWS STS)
+                      redact responses)
+```
+
+- **Use, don't see.** `credential_http_request` makes the HTTP call inside the root helper with the key/token injected; the agent only gets the (redacted) response.
+- **You're in the loop.** By default every credential needs its own Touch ID approval, and the prompt shows *which* credential and *why*.
+- **Audited.** Every unlock, read, token fetch and proxied call is logged with session, purpose and result (never the secret). Agents can query the log.
+- **Local and root-isolated.** AES-256-GCM vault readable only by root; code that runs as root is installed root-owned and self-verifies before running.
+- **Speaks every auth.** OAuth 2.0 (auth code + PKCE, device code, client credentials, auto-refresh), Google service accounts, GitHub Apps, signed JWTs (e.g. App Store Connect), TOTP, AWS STS (AssumeRole + MFA), IMAP XOAUTH2 — plus a template catalog of common APIs.
+
+## What it is not
+
+- Not a password manager for humans (no UI, sync or browser autofill).
+- Not a team secret manager.
+- Not a sandbox: once you grant a session a credential, a malicious agent with shell access could misuse *that* grant. KeyValet narrows the blast radius (per-credential grants, proxy-only, host allowlists, short-lived tokens) and records everything. See [SECURITY.md](SECURITY.md).
+
+## Requirements
+
+- macOS (Touch ID recommended; without it the system prompt asks for your login password — handled by macOS, never seen by KeyValet)
+- Node.js ≥ 20 from nvm or nodejs.org (Homebrew's node links user-writable libraries and is refused for root use)
+- Xcode Command Line Tools (`xcode-select --install`) for the Swift Touch ID helper
+
+## Install
+
+```sh
+git clone <this repo> keyvalet && cd keyvalet
+./scripts/install.sh        # run as your user; privileged steps use sudo
+```
+
+The installer builds everything, copies it to root-owned `/usr/local/lib/keyvalet`, creates the vault at `/var/db/keyvalet`, installs the `keyvalet` CLI, and adds **one** sudoers rule (`/etc/sudoers.d/keyvalet`) that lets your user start *only* the KeyValet helper without a password — the helper then requires Touch ID before doing anything. The rule is validated with `visudo` before and after installation.
+
+Register with your MCP client, e.g. Claude Code:
+
+```sh
+claude mcp add keyvalet --scope user -- /usr/local/lib/keyvalet/bin/node /usr/local/lib/keyvalet/app/dist/server/index.js
+```
+
+Other clients (Cursor, etc.): add a stdio server with command `/usr/local/lib/keyvalet/bin/node` and argument `/usr/local/lib/keyvalet/app/dist/server/index.js`.
+
+Upgrade: pull and re-run `./scripts/install.sh` (your vault is kept). Uninstall: `./scripts/uninstall.sh` (`--purge` also deletes the vault).
+
+## Quick start (what your agent does)
+
+```text
+credential_templates    { query: "openai" }
+credential_set          { template: "openai", name: "main", purpose: "Store my OpenAI key" }
+                          → a native dialog asks YOU for the key (not the agent); proxy + test are configured and the key is verified
+credential_http_request { name: "main", url: "https://api.openai.com/v1/models", purpose: "List models" }
+                          → Touch ID: "use credential openai/main — purpose: List models" → response returned, key never shown
+credential_audit_log    { this_session_only: true }
+```
+
+OAuth example (browser flow with PKCE; the refresh token stays in the vault):
+
+```text
+credential_oauth_login    { provider: "google", client_id: "…", name: "work", scopes: ["https://www.googleapis.com/auth/drive.readonly"], purpose: "…" }
+credential_configure_http { name: "work", allowed_hosts: ["www.googleapis.com"], purpose: "…" }   # you confirm in a dialog
+credential_http_request   { name: "work", url: "https://www.googleapis.com/drive/v3/files", purpose: "…" }
+```
+
+## Key concepts
+
+### Grant modes
+
+| Mode | Behavior |
+|---|---|
+| `per_credential` (**default**) | Each credential needs its own Touch ID approval per session. Listing, templates and audit queries don't. Credentials you create in the session are granted automatically. |
+| `all` | One Touch ID per session unlocks every credential. |
+
+Switch with `credential_settings` (switching to `all` requires your confirmation in a dialog shown by the root helper) or `keyvalet grant-mode all` in your terminal.
+
+### Purpose and audit
+
+Every tool that reads, uses or changes a credential **requires** a `purpose`. It is shown in the Touch ID prompt and written to the audit log (`/var/db/keyvalet/audit.log`, root-only, rotated at 10 MB). The root helper enforces this too. The purpose is the agent's *claim* — read it before approving.
+
+### Proxy calls
+
+- HTTPS only, port 443, and the hostname must be in the credential's `allowed_hosts` (domains only — no IPs or localhost).
+- Redirects are not followed.
+- Secrets (and common encodings: URL, form, JSON, base64, hex; case-insensitive) are replaced with `[REDACTED]` in responses and error messages; binary responses containing a secret are refused.
+- Works for static credentials (template or manual injection rule) and for OAuth / service-account / GitHub App / JWT credentials (bearer token injected automatically).
+- `proxy_only: true` makes `credential_get` and `credential_access_token` refuse to return the raw secret.
+- Expanding exposure (new hosts, changed injection, turning off proxy-only, removing the config), overwriting and deleting credentials all require **your** confirmation in a dialog shown by the root helper itself — not just by the MCP server.
+
+When proxying isn't possible (databases, SSH, SDKs/CLIs that need the key, streaming responses), `credential_get` still returns the value after your approval.
+
+### Templates
+
+- **Built-in:** `bearer`, `header`, `query`, `basic` for any HTTP API.
+- **Catalog** (`templates/catalog.json`, Apache-2.0): ~50 common services — OpenAI, Anthropic, Gemini, Mistral, Groq, DeepSeek, GitHub, GitLab, Cloudflare, Vercel, Stripe, Slack, Notion, Jira, Linear, Twilio, SendGrid and more. Edit `scripts/build-catalog.mjs` and run `npm run templates:build`. Corrections and additions are welcome.
+- **Optional n8n import:** if you have an n8n checkout, `npm run templates:import -- /path/to/n8n` generates `templates/n8n-catalog.json` (~400 more services) **for your own use only** — n8n's Sustainable Use License does not allow redistributing it, so it is git-ignored and never shipped.
+
+### Credential kinds
+
+| Kind | Set up with | Agent receives |
+|---|---|---|
+| `static` | `credential_set` (template or value) | proxied responses, or the value via `credential_get` |
+| `oauth2` | `credential_oauth_login` (presets: google, github, microsoft, outlook, outlook_graph, gitlab, dropbox; any OIDC issuer; manual endpoints) | access token (auto-refreshed) or proxied responses |
+| `google_service_account` | `credential_setup_google_service_account` | 1-hour access token (scopes limited to those configured) |
+| `github_app` | `credential_setup_github_app` | 1-hour installation token (optionally narrowed) |
+| `jwt` | `credential_setup_jwt` | short-lived signed JWT |
+| `totp` | `credential_setup_totp` | the current code |
+| `aws` | `credential_setup_aws` | STS temporary credentials (AssumeRole, TOTP-based MFA) |
+
+Long-term secrets of protocol credentials (client secrets, refresh tokens, private keys, TOTP seeds, AWS secret keys) never leave the root helper.
+
+> Personal Outlook.com accounts: IMAP with OAuth is currently broken on Microsoft's side ("User is authenticated but not connected", since Dec 2024). Use the `outlook_graph` preset (Microsoft Graph) instead.
+
+## Tools
+
+| Tool | Purpose |
+|---|---|
+| `credential_status` / `credential_unlock` / `credential_lock` | Session state; Touch ID unlock (optionally granting a credential); lock |
+| `credential_settings` | View / change the grant mode |
+| `credential_audit_log` | Query the audit log |
+| `credential_list` / `credential_list_types` / `credential_get` | List metadata; read a static value (unless proxy-only) |
+| `credential_set` / `credential_delete` / `credential_create_type` / `credential_delete_type` | Manage credentials |
+| `credential_templates` | Search templates |
+| `credential_http_request` / `credential_test` / `credential_configure_http` | Proxy calls, verification, proxy configuration |
+| `credential_oauth_login` / `credential_access_token` | OAuth authorization; short-lived tokens |
+| `credential_setup_google_service_account` / `_github_app` / `_jwt` / `_totp` / `_aws` | Protocol credentials |
+| `credential_totp_code` / `credential_aws_credentials` | TOTP code; AWS temporary credentials |
+| `credential_imap_test` / `credential_graph_mail_test` | Verify mailbox access (IMAP XOAUTH2 / Microsoft Graph) |
+
+## CLI (for you, in a terminal)
+
+```sh
+keyvalet set api_key openai               # hidden input; or: pbpaste | keyvalet set token github
+keyvalet list
+keyvalet get api_key openai
+keyvalet audit 20
+keyvalet grant-mode per-credential        # or: all
+```
+
+Each command runs through `sudo -k`, so it asks for your password every time.
+
+## Development
+
+```sh
+npm install
+npm test          # unit + integration tests in temp dirs with local mock servers; no root needed
+```
+
+Layout: `src/server` (MCP server, runs as you) · `src/helper` (root helper: vault, protocols, proxy, Touch ID gate) · `src/native/touchid.swift` · `src/cli` · `scripts/` (install, catalog build, optional n8n import).
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+[Apache-2.0](LICENSE). The optional n8n-derived catalog you may generate locally is subject to n8n's license and is not part of this project.

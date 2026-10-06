@@ -1,0 +1,22 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm test
+      - name: Catalog is up to date
+        run: |
+          npm run --silent templates:build
+          git diff --exit-code templates/catalog.json
+      - name: Touch ID helper compiles
+        run: swiftc -O -o /tmp/touchid src/native/touchid.swift

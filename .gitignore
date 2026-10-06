@@ -1,0 +1,4 @@
+node_modules/
+dist/
+.claude/
+templates/n8n-catalog.json

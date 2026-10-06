@@ -1,0 +1,1370 @@
+{
+ "source": "keyvalet",
+ "license": "Apache-2.0",
+ "note": "依据各服务官方 API 文档整理；由 scripts/build-catalog.mjs 生成",
+ "templates": [
+  {
+   "id": "openai",
+   "name": "OpenAI",
+   "fields": [
+    {
+     "name": "apiKey",
+     "label": "API Key",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{apiKey}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.openai.com/v1/models"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.openai.com"
+   ]
+  },
+  {
+   "id": "anthropic",
+   "name": "Anthropic (Claude)",
+   "fields": [
+    {
+     "name": "apiKey",
+     "label": "API Key",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "x-api-key": "{{apiKey}}",
+     "anthropic-version": "2023-06-01"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.anthropic.com/v1/models"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.anthropic.com"
+   ]
+  },
+  {
+   "id": "google_gemini",
+   "name": "Google Gemini API (AI Studio)",
+   "fields": [
+    {
+     "name": "apiKey",
+     "label": "API Key",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "x-goog-api-key": "{{apiKey}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://generativelanguage.googleapis.com/v1beta/models"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "generativelanguage.googleapis.com"
+   ]
+  },
+  {
+   "id": "mistral",
+   "name": "Mistral AI",
+   "fields": [
+    {
+     "name": "apiKey",
+     "label": "API Key",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{apiKey}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.mistral.ai/v1/models"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.mistral.ai"
+   ]
+  },
+  {
+   "id": "groq",
+   "name": "Groq",
+   "fields": [
+    {
+     "name": "apiKey",
+     "label": "API Key",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{apiKey}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.groq.com/openai/v1/models"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.groq.com"
+   ]
+  },
+  {
+   "id": "deepseek",
+   "name": "DeepSeek",
+   "fields": [
+    {
+     "name": "apiKey",
+     "label": "API Key",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{apiKey}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.deepseek.com/models"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.deepseek.com"
+   ]
+  },
+  {
+   "id": "xai",
+   "name": "xAI (Grok)",
+   "fields": [
+    {
+     "name": "apiKey",
+     "label": "API Key",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{apiKey}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.x.ai/v1/models"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.x.ai"
+   ]
+  },
+  {
+   "id": "openrouter",
+   "name": "OpenRouter",
+   "fields": [
+    {
+     "name": "apiKey",
+     "label": "API Key",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{apiKey}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://openrouter.ai/api/v1/key"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "openrouter.ai"
+   ]
+  },
+  {
+   "id": "together",
+   "name": "Together AI",
+   "fields": [
+    {
+     "name": "apiKey",
+     "label": "API Key",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{apiKey}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.together.xyz/v1/models"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.together.xyz"
+   ]
+  },
+  {
+   "id": "cohere",
+   "name": "Cohere",
+   "fields": [
+    {
+     "name": "apiKey",
+     "label": "API Key",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{apiKey}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.cohere.com/v1/models"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.cohere.com"
+   ]
+  },
+  {
+   "id": "perplexity",
+   "name": "Perplexity",
+   "fields": [
+    {
+     "name": "apiKey",
+     "label": "API Key",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{apiKey}}"
+    }
+   },
+   "hosts": [
+    "api.perplexity.ai"
+   ],
+   "source": "catalog",
+   "kind": "static"
+  },
+  {
+   "id": "huggingface",
+   "name": "Hugging Face",
+   "fields": [
+    {
+     "name": "token",
+     "label": "Access Token",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{token}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://huggingface.co/api/whoami-v2"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "huggingface.co"
+   ]
+  },
+  {
+   "id": "replicate",
+   "name": "Replicate",
+   "fields": [
+    {
+     "name": "token",
+     "label": "API Token",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{token}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.replicate.com/v1/account"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.replicate.com"
+   ]
+  },
+  {
+   "id": "elevenlabs",
+   "name": "ElevenLabs",
+   "fields": [
+    {
+     "name": "apiKey",
+     "label": "API Key",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "xi-api-key": "{{apiKey}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.elevenlabs.io/v1/user"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.elevenlabs.io"
+   ]
+  },
+  {
+   "id": "pinecone",
+   "name": "Pinecone",
+   "fields": [
+    {
+     "name": "apiKey",
+     "label": "API Key",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Api-Key": "{{apiKey}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.pinecone.io/indexes"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.pinecone.io"
+   ]
+  },
+  {
+   "id": "tavily",
+   "name": "Tavily",
+   "fields": [
+    {
+     "name": "apiKey",
+     "label": "API Key",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{apiKey}}"
+    }
+   },
+   "hosts": [
+    "api.tavily.com"
+   ],
+   "source": "catalog",
+   "kind": "static"
+  },
+  {
+   "id": "firecrawl",
+   "name": "Firecrawl",
+   "fields": [
+    {
+     "name": "apiKey",
+     "label": "API Key",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{apiKey}}"
+    }
+   },
+   "hosts": [
+    "api.firecrawl.dev"
+   ],
+   "source": "catalog",
+   "kind": "static"
+  },
+  {
+   "id": "github",
+   "name": "GitHub (Personal Access Token)",
+   "fields": [
+    {
+     "name": "token",
+     "label": "Personal Access Token",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{token}}",
+     "X-GitHub-Api-Version": "2022-11-28"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.github.com/user"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.github.com"
+   ]
+  },
+  {
+   "id": "gitlab",
+   "name": "GitLab (Personal Access Token)",
+   "fields": [
+    {
+     "name": "apiUrl",
+     "label": "GitLab URL",
+     "secret": false,
+     "required": true,
+     "default": "https://gitlab.com"
+    },
+    {
+     "name": "token",
+     "label": "Personal Access Token",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "PRIVATE-TOKEN": "{{token}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "{{apiUrl}}/api/v4/user"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "gitlab.com"
+   ]
+  },
+  {
+   "id": "npm",
+   "name": "npm Registry",
+   "fields": [
+    {
+     "name": "token",
+     "label": "Access Token",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{token}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://registry.npmjs.org/-/whoami"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "registry.npmjs.org"
+   ]
+  },
+  {
+   "id": "vercel",
+   "name": "Vercel",
+   "fields": [
+    {
+     "name": "token",
+     "label": "Token",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{token}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.vercel.com/v2/user"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.vercel.com"
+   ]
+  },
+  {
+   "id": "netlify",
+   "name": "Netlify",
+   "fields": [
+    {
+     "name": "token",
+     "label": "Personal Access Token",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{token}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.netlify.com/api/v1/user"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.netlify.com"
+   ]
+  },
+  {
+   "id": "cloudflare",
+   "name": "Cloudflare (API Token)",
+   "fields": [
+    {
+     "name": "token",
+     "label": "API Token",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{token}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.cloudflare.com/client/v4/user/tokens/verify"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.cloudflare.com"
+   ]
+  },
+  {
+   "id": "digitalocean",
+   "name": "DigitalOcean",
+   "fields": [
+    {
+     "name": "token",
+     "label": "Personal Access Token",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{token}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.digitalocean.com/v2/account"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.digitalocean.com"
+   ]
+  },
+  {
+   "id": "supabase",
+   "name": "Supabase Management API",
+   "fields": [
+    {
+     "name": "token",
+     "label": "Access Token",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{token}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.supabase.com/v1/projects"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.supabase.com"
+   ]
+  },
+  {
+   "id": "sentry",
+   "name": "Sentry",
+   "fields": [
+    {
+     "name": "token",
+     "label": "Auth Token",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{token}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://sentry.io/api/0/"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "sentry.io"
+   ]
+  },
+  {
+   "id": "datadog",
+   "name": "Datadog",
+   "fields": [
+    {
+     "name": "apiUrl",
+     "label": "API URL（按站点，如 https://api.datadoghq.eu）",
+     "secret": false,
+     "required": true,
+     "default": "https://api.datadoghq.com"
+    },
+    {
+     "name": "apiKey",
+     "label": "API Key",
+     "secret": true,
+     "required": true
+    },
+    {
+     "name": "appKey",
+     "label": "Application Key",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "DD-API-KEY": "{{apiKey}}",
+     "DD-APPLICATION-KEY": "{{appKey}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "{{apiUrl}}/api/v1/validate"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.datadoghq.com"
+   ]
+  },
+  {
+   "id": "pagerduty",
+   "name": "PagerDuty",
+   "fields": [
+    {
+     "name": "apiKey",
+     "label": "REST API Key",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Token token={{apiKey}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.pagerduty.com/abilities"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.pagerduty.com"
+   ]
+  },
+  {
+   "id": "slack",
+   "name": "Slack (Bot / User Token)",
+   "fields": [
+    {
+     "name": "token",
+     "label": "Token (xoxb- / xoxp-)",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{token}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://slack.com/api/auth.test"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "slack.com"
+   ]
+  },
+  {
+   "id": "discord_bot",
+   "name": "Discord Bot",
+   "fields": [
+    {
+     "name": "token",
+     "label": "Bot Token",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bot {{token}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://discord.com/api/v10/users/@me"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "discord.com"
+   ]
+  },
+  {
+   "id": "twilio",
+   "name": "Twilio",
+   "fields": [
+    {
+     "name": "accountSid",
+     "label": "Account SID",
+     "secret": false,
+     "required": true
+    },
+    {
+     "name": "authToken",
+     "label": "Auth Token",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "basic": {
+     "username": "{{accountSid}}",
+     "password": "{{authToken}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.twilio.com/2010-04-01/Accounts/{{accountSid}}.json"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.twilio.com"
+   ]
+  },
+  {
+   "id": "sendgrid",
+   "name": "SendGrid",
+   "fields": [
+    {
+     "name": "apiKey",
+     "label": "API Key",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{apiKey}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.sendgrid.com/v3/scopes"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.sendgrid.com"
+   ]
+  },
+  {
+   "id": "resend",
+   "name": "Resend",
+   "fields": [
+    {
+     "name": "apiKey",
+     "label": "API Key",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{apiKey}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.resend.com/domains"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.resend.com"
+   ]
+  },
+  {
+   "id": "mailgun",
+   "name": "Mailgun",
+   "fields": [
+    {
+     "name": "apiUrl",
+     "label": "API URL（欧盟区：https://api.eu.mailgun.net）",
+     "secret": false,
+     "required": true,
+     "default": "https://api.mailgun.net"
+    },
+    {
+     "name": "apiKey",
+     "label": "API Key",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "basic": {
+     "username": "api",
+     "password": "{{apiKey}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "{{apiUrl}}/v3/domains"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.mailgun.net"
+   ]
+  },
+  {
+   "id": "postmark",
+   "name": "Postmark (Server Token)",
+   "fields": [
+    {
+     "name": "token",
+     "label": "Server API Token",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "X-Postmark-Server-Token": "{{token}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.postmarkapp.com/server"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.postmarkapp.com"
+   ]
+  },
+  {
+   "id": "stripe",
+   "name": "Stripe",
+   "fields": [
+    {
+     "name": "apiKey",
+     "label": "Secret Key",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{apiKey}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.stripe.com/v1/balance"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.stripe.com"
+   ]
+  },
+  {
+   "id": "hubspot",
+   "name": "HubSpot (Private App Token)",
+   "fields": [
+    {
+     "name": "token",
+     "label": "Access Token",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{token}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.hubapi.com/account-info/v3/details"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.hubapi.com"
+   ]
+  },
+  {
+   "id": "notion",
+   "name": "Notion (Internal Integration)",
+   "fields": [
+    {
+     "name": "token",
+     "label": "Integration Secret",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{token}}",
+     "Notion-Version": "2022-06-28"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.notion.com/v1/users/me"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.notion.com"
+   ]
+  },
+  {
+   "id": "airtable",
+   "name": "Airtable (Personal Access Token)",
+   "fields": [
+    {
+     "name": "token",
+     "label": "Personal Access Token",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{token}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.airtable.com/v0/meta/whoami"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.airtable.com"
+   ]
+  },
+  {
+   "id": "jira",
+   "name": "Jira Cloud / Atlassian (API Token)",
+   "fields": [
+    {
+     "name": "domain",
+     "label": "站点子域名（xxx.atlassian.net 中的 xxx）",
+     "secret": false,
+     "required": true
+    },
+    {
+     "name": "email",
+     "label": "Atlassian 账号邮箱",
+     "secret": false,
+     "required": true
+    },
+    {
+     "name": "apiToken",
+     "label": "API Token",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "basic": {
+     "username": "{{email}}",
+     "password": "{{apiToken}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://{{domain}}.atlassian.net/rest/api/3/myself"
+   },
+   "source": "catalog",
+   "kind": "static"
+  },
+  {
+   "id": "linear",
+   "name": "Linear (Personal API Key)",
+   "fields": [
+    {
+     "name": "apiKey",
+     "label": "API Key",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "{{apiKey}}"
+    }
+   },
+   "hosts": [
+    "api.linear.app"
+   ],
+   "source": "catalog",
+   "kind": "static"
+  },
+  {
+   "id": "asana",
+   "name": "Asana (Personal Access Token)",
+   "fields": [
+    {
+     "name": "token",
+     "label": "Personal Access Token",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "Bearer {{token}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://app.asana.com/api/1.0/users/me"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "app.asana.com"
+   ]
+  },
+  {
+   "id": "clickup",
+   "name": "ClickUp (Personal API Token)",
+   "fields": [
+    {
+     "name": "token",
+     "label": "API Token (pk_...)",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "{{token}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.clickup.com/api/v2/user"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.clickup.com"
+   ]
+  },
+  {
+   "id": "trello",
+   "name": "Trello",
+   "fields": [
+    {
+     "name": "apiKey",
+     "label": "API Key",
+     "secret": true,
+     "required": true
+    },
+    {
+     "name": "token",
+     "label": "Token",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "query": {
+     "key": "{{apiKey}}",
+     "token": "{{token}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.trello.com/1/members/me"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.trello.com"
+   ]
+  },
+  {
+   "id": "zendesk",
+   "name": "Zendesk (API Token)",
+   "fields": [
+    {
+     "name": "subdomain",
+     "label": "子域名（xxx.zendesk.com 中的 xxx）",
+     "secret": false,
+     "required": true
+    },
+    {
+     "name": "email",
+     "label": "代理人邮箱",
+     "secret": false,
+     "required": true
+    },
+    {
+     "name": "apiToken",
+     "label": "API Token",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "basic": {
+     "username": "{{email}}/token",
+     "password": "{{apiToken}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://{{subdomain}}.zendesk.com/api/v2/users/me.json"
+   },
+   "source": "catalog",
+   "kind": "static"
+  },
+  {
+   "id": "figma",
+   "name": "Figma (Personal Access Token)",
+   "fields": [
+    {
+     "name": "token",
+     "label": "Personal Access Token",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "X-Figma-Token": "{{token}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.figma.com/v1/me"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.figma.com"
+   ]
+  },
+  {
+   "id": "brave_search",
+   "name": "Brave Search API",
+   "fields": [
+    {
+     "name": "apiKey",
+     "label": "Subscription Token",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "X-Subscription-Token": "{{apiKey}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.search.brave.com/res/v1/web/search",
+    "query": {
+     "q": "keyvalet"
+    }
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.search.brave.com"
+   ]
+  },
+  {
+   "id": "serpapi",
+   "name": "SerpApi",
+   "fields": [
+    {
+     "name": "apiKey",
+     "label": "API Key",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "query": {
+     "api_key": "{{apiKey}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://serpapi.com/account.json"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "serpapi.com"
+   ]
+  },
+  {
+   "id": "openweathermap",
+   "name": "OpenWeatherMap",
+   "fields": [
+    {
+     "name": "apiKey",
+     "label": "API Key",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "query": {
+     "appid": "{{apiKey}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "https://api.openweathermap.org/data/2.5/weather",
+    "query": {
+     "q": "London"
+    }
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api.openweathermap.org"
+   ]
+  },
+  {
+   "id": "deepl",
+   "name": "DeepL",
+   "fields": [
+    {
+     "name": "apiUrl",
+     "label": "API URL（Pro 账号：https://api.deepl.com）",
+     "secret": false,
+     "required": true,
+     "default": "https://api-free.deepl.com"
+    },
+    {
+     "name": "apiKey",
+     "label": "Authentication Key",
+     "secret": true,
+     "required": true
+    }
+   ],
+   "inject": {
+    "headers": {
+     "Authorization": "DeepL-Auth-Key {{apiKey}}"
+    }
+   },
+   "test": {
+    "method": "GET",
+    "url": "{{apiUrl}}/v2/usage"
+   },
+   "source": "catalog",
+   "kind": "static",
+   "hosts": [
+    "api-free.deepl.com"
+   ]
+  }
+ ]
+}
