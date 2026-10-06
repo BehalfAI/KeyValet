@@ -5,16 +5,17 @@ import { cleanPurpose } from "../shared/protocol.js";
 import { validateHttpConfig } from "./http-config.js";
 import { confirmAsUser } from "./user-dialog.js";
 import { Vault, VaultError, type HttpConfig } from "./vault.js";
+import { t } from "../shared/i18n.js";
 
 const summarizeInject = (c?: HttpConfig) => {
   const r = c?.inject;
-  if (!r) return "（自动注入 access token）";
+  if (!r) return t("（自动注入 access token）", "(access token injected automatically)");
   const parts = [
-    ...Object.keys(r.headers ?? {}).map((h) => `请求头 ${h}`),
-    ...Object.keys(r.query ?? {}).map((q) => `查询参数 ${q}`),
-    ...(r.basic ? ["Basic 认证"] : []),
+    ...Object.keys(r.headers ?? {}).map((h) => t(`请求头 ${h}`, `header ${h}`)),
+    ...Object.keys(r.query ?? {}).map((q) => t(`查询参数 ${q}`, `query parameter ${q}`)),
+    ...(r.basic ? [t("Basic 认证", "Basic auth")] : []),
   ];
-  return parts.join("、");
+  return parts.join(t("、", ", "));
 };
 
 export async function configureHttp(vault: Vault, p: Record<string, unknown>) {
@@ -25,11 +26,15 @@ export async function configureHttp(vault: Vault, p: Record<string, unknown>) {
 
   if (p.remove === true) {
     if (!prev) return { type, name, http: null };
-    if (!(await confirmAsUser(`AI 会话请求删除凭证 ${label} 的代理调用配置${prev.proxy_only ? "（之后可以读出原始秘密）" : ""}。\n\n目的：${purpose.slice(0, 200)}`, "允许删除"))) {
-      throw new VaultError("用户拒绝了该修改");
+    const message = t(
+      `AI 会话请求删除凭证 ${label} 的代理调用配置${prev.proxy_only ? "（之后可以读出原始秘密）" : ""}。\n\n目的：${purpose.slice(0, 200)}`,
+      `An AI session is requesting to remove the proxy configuration of credential ${label}${prev.proxy_only ? " (the raw secret will then be readable)" : ""}.\n\nPurpose: ${purpose.slice(0, 200)}`,
+    );
+    if (!(await confirmAsUser(message, t("允许删除", "Allow Removal")))) {
+      throw new VaultError(t("用户拒绝了该修改", "The user denied this change"));
     }
     vault.updateHttp(type, name, (rec) => {
-      if (JSON.stringify(rec.http ?? null) !== JSON.stringify(prev)) throw new VaultError("配置在确认期间被修改，请重试");
+      if (JSON.stringify(rec.http ?? null) !== JSON.stringify(prev)) throw new VaultError(t("配置在确认期间被修改，请重试", "The configuration was modified during confirmation; please retry"));
       return undefined;
     });
     return { type, name, http: null };
@@ -50,15 +55,15 @@ export async function configureHttp(vault: Vault, p: Record<string, unknown>) {
   const injectChanged = JSON.stringify(next.inject ?? null) !== JSON.stringify(prev?.inject ?? null);
   const unlocking = !!prev?.proxy_only && !next.proxy_only;
   if (newHosts.length || injectChanged || unlocking) {
-    const lines = [`AI 会话请求修改凭证 ${label} 的代理调用配置：`, ""];
-    if (newHosts.length) lines.push(`• 新增允许发往的域名：${newHosts.join("、")}`);
-    if (injectChanged) lines.push(`• 注入方式：${summarizeInject(next)}`);
-    if (unlocking) lines.push("• 关闭「只能代理调用」：之后可以读出原始秘密");
-    lines.push("", `目的：${purpose.slice(0, 200)}`);
-    if (!(await confirmAsUser(lines.join("\n"), "允许"))) throw new VaultError("用户拒绝了该修改");
+    const lines = [t(`AI 会话请求修改凭证 ${label} 的代理调用配置：`, `An AI session is requesting to change the proxy configuration of credential ${label}:`), ""];
+    if (newHosts.length) lines.push(t(`• 新增允许发往的域名：${newHosts.join("、")}`, `• New allowed hosts: ${newHosts.join(", ")}`));
+    if (injectChanged) lines.push(t(`• 注入方式：${summarizeInject(next)}`, `• Injection: ${summarizeInject(next)}`));
+    if (unlocking) lines.push(t("• 关闭「只能代理调用」：之后可以读出原始秘密", `• Turn off "proxy only": the raw secret will then be readable`));
+    lines.push("", t(`目的：${purpose.slice(0, 200)}`, `Purpose: ${purpose.slice(0, 200)}`));
+    if (!(await confirmAsUser(lines.join("\n"), t("允许", "Allow")))) throw new VaultError(t("用户拒绝了该修改", "The user denied this change"));
   }
   vault.updateHttp(type, name, (rec) => {
-    if (JSON.stringify(rec.http ?? null) !== JSON.stringify(prev ?? null)) throw new VaultError("配置在确认期间被修改，请重试");
+    if (JSON.stringify(rec.http ?? null) !== JSON.stringify(prev ?? null)) throw new VaultError(t("配置在确认期间被修改，请重试", "The configuration was modified during confirmation; please retry"));
     return next;
   });
   return { type, name, http: { allowed_hosts: next.allowed_hosts, proxy_only: next.proxy_only, inject: summarizeInject(next), can_test: !!next.test } };

@@ -6,6 +6,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import { lang, t } from "../shared/i18n.js";
 import { HELPER_JS, INSTALL_DIR, NODE_BIN, SUDO_BIN, SUDOERS_FILE, TOUCHID_BIN } from "../shared/paths.js";
 import { GRANT_REQUIRED_PREFIX, PROTOCOL_VERSION, cleanPurpose, type AuthMessage, type Op, type Request, type Response } from "../shared/protocol.js";
 
@@ -89,7 +90,7 @@ export class HelperSession {
     this.ttlTimer = null;
     for (const p of this.pending.values()) {
       clearTimeout(p.timer);
-      p.reject(new SessionError("凭证库已锁定"));
+      p.reject(new SessionError(t("凭证库已锁定", "Credential vault is locked")));
     }
     this.pending.clear();
     if (child) {
@@ -98,10 +99,12 @@ export class HelperSession {
     }
   }
 
-  async request<T>(op: Op, params: Record<string, unknown>, unlockPurpose = "查看凭证库", target?: CredentialTarget): Promise<T> {
+  async request<T>(op: Op, params: Record<string, unknown>, unlockPurpose = t("查看凭证库", "View the credential vault"), target?: CredentialTarget): Promise<T> {
     await this.unlock(unlockPurpose, target);
+    // 代理调用可能是持续数分钟的流式响应（helper 端上限 180 秒）
+    const timeout = op === "httpRequest" || op === "httpTest" ? 200_000 : undefined;
     try {
-      return await this.send<T>(op, params);
+      return await this.send<T>(op, params, timeout);
     } catch (e) {
       // per_credential 模式：该凭证尚未授权 → 弹 Touch ID 授权后重试一次
       const msg = (e as Error).message;
@@ -109,7 +112,7 @@ export class HelperSession {
       const key = msg.slice(GRANT_REQUIRED_PREFIX.length).trim();
       const slash = key.indexOf("/");
       await this.grant(key.slice(0, slash), key.slice(slash + 1), unlockPurpose);
-      return this.send<T>(op, params);
+      return this.send<T>(op, params, timeout);
     }
   }
 
@@ -126,13 +129,13 @@ export class HelperSession {
 
   private send<T>(op: Op, params: Record<string, unknown>, timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> {
     const child = this.child;
-    if (!child || !this.ready) return Promise.reject(new SessionError("凭证库未解锁"));
+    if (!child || !this.ready) return Promise.reject(new SessionError(t("凭证库未解锁", "Credential vault is not unlocked")));
     const id = this.nextId++;
     const req: Request = { id, op, params };
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new SessionError("helper 响应超时"));
+        reject(new SessionError(t("helper 响应超时", "Helper response timed out")));
       }, timeoutMs);
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timer });
       child.stdin.write(JSON.stringify(req) + "\n");
@@ -143,10 +146,10 @@ export class HelperSession {
     const now = Date.now();
     if (now < this.cooldownUntil) {
       const s = Math.ceil((this.cooldownUntil - now) / 1000);
-      throw new SessionError(`上次认证失败或被取消，请 ${s} 秒后再试`);
+      throw new SessionError(t(`上次认证失败或被取消，请 ${s} 秒后再试`, `The last authentication failed or was cancelled. Try again in ${s} seconds.`));
     }
     const purpose = cleanPurpose(purposeIn);
-    if (!purpose) throw new SessionError("必须说明解锁目的（purpose）");
+    if (!purpose) throw new SessionError(t("必须说明解锁目的（purpose）", "An unlock purpose (purpose) is required"));
     const problem = installProblem();
     if (problem) throw new SessionError(problem);
 
@@ -177,6 +180,7 @@ export class HelperSession {
       ppid: process.ppid,
       session: this.sessionId,
       client: "keyvalet",
+      lang: lang(),
       ...(target?.name ? { credential: { type: target.type, name: target.name } } : {}),
     };
     child.stdin.write(JSON.stringify(auth) + "\n");
@@ -191,7 +195,7 @@ export class HelperSession {
         if (this.child === child) this.lock();
         reject(new SessionError(msg));
       };
-      const timer = setTimeout(() => fail("等待 Touch ID 认证超时"), UNLOCK_TIMEOUT_MS);
+      const timer = setTimeout(() => fail(t("等待 Touch ID 认证超时", "Timed out waiting for Touch ID authentication")), UNLOCK_TIMEOUT_MS);
 
       let buf = "";
       child.stdout.setEncoding("utf8");
@@ -205,12 +209,12 @@ export class HelperSession {
           try {
             msg = JSON.parse(line);
           } catch {
-            return fail("helper 输出了非法数据");
+            return fail(t("helper 输出了非法数据", "Helper produced invalid output"));
           }
           if (!settled) {
             const m = msg as { ready?: boolean; protocol?: number; error?: string };
-            if (m.protocol !== PROTOCOL_VERSION) return fail("helper 版本不匹配，请重新安装");
-            if (m.ready !== true) return fail(m.error ?? "解锁失败");
+            if (m.protocol !== PROTOCOL_VERSION) return fail(t("helper 版本不匹配，请重新安装", "Helper version mismatch; please reinstall"));
+            if (m.ready !== true) return fail(m.error ?? t("解锁失败", "Unlock failed"));
             settled = true;
             clearTimeout(timer);
             this.ready = true;
@@ -224,7 +228,7 @@ export class HelperSession {
         }
       });
 
-      child.on("error", (e) => fail(`无法启动 sudo：${e.message}`));
+      child.on("error", (e) => fail(t(`无法启动 sudo：${e.message}`, `Cannot start sudo: ${e.message}`)));
       child.on("exit", () => {
         if (!settled) return fail(describeSudoFailure(stderr));
         if (this.child === child) this.lock();
@@ -243,10 +247,10 @@ export class HelperSession {
 }
 
 function describeSudoFailure(stderr: string): string {
-  if (/password is required/i.test(stderr)) return "免密规则未生效（/etc/sudoers.d/keyvalet），请重新运行 ./scripts/install.sh";
-  if (/not in the sudoers|not allowed/i.test(stderr)) return "当前用户没有运行 helper 的 sudo 权限，请重新运行 ./scripts/install.sh";
+  if (/password is required/i.test(stderr)) return t("免密规则未生效（/etc/sudoers.d/keyvalet），请重新运行 ./scripts/install.sh", "The passwordless sudo rule (/etc/sudoers.d/keyvalet) is not in effect; please re-run ./scripts/install.sh");
+  if (/not in the sudoers|not allowed/i.test(stderr)) return t("当前用户没有运行 helper 的 sudo 权限，请重新运行 ./scripts/install.sh", "The current user is not allowed to run the helper via sudo; please re-run ./scripts/install.sh");
   const tail = stderr.trim().split("\n").slice(-3).join(" | ");
-  return `解锁失败${tail ? `：${tail}` : ""}`;
+  return t(`解锁失败${tail ? `：${tail}` : ""}`, `Unlock failed${tail ? `: ${tail}` : ""}`);
 }
 
 /** 检查安装：要以 root 运行的文件必须存在、属于 root、不可被他人写 */
@@ -256,10 +260,10 @@ function installProblem(): string | null {
     try {
       st = fs.lstatSync(p);
     } catch {
-      return `未安装或安装不完整：缺少 ${p}。请在项目目录运行 ./scripts/install.sh`;
+      return t(`未安装或安装不完整：缺少 ${p}。请在项目目录运行 ./scripts/install.sh`, `Not installed or installation incomplete: missing ${p}. Run ./scripts/install.sh in the project directory.`);
     }
     if (st.uid !== 0 || (st.mode & 0o022) !== 0 || st.isSymbolicLink()) {
-      return `安装不安全：${p} 必须属于 root 且不可被他人写。请重新运行 ./scripts/install.sh`;
+      return t(`安装不安全：${p} 必须属于 root 且不可被他人写。请重新运行 ./scripts/install.sh`, `Insecure installation: ${p} must be owned by root and not writable by others. Please re-run ./scripts/install.sh`);
     }
   }
   return null;

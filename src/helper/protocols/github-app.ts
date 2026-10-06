@@ -1,5 +1,6 @@
 // GitHub App：用 App 私钥签 JWT，换取 1 小时有效的 installation access token。
 
+import { t } from "../../shared/i18n.js";
 import { Vault, VaultError, type CredentialRecord } from "../vault.js";
 import { nowSec, str, strList } from "./check.js";
 import { assertHttpsUrl, httpRequest, obj, remoteError } from "./http.js";
@@ -20,9 +21,9 @@ interface CachedToken {
 
 export function validateGitHubAppSetup(config: Record<string, unknown>, secrets: Record<string, unknown>) {
   const appId = str(String(config.app_id ?? ""), "app_id", 100);
-  if (!/^(\d+|Iv[0-9A-Za-z.]+)$/.test(appId)) throw new VaultError("app_id 应为数字 App ID 或 Client ID（Iv 开头）");
+  if (!/^(\d+|Iv[0-9A-Za-z.]+)$/.test(appId)) throw new VaultError(t("app_id 应为数字 App ID 或 Client ID（Iv 开头）", "app_id must be a numeric App ID or a Client ID (starting with Iv)"));
   const inst = config.installation_id == null || config.installation_id === "" ? undefined : String(config.installation_id);
-  if (inst !== undefined && !/^\d+$/.test(inst)) throw new VaultError("installation_id 必须是数字");
+  if (inst !== undefined && !/^\d+$/.test(inst)) throw new VaultError(t("installation_id 必须是数字", "installation_id must be numeric"));
   const cfg: GitHubAppConfig = {
     app_id: appId,
     installation_id: inst,
@@ -42,13 +43,13 @@ export async function gitHubAppToken(
   vault: Vault,
   p: { type: unknown; name: unknown; repositories?: unknown; permissions?: unknown; force?: unknown },
 ) {
-  const { type: t, name: n, record } = vault.getRecord(p.type, p.name);
-  if (record.kind !== "github_app") throw new VaultError(`"${t}/${n}" 不是 GitHub App 凭证`);
+  const { type: ty, name: n, record } = vault.getRecord(p.type, p.name);
+  if (record.kind !== "github_app") throw new VaultError(t(`"${ty}/${n}" 不是 GitHub App 凭证`, `"${ty}/${n}" is not a GitHub App credential`));
   const cfg = record.config as unknown as GitHubAppConfig;
   const repositories = strList(p.repositories, "repositories", 100);
   const permissions = p.permissions == null ? undefined : (p.permissions as Record<string, unknown>);
   if (permissions !== undefined && (typeof permissions !== "object" || Array.isArray(permissions))) {
-    throw new VaultError("permissions 必须是对象，如 {\"contents\": \"read\"}");
+    throw new VaultError(t("permissions 必须是对象，如 {\"contents\": \"read\"}", "permissions must be an object, e.g. {\"contents\": \"read\"}"));
   }
   const narrowed = repositories.length > 0 || permissions !== undefined;
 
@@ -65,8 +66,14 @@ export async function gitHubAppToken(
     if (r.status >= 300 || !Array.isArray(r.json)) throw remoteError(new URL(cfg.api_base_url).host, r);
     const list = r.json as Array<{ id: number; account?: { login?: string } }>;
     if (list.length !== 1) {
-      const desc = list.map((i) => `${i.id}（${i.account?.login ?? "?"}）`).join("、") || "无";
-      throw new VaultError(`该 App 有 ${list.length} 个 installation：${desc}。请重新设置并指定 installation_id。`);
+      const desc =
+        list.map((i) => t(`${i.id}（${i.account?.login ?? "?"}）`, `${i.id} (${i.account?.login ?? "?"})`)).join(t("、", ", ")) || t("无", "none");
+      throw new VaultError(
+        t(
+          `该 App 有 ${list.length} 个 installation：${desc}。请重新设置并指定 installation_id。`,
+          `This App has ${list.length} installation(s): ${desc}. Set it up again and specify installation_id.`,
+        ),
+      );
     }
     installationId = String(list[0]!.id);
   }
@@ -88,7 +95,7 @@ export async function gitHubAppToken(
     repository_selection: j.repository_selection,
   };
   if (!narrowed) {
-    vault.patchRecord(t, n, "github_app", record.generation, (rec: CredentialRecord) => {
+    vault.patchRecord(ty, n, "github_app", record.generation, (rec: CredentialRecord) => {
       rec.state = { ...rec.state, token: tok, installation_id: installationId };
     });
   }

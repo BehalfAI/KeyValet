@@ -78,7 +78,7 @@ export function injectStrings(rule: InjectRule | undefined): string[] {
 export const BUILTIN_TEMPLATES: CredentialTemplate[] = [
   {
     id: "bearer",
-    name: "通用 Bearer Token（Authorization: Bearer <token>）",
+    name: "Generic Bearer token (Authorization: Bearer <token>)",
     source: "builtin",
     kind: "static",
     fields: [{ name: "token", label: "Token", secret: true, required: true }],
@@ -86,11 +86,11 @@ export const BUILTIN_TEMPLATES: CredentialTemplate[] = [
   },
   {
     id: "header",
-    name: "通用请求头认证（自定义头名，如 X-Api-Key）",
+    name: "Generic header auth (custom header name, e.g. X-Api-Key)",
     source: "builtin",
     kind: "static",
     fields: [
-      { name: "headerName", label: "请求头名称", secret: false, required: true, default: "X-Api-Key" },
+      { name: "headerName", label: "Header name", secret: false, required: true, default: "X-Api-Key" },
       { name: "key", label: "Key", secret: true, required: true },
     ],
     // 头名称来自字段值，由 helper 在设置时展开为固定规则
@@ -98,23 +98,23 @@ export const BUILTIN_TEMPLATES: CredentialTemplate[] = [
   },
   {
     id: "query",
-    name: "通用查询参数认证（如 ?api_key=...）",
+    name: "Generic query parameter auth (e.g. ?api_key=...)",
     source: "builtin",
     kind: "static",
     fields: [
-      { name: "paramName", label: "参数名", secret: false, required: true, default: "api_key" },
+      { name: "paramName", label: "Parameter name", secret: false, required: true, default: "api_key" },
       { name: "key", label: "Key", secret: true, required: true },
     ],
     inject: { query: { "{{paramName}}": "{{key}}" } },
   },
   {
     id: "basic",
-    name: "通用 HTTP Basic 认证（用户名 + 密码）",
+    name: "Generic HTTP Basic auth (username + password)",
     source: "builtin",
     kind: "static",
     fields: [
-      { name: "user", label: "用户名", secret: false, required: true },
-      { name: "password", label: "密码", secret: true, required: true },
+      { name: "user", label: "Username", secret: false, required: true },
+      { name: "password", label: "Password", secret: true, required: true },
     ],
     inject: { basic: { username: "{{user}}", password: "{{password}}" } },
   },

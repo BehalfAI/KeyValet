@@ -4,6 +4,7 @@
 import tls from "node:tls";
 
 import { readLimited } from "../helper/protocols/http.js";
+import { t } from "../shared/i18n.js";
 
 export const IMAP_HOSTS: Record<string, string> = {
   outlook: "outlook.office365.com",
@@ -43,9 +44,9 @@ export function imapXoauth2Test(opts: {
     const socket = tls.connect({ host, port: opts.port ?? 993, servername: host, ca: opts.ca });
     socket.setTimeout(opts.timeoutMs ?? 20_000, () => {
       socket.destroy();
-      reject(new Error(`连接 ${host} 超时`));
+      reject(new Error(t(`连接 ${host} 超时`, `Connection to ${host} timed out`)));
     });
-    socket.on("error", (e) => reject(new Error(`连接 ${host} 失败：${e.message}`)));
+    socket.on("error", (e) => reject(new Error(t(`连接 ${host} 失败：${e.message}`, `Connection to ${host} failed: ${e.message}`))));
 
     let buf = "";
     let stage: "greeting" | "auth" | "examine" | "logout" = "greeting";
@@ -61,14 +62,14 @@ export function imapXoauth2Test(opts: {
       buf += chunk;
       if (buf.length > 1_000_000) {
         socket.destroy();
-        return reject(new Error("IMAP 响应过大"));
+        return reject(new Error(t("IMAP 响应过大", "IMAP response too large")));
       }
       let nl: number;
       while ((nl = buf.indexOf("\r\n")) >= 0) {
         const line = buf.slice(0, nl);
         buf = buf.slice(nl + 2);
         if (stage === "greeting") {
-          if (!line.startsWith("* OK")) return done({ authenticated: false, host, username, server_error: `意外的问候：${line.slice(0, 200)}` });
+          if (!line.startsWith("* OK")) return done({ authenticated: false, host, username, server_error: t(`意外的问候：${line.slice(0, 200)}`, `Unexpected greeting: ${line.slice(0, 200)}`) });
           stage = "auth";
           socket.write(`A1 AUTHENTICATE XOAUTH2 ${xoauth2(username, opts.accessToken)}\r\n`);
         } else if (stage === "auth") {

@@ -6,7 +6,7 @@ KeyValet is a local credential broker for AI agents on macOS. It lets agents suc
 
 [简体中文](README.zh-CN.md) · [Security model](SECURITY.md)
 
-> **Status:** early (0.1). macOS only. User-facing messages are currently in Chinese — English localization is a welcome contribution.
+> **Status:** early (0.1). macOS only. UI in English and 简体中文 — follows your macOS language; override with `KEYVALET_LANG=en|zh`.
 
 ---
 
@@ -39,6 +39,7 @@ KeyValet's answer: **secrets stay on your machine, owned by root. Agents ask; yo
 ```
 
 - **Use, don't see.** `credential_http_request` makes the HTTP call inside the root helper with the key/token injected; the agent only gets the (redacted) response.
+- **SDKs and streaming too.** `credential_gateway` gives programs that can't speak MCP a per-session local endpoint (`OPENAI_BASE_URL=…`). Streaming responses flow through, redacted on the fly; the program never holds the real key.
 - **You're in the loop.** By default every credential needs its own Touch ID approval, and the prompt shows *which* credential and *why*.
 - **Audited.** Every unlock, read, token fetch and proxied call is logged with session, purpose and result (never the secret). Agents can query the log.
 - **Local and root-isolated.** AES-256-GCM vault readable only by root; code that runs as root is installed root-owned and self-verifies before running.
@@ -86,6 +87,16 @@ credential_http_request { name: "main", url: "https://api.openai.com/v1/models",
 credential_audit_log    { this_session_only: true }
 ```
 
+Programs and SDKs (streaming works):
+
+```text
+credential_gateway { name: "main", purpose: "Run the summarizer script" }
+  → { sdk_env: { OPENAI_BASE_URL: "http://127.0.0.1:52011/<session-token>/api.openai.com/v1", OPENAI_API_KEY: "keyvalet" } }
+```
+```sh
+OPENAI_BASE_URL=… OPENAI_API_KEY=keyvalet python summarize.py   # streams; the script never sees the real key
+```
+
 OAuth example (browser flow with PKCE; the refresh token stays in the vault):
 
 ```text
@@ -118,7 +129,12 @@ Every tool that reads, uses or changes a credential **requires** a `purpose`. It
 - `proxy_only: true` makes `credential_get` and `credential_access_token` refuse to return the raw secret.
 - Expanding exposure (new hosts, changed injection, turning off proxy-only, removing the config), overwriting and deleting credentials all require **your** confirmation in a dialog shown by the root helper itself — not just by the MCP server.
 
-When proxying isn't possible (databases, SSH, SDKs/CLIs that need the key, streaming responses), `credential_get` still returns the value after your approval.
+### Streaming and the local gateway
+
+- `credential_http_request` reads streaming (SSE) responses in full and returns the text assembled from LLM deltas in `stream.text` (OpenAI Chat Completions and Responses, Anthropic, Gemini formats).
+- `credential_gateway` opens a per-session gateway on `127.0.0.1` for programs: `http://127.0.0.1:<port>/<token>/<host>/<path>` → `https://<host>/<path>`. The gateway drops whatever auth headers the program sends, injects the real credential, enforces the host allowlist, never follows redirects, and redacts responses while streaming (it holds back only bytes that could be the start of a secret). The token is random per credential and session, requests must target `127.0.0.1`/`localhost` (DNS-rebinding protection), and every request is audited. For known templates it returns ready-to-use SDK environment variables.
+
+When neither fits (databases, SSH, tools that insist on reading the key), `credential_get` still returns the value after your approval.
 
 ### Templates
 
@@ -152,7 +168,8 @@ Long-term secrets of protocol credentials (client secrets, refresh tokens, priva
 | `credential_list` / `credential_list_types` / `credential_get` | List metadata; read a static value (unless proxy-only) |
 | `credential_set` / `credential_delete` / `credential_create_type` / `credential_delete_type` | Manage credentials |
 | `credential_templates` | Search templates |
-| `credential_http_request` / `credential_test` / `credential_configure_http` | Proxy calls, verification, proxy configuration |
+| `credential_http_request` / `credential_test` / `credential_configure_http` | Proxy calls (incl. SSE), verification, proxy configuration |
+| `credential_gateway` | Local gateway URL for SDKs/CLIs, with streaming |
 | `credential_oauth_login` / `credential_access_token` | OAuth authorization; short-lived tokens |
 | `credential_setup_google_service_account` / `_github_app` / `_jwt` / `_totp` / `_aws` | Protocol credentials |
 | `credential_totp_code` / `credential_aws_credentials` | TOTP code; AWS temporary credentials |

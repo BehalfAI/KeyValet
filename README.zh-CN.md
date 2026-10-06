@@ -6,12 +6,13 @@ KeyValet 是一个运行在 macOS 本机的「AI agent 凭证代理」。Claude 
 
 [English](README.md) · [安全模型](SECURITY.md)
 
-> **状态**：早期版本（0.1），仅支持 macOS。
+> **状态**：早期版本（0.1），仅支持 macOS。界面支持英文和简体中文，跟随 macOS 系统语言；也可以用 `KEYVALET_LANG=en|zh` 指定。
 
 它能做的：
 
 - 保存 API key、密码、token；支持 OAuth 2.0、Google 服务账号、GitHub App、JWT、TOTP、AWS STS 等协议。协议凭证的长期秘密永不离开 root 进程，agent 只能拿到短期 token；
 - **代理调用**：由 KeyValet 把凭证注入请求并发出，agent 只拿到响应，全程看不到 key；
+- **本地网关**：SDK、脚本这类不能走 MCP 的程序，可以把 base URL 指向 KeyValet 的会话网关。支持流式输出，程序拿不到真实 key；
 - 默认**按凭证授权**：每个凭证单独按一次 Touch ID，弹窗写明是哪个凭证、做什么用；没有指纹时，系统认证框会改为要求输入登录密码；
 - session 结束，授权随之失效；
 - 每次读取、使用、修改凭证都必须说明目的，并记入审计日志，agent 可以查询；
@@ -192,7 +193,21 @@ credential_configure_http {
 }
 ```
 
-代理覆盖不了的场景，仍然用 `credential_get` 读原值：数据库、SSH 等非 HTTP 协议；需要把 key 交给 SDK 或命令行工具；流式响应。
+### 流式响应与本地网关
+
+- `credential_http_request` 会完整接收流式（SSE）响应，并在 `stream.text` 里返回从大模型增量拼出的完整文本。支持 OpenAI（Chat Completions 和 Responses）、Anthropic、Gemini 的格式。
+- `credential_gateway` 为程序开通本会话专属的本地网关：`http://127.0.0.1:<端口>/<令牌>/<域名>/<路径>` → `https://<域名>/<路径>`。
+  - 网关会去掉程序自己带的认证头，注入真实凭证；只发往白名单域名，不跟随重定向；
+  - 响应边转发边脱敏：只扣留「可能是秘密开头」的那几个字节，所以流式输出几乎没有延迟；
+  - 令牌按凭证、按会话随机生成；只接受访问 `127.0.0.1` / `localhost` 的请求（防 DNS 重绑定）；每次请求都会记入审计；
+  - 对常见模板，会直接给出 SDK 要设置的环境变量，比如 `OPENAI_BASE_URL`。
+
+```sh
+# agent 调用 credential_gateway 拿到地址后：
+OPENAI_BASE_URL=http://127.0.0.1:52011/<令牌>/api.openai.com/v1 OPENAI_API_KEY=keyvalet python summarize.py
+```
+
+两者都用不了的场景，比如数据库、SSH，或者一定要读取 key 的工具，仍然用 `credential_get` 读原值。
 
 ## 授权范围：每次一个，还是一次全部
 
@@ -238,7 +253,8 @@ credential_configure_http {
 | `credential_aws_credentials` | 获取 AWS 临时凭证 |
 | `credential_imap_test` | 用 OAuth 凭证以 XOAUTH2 登录 IMAP，验证邮箱授权 |
 | `credential_templates` | 搜索凭证模板 |
-| `credential_http_request` | 代理调用：注入凭证后发出 HTTP 请求，只返回响应 |
+| `credential_http_request` | 代理调用：注入凭证后发出 HTTP 请求，只返回响应；支持流式（SSE）响应 |
+| `credential_gateway` | 为 SDK 或命令行开通本地网关，支持流式输出 |
 | `credential_test` | 用验证请求检查凭证是否有效 |
 | `credential_configure_http` | 设置或修改代理配置：允许的域名、注入规则、验证请求、只能代理调用 |
 | `credential_graph_mail_test` | 用 OAuth 凭证通过 Microsoft Graph 只读查看邮件夹，验证邮箱授权 |

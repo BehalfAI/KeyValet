@@ -1,5 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { t } from "../../shared/i18n.js";
+import { SECRET_REBIND_MARK } from "../../shared/protocol.js";
 import { oauthProviderNames, resolveOAuthProvider } from "../templates.js";
 import { promptSecret, showNotice } from "../dialog.js";
 import { xoauth2 } from "../mail.js";
@@ -7,18 +9,20 @@ import { copyToClipboard, discoverOidc, openInBrowser, runBrowserFlow } from "..
 import type { HelperSession } from "../session.js";
 import { CLIENT_ID_RE, fail, guardOverwrite, httpsHost, importFile, norm, ok, purposeField, resolveType, safeDisplay, tryInfo, wrap } from "./common.js";
 
-const nameField = z.string().describe("凭证名（小写），如 google-work、github-bot");
-const optType = (kind: string) => z.string().optional().describe(`凭证类型，默认 "${kind}"（不存在时自动创建）`);
-const descField = z.string().optional().describe("凭证说明");
-const overwriteField = z.boolean().optional().describe("已存在时替换（会弹窗请用户确认）");
+const nameField = z.string().describe(t("凭证名（小写），如 google-work、github-bot", "Credential name (lowercase), e.g. google-work, github-bot"));
+const optType = (kind: string) => z.string().optional().describe(t(`凭证类型，默认 "${kind}"（不存在时自动创建）`, `Credential type, default "${kind}" (created automatically if missing)`));
+const descField = z.string().optional().describe(t("凭证说明", "Credential description"));
+const overwriteField = z.boolean().optional().describe(t("已存在时替换（会弹窗请用户确认）", "Replace if it already exists (asks the user to confirm in a dialog)"));
 
 type SetupResult = { type: string; name: string; typeCreated: boolean; replaced: boolean };
 
 function setupMessage(r: SetupResult, what: string): string {
   const steps = [];
-  if (r.typeCreated) steps.push(`凭证类型 "${r.type}" 不存在，已先创建`);
-  steps.push(`${r.replaced ? "已替换" : "已保存"} ${what} "${r.type}/${r.name}"`);
-  return steps.join("；");
+  if (r.typeCreated) steps.push(t(`凭证类型 "${r.type}" 不存在，已先创建`, `Credential type "${r.type}" did not exist and was created`));
+  steps.push(
+    t(`${r.replaced ? "已替换" : "已保存"} ${what} "${r.type}/${r.name}"`, `${r.replaced ? "Replaced" : "Saved"} ${what} "${r.type}/${r.name}"`),
+  );
+  return steps.join(t("；", "; "));
 }
 
 interface OAuthConfigView {
@@ -41,28 +45,39 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
   server.registerTool(
     "credential_oauth_login",
     {
-      description:
+      description: t(
         "配置并完成 OAuth 2.0 授权，refresh token 加密保存，之后用 credential_access_token 获取 access token（agent 拿不到 refresh token 和 client secret）。\n" +
-        "flow：authorization_code（默认，打开浏览器，本地回调 + PKCE）、device_code（显示验证码让用户在浏览器输入）、client_credentials（机器对机器，无需用户交互）。\n" +
-        `provider：${oauthProviderNames()}；其他服务用 issuer（OIDC 自动发现，如 Okta/Auth0/Keycloak）或手动指定端点。\n` +
-        "client secret 不要通过参数传入，省略即可，会弹窗让用户输入。\n" +
-        "已存在的凭证：只传 name 即可重新授权（沿用已保存的配置）；传入新的 scopes 等参数会更新配置。",
+          "flow：authorization_code（默认，打开浏览器，本地回调 + PKCE）、device_code（显示验证码让用户在浏览器输入）、client_credentials（机器对机器，无需用户交互）。\n" +
+          `provider：${oauthProviderNames()}；其他服务用 issuer（OIDC 自动发现，如 Okta/Auth0/Keycloak）或手动指定端点。\n` +
+          "client secret 不要通过参数传入，省略即可，会弹窗让用户输入。\n" +
+          "已存在的凭证：只传 name 即可重新授权（沿用已保存的配置）；传入新的 scopes 等参数会更新配置。",
+        "Configure and complete OAuth 2.0 authorization. The refresh token is stored encrypted; afterwards use credential_access_token to get access tokens (the agent never sees the refresh token or client secret).\n" +
+          "flow: authorization_code (default; opens the browser, local callback + PKCE), device_code (shows a code for the user to enter in the browser), client_credentials (machine-to-machine, no user interaction).\n" +
+          `provider: ${oauthProviderNames()}; for other services use issuer (OIDC discovery, e.g. Okta/Auth0/Keycloak) or specify the endpoints manually.\n` +
+          "Do not pass the client secret as a parameter; omit it and the user will be prompted for it in a dialog.\n" +
+          "Existing credential: pass just name to re-authorize (reusing the saved configuration); passing new scopes or other parameters updates the configuration.",
+      ),
       inputSchema: {
         purpose: purposeField,
         name: nameField,
         type: optType("oauth2"),
-        provider: z.string().optional().describe("服务商：内置预设（google、github、microsoft、outlook、outlook_graph、gitlab、dropbox）或模板库中的 OAuth2 模板 id；自定义服务省略"),
+        provider: z.string().optional().describe(
+            t(
+              "服务商：内置预设（google、github、microsoft、outlook、outlook_graph、gitlab、dropbox）或模板库中的 OAuth2 模板 id；自定义服务省略",
+              "Provider: a built-in preset (google, github, microsoft, outlook, outlook_graph, gitlab, dropbox) or an OAuth2 template id from the template library; omit for custom services",
+            ),
+          ),
         flow: z.enum(["authorization_code", "device_code", "client_credentials"]).optional(),
-        client_id: z.string().optional().describe("OAuth client ID（新建时必填）"),
-        public_client: z.boolean().optional().describe("公共客户端（无 client secret，仅靠 PKCE）"),
-        scopes: z.array(z.string()).optional().describe("授权范围，如 [\"https://www.googleapis.com/auth/gmail.readonly\"]"),
-        tenant: z.string().optional().describe("Microsoft 租户 ID 或域名，默认 common"),
-        issuer: z.string().optional().describe("OIDC issuer URL，用于自动发现端点"),
+        client_id: z.string().optional().describe(t("OAuth client ID（新建时必填）", "OAuth client ID (required when creating)")),
+        public_client: z.boolean().optional().describe(t("公共客户端（无 client secret，仅靠 PKCE）", "Public client (no client secret, PKCE only)")),
+        scopes: z.array(z.string()).optional().describe(t("授权范围，如 [\"https://www.googleapis.com/auth/gmail.readonly\"]", "Scopes, e.g. [\"https://www.googleapis.com/auth/gmail.readonly\"]")),
+        tenant: z.string().optional().describe(t("Microsoft 租户 ID 或域名，默认 common", "Microsoft tenant ID or domain, default common")),
+        issuer: z.string().optional().describe(t("OIDC issuer URL，用于自动发现端点", "OIDC issuer URL, used to discover endpoints automatically")),
         authorization_url: z.string().optional(),
         token_url: z.string().optional(),
         device_authorization_url: z.string().optional(),
-        redirect_uri: z.string().optional().describe("固定回调地址（必须是本机回环地址）；默认随机端口 http://127.0.0.1:<port>/callback"),
-        extra_auth_params: z.record(z.string(), z.string()).optional().describe("授权请求附加参数"),
+        redirect_uri: z.string().optional().describe(t("固定回调地址（必须是本机回环地址）；默认随机端口 http://127.0.0.1:<port>/callback", "Fixed redirect URI (must be a local loopback address); default is a random port http://127.0.0.1:<port>/callback")),
+        extra_auth_params: z.record(z.string(), z.string()).optional().describe(t("授权请求附加参数", "Extra parameters for the authorization request")),
         token_auth_method: z.enum(["client_secret_post", "client_secret_basic", "none"]).optional(),
         description: descField,
       },
@@ -71,7 +86,7 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
       const s = session.scoped(a.purpose, { type: a.type, name: a.name });
       const type = a.type ?? "oauth2";
       const existing = await tryInfo(s, type, a.name);
-      if (existing && existing.kind !== "oauth2") return fail(`"${existing.type}/${existing.name}" 已存在且不是 OAuth 凭证。`);
+      if (existing && existing.kind !== "oauth2") return fail(t(`"${existing.type}/${existing.name}" 已存在且不是 OAuth 凭证。`, `"${existing.type}/${existing.name}" already exists and is not an OAuth credential.`));
       const base = (existing?.config ?? {}) as Partial<OAuthConfigView>;
       const label = `${norm(type)}/${norm(a.name)}`;
       let setup: SetupResult | undefined;
@@ -87,7 +102,12 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
         const providerChanged = a.provider !== undefined && a.provider !== base.provider;
         const provider = a.provider ?? base.provider ?? (a.issuer ? "oidc" : "custom");
         const preset = a.provider || a.tenant ? resolveOAuthProvider(provider, a.tenant) : null;
-        if (a.provider && !preset) return fail(`未知的 provider "${a.provider}"。可用：${oauthProviderNames()}；其他服务请用 issuer 或手动指定端点。`);
+        if (a.provider && !preset) return fail(
+            t(
+              `未知的 provider "${a.provider}"。可用：${oauthProviderNames()}；其他服务请用 issuer 或手动指定端点。`,
+              `Unknown provider "${a.provider}". Available: ${oauthProviderNames()}; for other services use issuer or specify the endpoints manually.`,
+            ),
+          );
         const fromBase = providerChanged ? {} : base;
         const discovered: Partial<Awaited<ReturnType<typeof discoverOidc>>> = a.issuer ? await discoverOidc(a.issuer) : {};
         const flow = a.flow ?? base.flow ?? "authorization_code";
@@ -111,11 +131,11 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
               "client_secret_post"),
           redirect_uri: a.redirect_uri ?? base.redirect_uri,
         };
-        if (!config.client_id) return fail("新建 OAuth 凭证需要 client_id。");
-        if (!config.token_url) return fail("缺少 token_url：请指定 provider、issuer 或 token_url。");
-        if (flow === "authorization_code" && !config.authorization_url) return fail("授权码流程缺少 authorization_url。");
-        if (flow === "device_code" && !config.device_authorization_url) return fail("该服务商没有设备码端点，请改用 authorization_code 或指定 device_authorization_url。");
-        if (flow === "client_credentials" && publicClient) return fail("client_credentials 流程需要 client secret。");
+        if (!config.client_id) return fail(t("新建 OAuth 凭证需要 client_id。", "client_id is required to create an OAuth credential."));
+        if (!config.token_url) return fail(t("缺少 token_url：请指定 provider、issuer 或 token_url。", "Missing token_url: specify provider, issuer, or token_url."));
+        if (flow === "authorization_code" && !config.authorization_url) return fail(t("授权码流程缺少 authorization_url。", "The authorization code flow requires authorization_url."));
+        if (flow === "device_code" && !config.device_authorization_url) return fail(t("该服务商没有设备码端点，请改用 authorization_code 或指定 device_authorization_url。", "This provider has no device code endpoint; use authorization_code or specify device_authorization_url."));
+        if (flow === "client_credentials" && publicClient) return fail(t("client_credentials 流程需要 client secret。", "The client_credentials flow requires a client secret."));
         // 会显示在弹窗中的值必须先严格校验，防止 agent 写入诱导文字（如“请输入 Mac 密码”）
         const clientId = safeDisplay(config.client_id, CLIENT_ID_RE, "client_id");
         const tokenHost = httpsHost(config.token_url, "token_url");
@@ -126,8 +146,13 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
         // ---- client secret：端点和 client 不变时沿用；否则必须由用户重新输入 ----
         const sameBinding = !!existing && SECRET_BINDING_KEYS.every((k) => (base as Record<string, unknown>)[k] === (config as Record<string, unknown>)[k]);
         const askSecret = async () => {
-          const s = await promptSecret(`请输入 OAuth client secret\n\n凭证：${label}\nclient_id：${clientId}\n它只会被发送到：${tokenHost}`);
-          if (!s) throw new Error("用户取消了输入，未保存。");
+          const s = await promptSecret(
+            t(
+              `请输入 OAuth client secret\n\n凭证：${label}\nclient_id：${clientId}\n它只会被发送到：${tokenHost}`,
+              `Enter the OAuth client secret\n\nCredential: ${label}\nclient_id: ${clientId}\nIt will only be sent to: ${tokenHost}`,
+            ),
+          );
+          if (!s) throw new Error(t("用户取消了输入，未保存。", "Input cancelled by the user; nothing was saved."));
           return s;
         };
         let clientSecret = !publicClient && !sameBinding ? await askSecret() : undefined;
@@ -140,14 +165,14 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
             secrets: clientSecret ? { client_secret: clientSecret } : {},
             reuseClientSecret: reuse,
             description: a.description,
-            typeDescription: "OAuth 2.0 授权",
+            typeDescription: t("OAuth 2.0 授权", "OAuth 2.0 authorization"),
             overwrite: !!existing,
           });
         try {
           setup = await doSetup(!publicClient && sameBinding);
         } catch (e) {
           // helper 的绑定校验更严格（如切换 flow 后端点被规范化），以它为准：请用户重新输入
-          if (!publicClient && sameBinding && /已变化/.test((e as Error).message)) {
+          if (!publicClient && sameBinding && (e as Error).message.includes(SECRET_REBIND_MARK)) {
             clientSecret = await askSecret();
             setup = await doSetup(false);
           } else {
@@ -181,17 +206,23 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
           expires_in: number;
         }>("oauthDeviceStart", { type, name: a.name });
         // 设备码和网址来自服务商，显示前校验格式
-        const userCode = safeDisplay(d.user_code, /^[A-Za-z0-9-]{4,20}$/, "服务商返回的 user_code");
+        const userCode = safeDisplay(d.user_code, /^[A-Za-z0-9-]{4,20}$/, t("服务商返回的 user_code", "user_code returned by the provider"));
         const url = d.verification_uri_complete ?? d.verification_uri;
-        if (url && (url.length > 300 || /\s/.test(url))) throw new Error("服务商返回的验证网址格式异常");
+        if (url && (url.length > 300 || /\s/.test(url))) throw new Error(t("服务商返回的验证网址格式异常", "The verification URL returned by the provider is malformed"));
         copyToClipboard(userCode);
         if (url) await openInBrowser(url).catch(() => {});
-        const close = showNotice(`请在浏览器中完成授权。\n\n验证码：${userCode}\n（已复制到剪贴板）\n\n网址：${url ?? "见服务商说明"}`, d.expires_in);
+        const close = showNotice(
+          t(
+            `请在浏览器中完成授权。\n\n验证码：${userCode}\n（已复制到剪贴板）\n\n网址：${url ?? "见服务商说明"}`,
+            `Please complete authorization in your browser.\n\nCode: ${userCode}\n(copied to the clipboard)\n\nURL: ${url ?? "see the provider's instructions"}`,
+          ),
+          d.expires_in,
+        );
         try {
           let interval = d.interval;
           const deadline = Date.now() + d.expires_in * 1000;
           for (;;) {
-            if (Date.now() > deadline) return fail("设备码已过期，请重新调用 credential_oauth_login。");
+            if (Date.now() > deadline) return fail(t("设备码已过期，请重新调用 credential_oauth_login。", "The device code has expired; call credential_oauth_login again."));
             await new Promise((res) => setTimeout(res, interval * 1000));
             const p = await s.request<{ status: string } & Record<string, unknown>>("oauthDevicePoll", {
               type,
@@ -204,18 +235,24 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
               break;
             }
             if (p.status === "slow_down") interval += 5;
-            if (p.status === "denied") return fail("用户拒绝了授权。");
-            if (p.status === "expired") return fail("设备码已过期，请重新调用 credential_oauth_login。");
+            if (p.status === "denied") return fail(t("用户拒绝了授权。", "The user denied authorization."));
+            if (p.status === "expired") return fail(t("设备码已过期，请重新调用 credential_oauth_login。", "The device code has expired; call credential_oauth_login again."));
           }
         } finally {
           close();
         }
       } else {
-        const t = await s.request<Record<string, unknown>>("accessToken", { type, name: a.name, force: true });
-        result = { scope: t.scope, expires_at: t.expires_at };
+        const tok = await s.request<Record<string, unknown>>("accessToken", { type, name: a.name, force: true });
+        result = { scope: tok.scope, expires_at: tok.expires_at };
       }
-      const head = setup ? setupMessage(setup, "OAuth 配置") + "；" : "";
-      return ok(`${head}授权完成。之后用 credential_access_token（name: "${norm(a.name)}"）获取 access token。`, result);
+      const head = setup ? setupMessage(setup, t("OAuth 配置", "OAuth configuration")) + t("；", "; ") : "";
+      return ok(
+        t(
+          `${head}授权完成。之后用 credential_access_token（name: "${norm(a.name)}"）获取 access token。`,
+          `${head}${head ? "authorization" : "Authorization"} complete. Use credential_access_token (name: "${norm(a.name)}") to get access tokens from now on.`,
+        ),
+        result,
+      );
     }),
   );
 
@@ -223,22 +260,25 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
   server.registerTool(
     "credential_access_token",
     {
-      description:
+      description: t(
         "获取短期 access token，适用于 oauth2（自动刷新）、google_service_account、github_app（installation token）、jwt（按模板签发）。" +
-        "返回的 token 有效期通常为 1 小时以内；长期秘密不会返回。",
+          "返回的 token 有效期通常为 1 小时以内；长期秘密不会返回。",
+        "Get a short-lived access token for oauth2 (auto-refreshed), google_service_account, github_app (installation token), or jwt (signed from the template). " +
+          "Returned tokens are usually valid for at most 1 hour; long-term secrets are never returned.",
+      ),
       inputSchema: {
         purpose: purposeField,
         name: nameField,
-        type: z.string().optional().describe("凭证类型；省略时按名字自动查找"),
-        scopes: z.array(z.string()).optional().describe("仅 google_service_account：本次请求的 scope（默认用设置时的）"),
-        repositories: z.array(z.string()).optional().describe("仅 github_app：把 token 限制到这些仓库名"),
-        permissions: z.record(z.string(), z.string()).optional().describe("仅 github_app：收窄权限，如 {\"contents\": \"read\"}"),
-        force_refresh: z.boolean().optional().describe("忽略缓存，强制获取新 token"),
+        type: z.string().optional().describe(t("凭证类型；省略时按名字自动查找", "Credential type; looked up by name if omitted")),
+        scopes: z.array(z.string()).optional().describe(t("仅 google_service_account：本次请求的 scope（默认用设置时的）", "google_service_account only: scopes for this request (defaults to those set at setup)")),
+        repositories: z.array(z.string()).optional().describe(t("仅 github_app：把 token 限制到这些仓库名", "github_app only: restrict the token to these repository names")),
+        permissions: z.record(z.string(), z.string()).optional().describe(t("仅 github_app：收窄权限，如 {\"contents\": \"read\"}", "github_app only: narrow the permissions, e.g. {\"contents\": \"read\"}")),
+        force_refresh: z.boolean().optional().describe(t("忽略缓存，强制获取新 token", "Ignore the cache and force a new token")),
         format: z
           .enum(["default", "xoauth2"])
           .optional()
-          .describe("xoauth2：额外返回 IMAP/SMTP/POP 的 SASL XOAUTH2 认证字符串（Gmail、Outlook 邮箱用）"),
-        username: z.string().optional().describe("仅 format=xoauth2：邮箱地址；省略则使用授权时识别出的账号"),
+          .describe(t("xoauth2：额外返回 IMAP/SMTP/POP 的 SASL XOAUTH2 认证字符串（Gmail、Outlook 邮箱用）", "xoauth2: also return the SASL XOAUTH2 auth string for IMAP/SMTP/POP (for Gmail and Outlook mail)")),
+        username: z.string().optional().describe(t("仅 format=xoauth2：邮箱地址；省略则使用授权时识别出的账号", "format=xoauth2 only: email address; defaults to the account identified during authorization")),
       },
     },
     wrap(async (a) => {
@@ -254,10 +294,10 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
       });
       if (a.format === "xoauth2") {
         const username = a.username ?? r.account;
-        if (!username) return fail("无法确定邮箱地址：请传 username，或在授权 scope 中包含 openid email。");
-        return ok("access token（含 XOAUTH2）：", { ...r, username, xoauth2: xoauth2(username, r.access_token) });
+        if (!username) return fail(t("无法确定邮箱地址：请传 username，或在授权 scope 中包含 openid email。", "Cannot determine the email address: pass username, or include openid email in the authorization scopes."));
+        return ok(t("access token（含 XOAUTH2）：", "access token (with XOAUTH2):"), { ...r, username, xoauth2: xoauth2(username, r.access_token) });
       }
-      return ok("access token：", r);
+      return ok(t("access token：", "access token:"), r);
     }),
   );
 
@@ -265,14 +305,17 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
   server.registerTool(
     "credential_setup_google_service_account",
     {
-      description: "导入 Google 服务账号 JSON 密钥文件（内容不会进入 AI 上下文）。之后用 credential_access_token 获取 access token。",
+      description: t(
+        "导入 Google 服务账号 JSON 密钥文件（内容不会进入 AI 上下文）。之后用 credential_access_token 获取 access token。",
+        "Import a Google service account JSON key file (its contents never enter the AI context). Afterwards use credential_access_token to get access tokens.",
+      ),
       inputSchema: {
         purpose: purposeField,
         name: nameField,
         type: optType("google_service_account"),
-        key_file: z.string().describe("服务账号 JSON 密钥文件路径"),
-        scopes: z.array(z.string()).optional().describe("默认 scope，省略则为 cloud-platform"),
-        subject: z.string().optional().describe("域范围授权时要模拟的 Workspace 用户邮箱"),
+        key_file: z.string().describe(t("服务账号 JSON 密钥文件路径", "Path to the service account JSON key file")),
+        scopes: z.array(z.string()).optional().describe(t("默认 scope，省略则为 cloud-platform", "Default scopes; cloud-platform if omitted")),
+        subject: z.string().optional().describe(t("域范围授权时要模拟的 Workspace 用户邮箱", "Workspace user email to impersonate with domain-wide delegation")),
         description: descField,
         overwrite: overwriteField,
       },
@@ -289,14 +332,19 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
         config: { scopes: a.scopes, subject: a.subject },
         secrets: { key_json: f.content },
         description: a.description,
-        typeDescription: "Google 服务账号",
+        typeDescription: t("Google 服务账号", "Google service account"),
         overwrite: exists,
       });
       const verify = await session
         .request<{ expires_at: string; account: string }>("accessToken", { type, name: a.name, force: true })
-        .then((t) => `已验证可以获取 token（${t.account}）`)
-        .catch((e: Error) => `⚠️ 已保存，但获取 token 失败：${e.message}`);
-      return ok(`${setupMessage(r, "Google 服务账号")}；${verify}。建议删除原密钥文件 ${f.path}。`);
+        .then((tok) => t(`已验证可以获取 token（${tok.account}）`, `verified that a token can be obtained (${tok.account})`))
+        .catch((e: Error) => t(`⚠️ 已保存，但获取 token 失败：${e.message}`, `⚠️ saved, but getting a token failed: ${e.message}`));
+      return ok(
+        t(
+          `${setupMessage(r, "Google 服务账号")}；${verify}。建议删除原密钥文件 ${f.path}。`,
+          `${setupMessage(r, "Google service account")}; ${verify}. Consider deleting the original key file ${f.path}.`,
+        ),
+      );
     }),
   );
 
@@ -304,15 +352,18 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
   server.registerTool(
     "credential_setup_github_app",
     {
-      description: "设置 GitHub App（私钥从 .pem 文件导入）。之后用 credential_access_token 获取 1 小时有效的 installation token。",
+      description: t(
+        "设置 GitHub App（私钥从 .pem 文件导入）。之后用 credential_access_token 获取 1 小时有效的 installation token。",
+        "Set up a GitHub App (private key imported from a .pem file). Afterwards use credential_access_token to get installation tokens valid for 1 hour.",
+      ),
       inputSchema: {
         purpose: purposeField,
         name: nameField,
         type: optType("github_app"),
-        app_id: z.string().describe("App ID（数字）或 Client ID"),
-        private_key_file: z.string().describe("App 私钥 .pem 文件路径"),
-        installation_id: z.string().optional().describe("installation ID；App 只装在一个账号上时可省略"),
-        api_base_url: z.string().optional().describe("GitHub Enterprise Server 的 API 地址，默认 https://api.github.com"),
+        app_id: z.string().describe(t("App ID（数字）或 Client ID", "App ID (numeric) or Client ID")),
+        private_key_file: z.string().describe(t("App 私钥 .pem 文件路径", "Path to the App private key .pem file")),
+        installation_id: z.string().optional().describe(t("installation ID；App 只装在一个账号上时可省略", "Installation ID; may be omitted if the App is installed on only one account")),
+        api_base_url: z.string().optional().describe(t("GitHub Enterprise Server 的 API 地址，默认 https://api.github.com", "API base URL for GitHub Enterprise Server, default https://api.github.com")),
         description: descField,
         overwrite: overwriteField,
       },
@@ -334,9 +385,14 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
       });
       const verify = await session
         .request<{ expires_at: string }>("accessToken", { type, name: a.name, force: true })
-        .then(() => "已验证可以获取 installation token")
-        .catch((e: Error) => `⚠️ 已保存，但获取 token 失败：${e.message}`);
-      return ok(`${setupMessage(r, "GitHub App")}；${verify}。建议删除原私钥文件 ${f.path}。`);
+        .then(() => t("已验证可以获取 installation token", "verified that an installation token can be obtained"))
+        .catch((e: Error) => t(`⚠️ 已保存，但获取 token 失败：${e.message}`, `⚠️ saved, but getting a token failed: ${e.message}`));
+      return ok(
+        t(
+          `${setupMessage(r, "GitHub App")}；${verify}。建议删除原私钥文件 ${f.path}。`,
+          `${setupMessage(r, "GitHub App")}; ${verify}. Consider deleting the original private key file ${f.path}.`,
+        ),
+      );
     }),
   );
 
@@ -344,22 +400,25 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
   server.registerTool(
     "credential_setup_jwt",
     {
-      description:
+      description: t(
         "设置 JWT 签发模板（如 App Store Connect API：algorithm=ES256, issuer=Issuer ID, key_id=Key ID, audience=appstoreconnect-v1）。" +
-        "私钥从文件导入；HS* 算法的密钥由用户在弹窗输入。之后用 credential_access_token 获取签好的短期 JWT。",
+          "私钥从文件导入；HS* 算法的密钥由用户在弹窗输入。之后用 credential_access_token 获取签好的短期 JWT。",
+        "Set up a JWT signing template (e.g. App Store Connect API: algorithm=ES256, issuer=Issuer ID, key_id=Key ID, audience=appstoreconnect-v1). " +
+          "Private keys are imported from a file; for HS* algorithms the user enters the key in a dialog. Afterwards use credential_access_token to get signed short-lived JWTs.",
+      ),
       inputSchema: {
         purpose: purposeField,
         name: nameField,
         type: optType("jwt"),
         algorithm: z.enum(["RS256", "RS384", "RS512", "PS256", "ES256", "ES384", "EdDSA", "HS256", "HS384", "HS512"]),
-        key_file: z.string().optional().describe("私钥 PEM/.p8 文件路径（非 HS* 算法必填）"),
+        key_file: z.string().optional().describe(t("私钥 PEM/.p8 文件路径（非 HS* 算法必填）", "Path to the private key PEM/.p8 file (required for non-HS* algorithms)")),
         issuer: z.string().optional().describe("iss"),
         subject: z.string().optional().describe("sub"),
         audience: z.union([z.string(), z.array(z.string())]).optional().describe("aud"),
-        key_id: z.string().optional().describe("header 中的 kid"),
-        lifetime_seconds: z.number().int().optional().describe("有效期，默认 1200（20 分钟）"),
-        claims: z.record(z.string(), z.unknown()).optional().describe("其他固定声明"),
-        header: z.record(z.string(), z.unknown()).optional().describe("其他 header 字段"),
+        key_id: z.string().optional().describe(t("header 中的 kid", "kid in the header")),
+        lifetime_seconds: z.number().int().optional().describe(t("有效期，默认 1200（20 分钟）", "Lifetime in seconds, default 1200 (20 minutes)")),
+        claims: z.record(z.string(), z.unknown()).optional().describe(t("其他固定声明", "Additional fixed claims")),
+        header: z.record(z.string(), z.unknown()).optional().describe(t("其他 header 字段", "Additional header fields")),
         description: descField,
         overwrite: overwriteField,
       },
@@ -371,10 +430,15 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
       let key: string | undefined;
       let source = "";
       if (a.algorithm.startsWith("HS")) {
-        key = (await promptSecret(`请输入 JWT 签名密钥（${a.algorithm}）：\n\n凭证：${norm(type)}/${norm(a.name)}`)) ?? undefined;
-        if (!key) return fail("用户取消了输入，未保存。");
+        key = (await promptSecret(
+            t(
+              `请输入 JWT 签名密钥（${a.algorithm}）：\n\n凭证：${norm(type)}/${norm(a.name)}`,
+              `Enter the JWT signing key (${a.algorithm}):\n\nCredential: ${norm(type)}/${norm(a.name)}`,
+            ),
+          )) ?? undefined;
+        if (!key) return fail(t("用户取消了输入，未保存。", "Input cancelled by the user; nothing was saved."));
       } else {
-        if (!a.key_file) return fail(`${a.algorithm} 需要 key_file（私钥文件）。`);
+        if (!a.key_file) return fail(t(`${a.algorithm} 需要 key_file（私钥文件）。`, `${a.algorithm} requires key_file (private key file).`));
         const f = await importFile(a.key_file, `${norm(type)}/${norm(a.name)}`);
         key = f.content;
         source = f.path;
@@ -395,10 +459,15 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
         },
         secrets: { key },
         description: a.description,
-        typeDescription: "JWT 签发",
+        typeDescription: t("JWT 签发", "JWT signing"),
         overwrite: exists,
       });
-      return ok(`${setupMessage(r, "JWT 模板")}。${source ? `建议删除原私钥文件 ${source}。` : ""}`);
+      return ok(
+        t(
+          `${setupMessage(r, "JWT 模板")}。${source ? `建议删除原私钥文件 ${source}。` : ""}`,
+          `${setupMessage(r, "JWT template")}.${source ? ` Consider deleting the original private key file ${source}.` : ""}`,
+        ),
+      );
     }),
   );
 
@@ -406,15 +475,18 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
   server.registerTool(
     "credential_setup_totp",
     {
-      description: "保存两步验证（TOTP）种子：用户在弹窗中粘贴 Base32 密钥或 otpauth:// 链接。之后用 credential_totp_code 获取当前验证码。",
+      description: t(
+        "保存两步验证（TOTP）种子：用户在弹窗中粘贴 Base32 密钥或 otpauth:// 链接。之后用 credential_totp_code 获取当前验证码。",
+        "Save a two-factor (TOTP) seed: the user pastes the Base32 key or otpauth:// link into a dialog. Afterwards use credential_totp_code to get the current code.",
+      ),
       inputSchema: {
         purpose: purposeField,
         name: nameField,
         type: optType("totp"),
-        issuer: z.string().optional().describe("服务名，如 GitHub"),
-        account: z.string().optional().describe("账号"),
-        digits: z.number().int().optional().describe("位数，默认 6"),
-        period: z.number().int().optional().describe("周期秒数，默认 30"),
+        issuer: z.string().optional().describe(t("服务名，如 GitHub", "Service name, e.g. GitHub")),
+        account: z.string().optional().describe(t("账号", "Account")),
+        digits: z.number().int().optional().describe(t("位数，默认 6", "Number of digits, default 6")),
+        period: z.number().int().optional().describe(t("周期秒数，默认 30", "Period in seconds, default 30")),
         algorithm: z.enum(["SHA1", "SHA256", "SHA512"]).optional(),
         description: descField,
         overwrite: overwriteField,
@@ -424,8 +496,13 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
       const s = session.scoped(a.purpose, { type: a.type, name: a.name });
       const type = a.type ?? "totp";
       const exists = await guardOverwrite(s, type, a.name, a.overwrite);
-      const secret = await promptSecret(`请粘贴两步验证密钥（Base32）或 otpauth:// 链接：\n\n凭证：${norm(type)}/${norm(a.name)}`);
-      if (!secret) return fail("用户取消了输入，未保存。");
+      const secret = await promptSecret(
+        t(
+          `请粘贴两步验证密钥（Base32）或 otpauth:// 链接：\n\n凭证：${norm(type)}/${norm(a.name)}`,
+          `Paste the two-factor key (Base32) or otpauth:// link:\n\nCredential: ${norm(type)}/${norm(a.name)}`,
+        ),
+      );
+      if (!secret) return fail(t("用户取消了输入，未保存。", "Input cancelled by the user; nothing was saved."));
       const r = await s.request<SetupResult>("setupProtocol", {
         kind: "totp",
         type,
@@ -433,24 +510,32 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
         config: { issuer: a.issuer, account: a.account, digits: a.digits, period: a.period, algorithm: a.algorithm },
         secrets: { secret },
         description: a.description,
-        typeDescription: "两步验证（TOTP）",
+        typeDescription: t("两步验证（TOTP）", "Two-factor authentication (TOTP)"),
         overwrite: exists,
       });
       const code = await s.request<{ code: string; remaining_seconds: number }>("totp", { type, name: a.name });
-      return ok(`${setupMessage(r, "TOTP")}。当前验证码 ${code.code}（${code.remaining_seconds} 秒后刷新），可与验证器 App 对照确认。`);
+      return ok(
+        t(
+          `${setupMessage(r, "TOTP")}。当前验证码 ${code.code}（${code.remaining_seconds} 秒后刷新），可与验证器 App 对照确认。`,
+          `${setupMessage(r, "TOTP")}. Current code ${code.code} (refreshes in ${code.remaining_seconds} s); compare it with your authenticator app to confirm.`,
+        ),
+      );
     }),
   );
 
   server.registerTool(
     "credential_totp_code",
     {
-      description: "获取 TOTP 当前验证码（以及剩余有效秒数；即将过期时附带下一个验证码）",
-      inputSchema: { purpose: purposeField, name: nameField, type: z.string().optional().describe("凭证类型；省略时按名字自动查找") },
+      description: t(
+        "获取 TOTP 当前验证码（以及剩余有效秒数；即将过期时附带下一个验证码）",
+        "Get the current TOTP code (plus remaining seconds of validity; includes the next code when it is about to expire)",
+      ),
+      inputSchema: { purpose: purposeField, name: nameField, type: z.string().optional().describe(t("凭证类型；省略时按名字自动查找", "Credential type; looked up by name if omitted")) },
     },
     wrap(async (a) => {
       const s = session.scoped(a.purpose, { type: a.type, name: a.name });
       const type = await resolveType(s, a.name, a.type, ["totp"]);
-      return ok("验证码：", await s.request("totp", { type, name: a.name }));
+      return ok(t("验证码：", "Code:"), await s.request("totp", { type, name: a.name }));
     }),
   );
 
@@ -458,21 +543,24 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
   server.registerTool(
     "credential_setup_aws",
     {
-      description:
+      description: t(
         "保存 AWS 长期 access key（secret key 由用户在弹窗输入），之后用 credential_aws_credentials 通过 STS 获取临时凭证。" +
-        "可配置 role_arn 以 AssumeRole；可关联一个 TOTP 凭证自动完成 MFA。",
+          "可配置 role_arn 以 AssumeRole；可关联一个 TOTP 凭证自动完成 MFA。",
+        "Save a long-term AWS access key (the user enters the secret key in a dialog); afterwards use credential_aws_credentials to get temporary credentials via STS. " +
+          "Optionally set role_arn to AssumeRole, and link a TOTP credential to complete MFA automatically.",
+      ),
       inputSchema: {
         purpose: purposeField,
         name: nameField,
         type: optType("aws"),
-        access_key_id: z.string().describe("Access key ID（AKIA 开头）"),
-        region: z.string().optional().describe("STS 所用区域，默认 us-east-1"),
-        role_arn: z.string().optional().describe("要扮演的 IAM 角色 ARN"),
+        access_key_id: z.string().describe(t("Access key ID（AKIA 开头）", "Access key ID (starts with AKIA)")),
+        region: z.string().optional().describe(t("STS 所用区域，默认 us-east-1", "Region used for STS, default us-east-1")),
+        role_arn: z.string().optional().describe(t("要扮演的 IAM 角色 ARN", "ARN of the IAM role to assume")),
         external_id: z.string().optional(),
         role_session_name: z.string().optional(),
-        duration_seconds: z.number().int().optional().describe("临时凭证有效期，默认 3600"),
-        mfa_serial: z.string().optional().describe("MFA 设备 ARN"),
-        mfa_totp_name: z.string().optional().describe("用于生成 MFA 验证码的 TOTP 凭证名"),
+        duration_seconds: z.number().int().optional().describe(t("临时凭证有效期，默认 3600", "Lifetime of temporary credentials in seconds, default 3600")),
+        mfa_serial: z.string().optional().describe(t("MFA 设备 ARN", "MFA device ARN")),
+        mfa_totp_name: z.string().optional().describe(t("用于生成 MFA 验证码的 TOTP 凭证名", "Name of the TOTP credential used to generate MFA codes")),
         description: descField,
         overwrite: overwriteField,
       },
@@ -485,11 +573,14 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
         ? { type: await resolveType(s, a.mfa_totp_name, undefined, ["totp"]), name: a.mfa_totp_name }
         : undefined;
       const region = safeDisplay(a.region ?? "us-east-1", /^[a-z]{2}(-gov)?-[a-z]+-\d$/, "region");
-      const accessKeyId = safeDisplay(a.access_key_id, /^AKIA[A-Z0-9]{12,124}$/, "access_key_id（应为 AKIA 开头的长期密钥）");
+      const accessKeyId = safeDisplay(a.access_key_id, /^AKIA[A-Z0-9]{12,124}$/, t("access_key_id（应为 AKIA 开头的长期密钥）", "access_key_id (must be a long-term key starting with AKIA)"));
       const secret = await promptSecret(
-        `请输入 AWS secret access key：\n\n凭证：${norm(type)}/${norm(a.name)}\nAccess key ID：${accessKeyId}\n\n它只用于签名发往 sts.${region}.amazonaws.com 的请求。`,
+        t(
+          `请输入 AWS secret access key：\n\n凭证：${norm(type)}/${norm(a.name)}\nAccess key ID：${accessKeyId}\n\n它只用于签名发往 sts.${region}.amazonaws.com 的请求。`,
+          `Enter the AWS secret access key:\n\nCredential: ${norm(type)}/${norm(a.name)}\nAccess key ID: ${accessKeyId}\n\nIt is only used to sign requests to sts.${region}.amazonaws.com.`,
+        ),
       );
-      if (!secret) return fail("用户取消了输入，未保存。");
+      if (!secret) return fail(t("用户取消了输入，未保存。", "Input cancelled by the user; nothing was saved."));
       const r = await s.request<SetupResult>("setupProtocol", {
         kind: "aws",
         type,
@@ -511,23 +602,26 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
       });
       const verify = await session
         .request<{ expiration: string }>("aws", { type, name: a.name, force: true })
-        .then((c) => `已验证可以获取临时凭证（有效至 ${c.expiration}）`)
-        .catch((e: Error) => `⚠️ 已保存，但获取临时凭证失败：${e.message}`);
-      return ok(`${setupMessage(r, "AWS 凭证")}；${verify}。`);
+        .then((c) => t(`已验证可以获取临时凭证（有效至 ${c.expiration}）`, `verified that temporary credentials can be obtained (valid until ${c.expiration})`))
+        .catch((e: Error) => t(`⚠️ 已保存，但获取临时凭证失败：${e.message}`, `⚠️ saved, but getting temporary credentials failed: ${e.message}`));
+      return ok(t(`${setupMessage(r, "AWS 凭证")}；${verify}。`, `${setupMessage(r, "AWS credential")}; ${verify}.`));
     }),
   );
 
   server.registerTool(
     "credential_aws_credentials",
     {
-      description:
+      description: t(
         "通过 STS 获取 AWS 临时凭证（AccessKeyId / SecretAccessKey / SessionToken），有缓存。" +
-        "使用时设置环境变量 AWS_ACCESS_KEY_ID、AWS_SECRET_ACCESS_KEY、AWS_SESSION_TOKEN、AWS_REGION。",
+          "使用时设置环境变量 AWS_ACCESS_KEY_ID、AWS_SECRET_ACCESS_KEY、AWS_SESSION_TOKEN、AWS_REGION。",
+        "Get temporary AWS credentials (AccessKeyId / SecretAccessKey / SessionToken) via STS, with caching. " +
+          "To use them, set the environment variables AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, AWS_REGION.",
+      ),
       inputSchema: {
         purpose: purposeField,
         name: nameField,
-        type: z.string().optional().describe("凭证类型；省略时按名字自动查找"),
-        duration_seconds: z.number().int().optional().describe("有效期（秒）；指定时不使用缓存"),
+        type: z.string().optional().describe(t("凭证类型；省略时按名字自动查找", "Credential type; looked up by name if omitted")),
+        duration_seconds: z.number().int().optional().describe(t("有效期（秒）；指定时不使用缓存", "Lifetime in seconds; bypasses the cache when specified")),
         force_refresh: z.boolean().optional(),
       },
     },
@@ -535,7 +629,7 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
       const s = session.scoped(a.purpose, { type: a.type, name: a.name });
       const type = await resolveType(s, a.name, a.type, ["aws"]);
       const c = await s.request("aws", { type, name: a.name, duration_seconds: a.duration_seconds, force: a.force_refresh === true });
-      return ok("AWS 临时凭证：", c);
+      return ok(t("AWS 临时凭证：", "AWS temporary credentials:"), c);
     }),
   );
 }

@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en" data-lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KeyValet — give your AI agents a valet key, not your master key</title>
+<meta name="description" content="KeyValet is an open-source macOS credential broker for AI agents. Agents use your API keys and OAuth accounts over MCP without ever seeing them. Approve each credential with Touch ID; every use is logged with its purpose.">
+<meta property="og:title" content="KeyValet — give your AI agents a valet key, not your master key">
+<meta property="og:description" content="Let Claude Code, Cursor and Codex use your credentials without seeing them. Touch ID per credential, proxy calls, audit log. Open source, local, macOS.">
+<meta property="og:type" content="website">
+<meta name="theme-color" content="#173A2E">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --lobby: #173A2E;        /* 酒店大堂墨绿：底色 */
+    --lobby-deep: #10291F;
+    --ivory: #E9EDE4;        /* 绿底上的正文 */
+    --muted: #A9B8AE;
+    --ticket: #F4D7CC;       /* 泊车票 */
+    --ticket-ink: #3B2A26;
+    --stamp: #B3261E;        /* 印章红 */
+    --brass: #C9A24B;        /* 黄铜：链接、焦点 */
+    --rule: rgba(233, 237, 228, 0.16);
+    --display: "Archivo", "PingFang SC", system-ui, sans-serif;
+    --body: "Atkinson Hyperlegible", "PingFang SC", "Hiragino Sans GB", system-ui, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--lobby);
+    color: var(--ivory);
+    font: 400 1.0625rem/1.6 var(--body);
+  }
+  html[data-lang="en"] [lang="zh"], html[data-lang="zh"] [lang="en"] { display: none !important; }
+  a { color: var(--brass); text-underline-offset: 0.18em; }
+  a:hover { color: #E2C06E; }
+  :focus-visible { outline: 3px solid var(--brass); outline-offset: 3px; border-radius: 2px; }
+  .wrap { max-width: 72rem; margin: 0 auto; padding: 0 1.5rem; }
+
+  /* ---------- nav ---------- */
+  nav { display: flex; align-items: center; gap: 1.5rem; padding: 1.25rem 0; }
+  .brand { display: flex; align-items: center; gap: 0.6rem; color: var(--ivory); text-decoration: none; font: 700 1.2rem/1 var(--display); font-stretch: 112%; }
+  .brand svg { width: 1.6rem; height: 1.6rem; }
+  nav .spacer { flex: 1; }
+  .lang-switch { display: flex; border: 1px solid var(--rule); border-radius: 999px; padding: 2px; }
+  .lang-switch button {
+    font: 600 0.85rem/1 var(--body); color: var(--muted); background: none; border: 0;
+    padding: 0.45rem 0.8rem; border-radius: 999px; cursor: pointer;
+  }
+  .lang-switch button[aria-pressed="true"] { background: var(--ivory); color: var(--lobby); }
+  nav .gh { color: var(--ivory); font-weight: 700; text-decoration: none; }
+  nav .gh:hover { color: var(--brass); }
+
+  /* ---------- hero ---------- */
+  .hero { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr); gap: 4rem; align-items: center; padding: 4.5rem 0 6rem; }
+  h1 {
+    margin: 0 0 1.5rem;
+    font-family: var(--display); font-weight: 760; font-stretch: 118%;
+    font-size: clamp(2.6rem, 5.6vw, 4.6rem); line-height: 1.02; letter-spacing: -0.02em;
+    text-wrap: balance;
+  }
+  html[data-lang="zh"] h1 { font-stretch: 100%; letter-spacing: 0; line-height: 1.15; }
+  .lede { max-width: 34rem; font-size: 1.2rem; color: var(--ivory); margin: 0 0 2.25rem; }
+  .cta { display: flex; flex-wrap: wrap; gap: 0.9rem; }
+  .btn {
+    display: inline-block; padding: 0.95rem 1.4rem; border-radius: 6px; text-decoration: none;
+    font: 700 1rem/1 var(--body); border: 1.5px solid var(--ivory);
+  }
+  .btn.primary { background: var(--ivory); color: var(--lobby); }
+  .btn.primary:hover { background: #fff; color: var(--lobby); }
+  .btn.ghost { color: var(--ivory); }
+  .btn.ghost:hover { border-color: var(--brass); color: var(--brass); }
+  .fine { margin-top: 1.25rem; color: var(--muted); font-size: 0.92rem; }
+
+  /* ---------- the ticket (the one memorable thing) ---------- */
+  .ticket {
+    position: relative; color: var(--ticket-ink); background: var(--ticket);
+    border-radius: 10px; padding: 1.6rem 1.6rem 1.3rem; transform: rotate(-2.2deg);
+    box-shadow: 0 30px 60px -20px rgba(0, 0, 0, 0.55);
+    font-size: 0.98rem;
+    /* 撕口：左右两个半圆缺口 */
+    -webkit-mask: radial-gradient(circle 13px at 0 63%, #0000 98%, #000) left / 51% 100% no-repeat,
+                  radial-gradient(circle 13px at 100% 63%, #0000 98%, #000) right / 51% 100% no-repeat;
+            mask: radial-gradient(circle 13px at 0 63%, #0000 98%, #000) left / 51% 100% no-repeat,
+                  radial-gradient(circle 13px at 100% 63%, #0000 98%, #000) right / 51% 100% no-repeat;
+  }
+  .ticket .head { display: flex; justify-content: space-between; align-items: baseline; border-bottom: 2px solid rgba(59, 42, 38, 0.85); padding-bottom: 0.7rem; margin-bottom: 0.9rem; }
+  .ticket .head strong { font: 800 1.35rem/1 var(--display); font-stretch: 125%; }
+  .ticket .head span { font: 600 0.85rem/1 var(--mono); }
+  .ticket dl { display: grid; grid-template-columns: auto 1fr; gap: 0.45rem 1rem; margin: 0; }
+  .ticket dt { color: rgba(59, 42, 38, 0.7); }
+  .ticket dd { margin: 0; font-weight: 700; overflow-wrap: anywhere; }
+  .ticket dd code { font: 600 0.92rem var(--mono); }
+  .ticket .tear { border-top: 2px dashed rgba(59, 42, 38, 0.45); margin: 1.15rem -1.6rem 0.9rem; }
+  .ticket .foot { font-size: 0.9rem; max-width: 50%; margin: 0; }
+  .stamp {
+    position: absolute; right: 1rem; bottom: 1.1rem;
+    border: 3px solid var(--stamp); color: var(--stamp); border-radius: 8px;
+    padding: 0.35rem 0.7rem 0.4rem; transform: rotate(-11deg);
+    font: 800 1.25rem/1.05 var(--display); font-stretch: 120%; text-align: center;
+    mix-blend-mode: multiply; opacity: 0.92;
+    animation: stamp 520ms cubic-bezier(.2,.9,.3,1.35) 900ms both;
+  }
+  .stamp small { display: block; font: 700 0.68rem/1.2 var(--body); letter-spacing: 0.02em; }
+  @keyframes stamp {
+    from { opacity: 0; transform: rotate(-11deg) scale(2.2); }
+    to   { opacity: 0.92; transform: rotate(-11deg) scale(1); }
+  }
+
+  /* ---------- sections ---------- */
+  section { padding: 5rem 0; border-top: 1px solid var(--rule); }
+  h2 {
+    margin: 0 0 1rem; font-family: var(--display); font-weight: 720; font-stretch: 110%;
+    font-size: clamp(1.8rem, 3.2vw, 2.5rem); line-height: 1.1; letter-spacing: -0.01em; max-width: 40rem; text-wrap: balance;
+  }
+  html[data-lang="zh"] h2 { font-stretch: 100%; letter-spacing: 0; }
+  .intro { max-width: 40rem; color: var(--muted); margin: 0 0 3rem; font-size: 1.1rem; }
+
+  /* 真实的先后顺序 → 编号 */
+  ol.flow { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: 2rem; counter-reset: step; }
+  ol.flow li { counter-increment: step; border-top: 2px solid var(--brass); padding-top: 1rem; }
+  ol.flow li::before { content: counter(step); display: block; font: 800 2.4rem/1 var(--display); font-stretch: 125%; color: var(--brass); margin-bottom: 0.75rem; }
+  ol.flow h3 { margin: 0 0 0.4rem; font: 700 1.15rem/1.3 var(--body); }
+  ol.flow p { margin: 0; color: var(--muted); }
+
+  /* 万能钥匙 vs 代客钥匙 */
+  .compare { width: 100%; border-collapse: collapse; font-size: 1.02rem; }
+  .compare th, .compare td { text-align: left; padding: 1rem 1.25rem 1rem 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  .compare thead th { font: 700 1.05rem var(--display); font-stretch: 110%; color: var(--ivory); }
+  .compare thead th:last-child { color: var(--ticket); }
+  .compare tbody th { font-weight: 700; color: var(--ivory); width: 28%; }
+  .compare td { color: var(--muted); }
+  .compare td:last-child { color: var(--ivory); }
+
+  .speaks { columns: 2; column-gap: 3rem; margin: 0; padding: 0; list-style: none; }
+  .speaks li { break-inside: avoid; padding: 0.9rem 0; border-bottom: 1px solid var(--rule); }
+  .speaks strong { display: block; font-size: 1.05rem; }
+  .speaks span { color: var(--muted); }
+
+  .limits { display: grid; grid-template-columns: 1fr 1fr; gap: 3rem; }
+  .limits h3 { margin: 0 0 0.8rem; font: 700 1.15rem var(--body); }
+  .limits ul { margin: 0; padding-left: 1.1rem; color: var(--muted); }
+  .limits li { margin-bottom: 0.55rem; }
+
+  pre {
+    margin: 0 0 1rem; padding: 1.25rem 1.4rem; overflow-x: auto; border-radius: 8px;
+    background: var(--lobby-deep); border: 1px solid var(--rule);
+    font: 400 0.92rem/1.7 var(--mono); color: var(--ivory);
+  }
+  pre .c { color: var(--muted); }
+  .install { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; align-items: start; }
+  .install p { color: var(--muted); margin: 0 0 1rem; }
+
+  footer { padding: 3rem 0 4rem; border-top: 1px solid var(--rule); color: var(--muted); font-size: 0.95rem; display: flex; flex-wrap: wrap; gap: 1.5rem; justify-content: space-between; }
+
+  @media (max-width: 900px) {
+    .hero { grid-template-columns: 1fr; gap: 3rem; padding-top: 2.5rem; }
+    .ticket { transform: rotate(-1.2deg); }
+    ol.flow { grid-template-columns: 1fr 1fr; }
+    .install, .limits { grid-template-columns: 1fr; }
+    .speaks { columns: 1; }
+  }
+  @media (max-width: 560px) {
+    ol.flow { grid-template-columns: 1fr; }
+    .compare thead { display: none; }
+    .compare tr { display: block; padding: 0.8rem 0; border-bottom: 1px solid var(--rule); }
+    .compare th, .compare td { display: block; border: 0; padding: 0.2rem 0; width: auto; }
+    .compare td:nth-of-type(1)::before { content: "Master key: "; color: var(--muted); }
+    .compare td:nth-of-type(2)::before { content: "Valet key: "; color: var(--ticket); }
+    html[data-lang="zh"] .compare td:nth-of-type(1)::before { content: "万能钥匙："; }
+    html[data-lang="zh"] .compare td:nth-of-type(2)::before { content: "代客钥匙："; }
+  }
+  @media (prefers-reduced-motion: reduce) { .stamp { animation: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav aria-label="Main">
+    <a class="brand" href="#">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="#F4D7CC" stroke-width="3"/><path d="M16 16 L27 27 M22 22 L25 19 M25 25 L28 22" stroke="#F4D7CC" stroke-width="3" stroke-linecap="round" fill="none"/></svg>
+      KeyValet
+    </a>
+    <span class="spacer"></span>
+    <div class="lang-switch" role="group" aria-label="Language">
+      <button type="button" data-set-lang="en" aria-pressed="true">EN</button>
+      <button type="button" data-set-lang="zh" aria-pressed="false">中文</button>
+    </div>
+    <a class="gh" data-repo href="https://github.com/">GitHub</a>
+  </nav>
+
+  <header class="hero">
+    <div>
+      <h1>
+        <span lang="en">Give your AI agents a valet key, not your master key.</span>
+        <span lang="zh">给 AI agent 一把代客钥匙，而不是你的万能钥匙。</span>
+      </h1>
+      <p class="lede">
+        <span lang="en">KeyValet lets Claude Code, Cursor and other AI agents use your API keys and OAuth accounts without ever seeing them. You approve each credential with Touch ID, KeyValet makes the call, and every use is written down.</span>
+        <span lang="zh">KeyValet 让 Claude Code、Cursor 等 AI agent 使用你的 API key 和 OAuth 账号，却看不到它们。每个凭证由你用 Touch ID 批准，由 KeyValet 代为调用，每次使用都有记录。</span>
+      </p>
+      <div class="cta">
+        <a class="btn primary" href="#install"><span lang="en">Install on macOS</span><span lang="zh">在 macOS 上安装</span></a>
+        <a class="btn ghost" data-repo href="https://github.com/"><span lang="en">Read the source</span><span lang="zh">查看源码</span></a>
+      </div>
+      <p class="fine">
+        <span lang="en">Open source (Apache-2.0). Runs entirely on your Mac. Works with any MCP client.</span>
+        <span lang="zh">开源（Apache-2.0）。完全在你的 Mac 上运行。支持任何 MCP 客户端。</span>
+      </p>
+    </div>
+
+    <figure class="ticket" aria-label="Example of a KeyValet grant">
+      <div class="head">
+        <strong>KeyValet</strong>
+        <span>No. 0bfd243</span>
+      </div>
+      <dl>
+        <dt><span lang="en">Credential</span><span lang="zh">凭证</span></dt>
+        <dd><code>openai/main</code></dd>
+        <dt><span lang="en">Asked by</span><span lang="zh">申请方</span></dt>
+        <dd>Claude Code</dd>
+        <dt><span lang="en">Purpose</span><span lang="zh">目的</span></dt>
+        <dd><span lang="en">Summarize today’s support tickets</span><span lang="zh">总结今天的客服工单</span></dd>
+        <dt><span lang="en">Approved by</span><span lang="zh">批准方式</span></dt>
+        <dd><span lang="en">Your fingerprint</span><span lang="zh">你的指纹</span></dd>
+        <dt><span lang="en">Valid until</span><span lang="zh">有效期</span></dt>
+        <dd><span lang="en">This session ends</span><span lang="zh">本次会话结束</span></dd>
+      </dl>
+      <div class="tear" role="presentation"></div>
+      <p class="foot">
+        <span lang="en">The key stays with the valet. The agent gets the answer.</span>
+        <span lang="zh">钥匙留在 KeyValet 手里，agent 只拿到结果。</span>
+      </p>
+      <div class="stamp" aria-hidden="true">APPROVED<small><span lang="en">with Touch ID</span><span lang="zh">Touch ID 批准</span></small></div>
+    </figure>
+  </header>
+</div>
+
+<section>
+  <div class="wrap">
+    <h2><span lang="en">What happens when an agent needs a key</span><span lang="zh">agent 需要钥匙时，发生了什么</span></h2>
+    <p class="intro"><span lang="en">Four steps, and the secret never leaves the root-only vault.</span><span lang="zh">四步完成，秘密始终留在只有 root 能读的凭证库里。</span></p>
+    <ol class="flow">
+      <li>
+        <h3><span lang="en">The agent asks</span><span lang="zh">agent 发出请求</span></h3>
+        <p><span lang="en">Over MCP, naming the credential and saying why it needs it.</span><span lang="zh">通过 MCP 说明要用哪个凭证、为了什么。</span></p>
+      </li>
+      <li>
+        <h3><span lang="en">You approve</span><span lang="zh">你来批准</span></h3>
+        <p><span lang="en">Touch ID shows the credential and the purpose. One touch, one credential.</span><span lang="zh">Touch ID 弹窗写明凭证和目的。按一次，只授权这一个。</span></p>
+      </li>
+      <li>
+        <h3><span lang="en">KeyValet makes the call</span><span lang="zh">KeyValet 代为调用</span></h3>
+        <p><span lang="en">A root helper injects the key, only toward hosts you allowed, and redacts anything that echoes it back.</span><span lang="zh">root 进程注入 key，只发往你允许的域名，并抹掉响应里回显的秘密。</span></p>
+      </li>
+      <li>
+        <h3><span lang="en">The agent gets the answer</span><span lang="zh">agent 拿到结果</span></h3>
+        <p><span lang="en">Response in, purpose and result logged. The grant ends with the session.</span><span lang="zh">返回响应，记录目的和结果。会话结束，授权随之失效。</span></p>
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2><span lang="en">A master key versus a valet key</span><span lang="zh">万能钥匙与代客钥匙</span></h2>
+    <p class="intro"><span lang="en">Putting keys in <code>.env</code> or pasting them into chat hands over the master key.</span><span lang="zh">把 key 写进 <code>.env</code> 或贴进对话，等于交出了万能钥匙。</span></p>
+    <table class="compare">
+      <thead>
+        <tr><th scope="col"></th><th scope="col"><span lang="en">Master key: .env, pasted keys</span><span lang="zh">万能钥匙：.env、贴进对话的 key</span></th><th scope="col"><span lang="en">Valet key: KeyValet</span><span lang="zh">代客钥匙：KeyValet</span></th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row"><span lang="en">What the agent sees</span><span lang="zh">agent 看到什么</span></th>
+          <td><span lang="en">The plaintext key, in its context and logs</span><span lang="zh">明文 key，留在上下文和日志里</span></td>
+          <td><span lang="en">Only the response. Long-term secrets never leave root.</span><span lang="zh">只有响应。长期秘密不出 root 进程。</span></td>
+        </tr>
+        <tr>
+          <th scope="row"><span lang="en">Who decides</span><span lang="zh">谁来决定</span></th>
+          <td><span lang="en">Nobody, once the file is readable</span><span lang="zh">没人，文件能读就能用</span></td>
+          <td><span lang="en">You, per credential, with Touch ID</span><span lang="zh">你，逐个凭证，用 Touch ID</span></td>
+        </tr>
+        <tr>
+          <th scope="row"><span lang="en">Where it can go</span><span lang="zh">能发往哪里</span></th>
+          <td><span lang="en">Anywhere the agent sends it</span><span lang="zh">agent 发到哪就是哪</span></td>
+          <td><span lang="en">Only the hosts you allowed, no redirects</span><span lang="zh">只能发往你允许的域名，不跟随跳转</span></td>
+        </tr>
+        <tr>
+          <th scope="row"><span lang="en">What you can check later</span><span lang="zh">事后能查到什么</span></th>
+          <td><span lang="en">Nothing</span><span lang="zh">什么都查不到</span></td>
+          <td><span lang="en">Every use, with session, purpose and result</span><span lang="zh">每次使用的会话、目的和结果</span></td>
+        </tr>
+        <tr>
+          <th scope="row"><span lang="en">Where it lives</span><span lang="zh">存在哪里</span></th>
+          <td><span lang="en">Plaintext files, or someone else’s cloud</span><span lang="zh">明文文件，或别人的云上</span></td>
+          <td><span lang="en">An encrypted vault on your Mac that only root can read</span><span lang="zh">你 Mac 上只有 root 能读的加密凭证库</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2><span lang="en">It handles the auth, so agents don’t have to</span><span lang="zh">认证的事交给它，agent 不用操心</span></h2>
+    <p class="intro"><span lang="en">Agents receive short-lived tokens or proxied responses. Refresh tokens, private keys and seeds stay in the vault.</span><span lang="zh">agent 拿到的是短期 token 或代理后的响应。refresh token、私钥和种子都留在凭证库里。</span></p>
+    <ul class="speaks">
+      <li><strong>API keys &amp; tokens</strong><span lang="en">About 50 ready-made templates — OpenAI, Anthropic, Gemini, GitHub, Stripe, Notion, Slack — plus generic bearer, header, query and basic auth.</span><span lang="zh">约 50 个现成模板（OpenAI、Anthropic、Gemini、GitHub、Stripe、Notion、Slack 等），以及通用的 bearer、header、query、basic 认证。</span></li>
+      <li><strong>OAuth 2.0</strong><span lang="en">Browser sign-in with PKCE, device code, client credentials, automatic refresh. Google, GitHub, Microsoft, any OIDC provider.</span><span lang="zh">浏览器登录（PKCE）、设备码、客户端凭证，自动刷新。支持 Google、GitHub、Microsoft 和任意 OIDC 服务。</span></li>
+      <li><strong>Local gateway for SDKs</strong><span lang="en">Point an SDK’s base URL at KeyValet; streaming works and the program never holds the real key.</span><span lang="zh">把 SDK 的 base URL 指向 KeyValet，支持流式输出，程序拿不到真实 key。</span></li>
+      <li><strong>Google service accounts &amp; GitHub Apps</strong><span lang="en">Signed JWT exchanges inside the vault; agents get one-hour tokens.</span><span lang="zh">在凭证库内签名换取 token，agent 只拿到一小时有效的 token。</span></li>
+      <li><strong>AWS</strong><span lang="en">STS temporary credentials, AssumeRole, and MFA codes from a stored TOTP seed.</span><span lang="zh">STS 临时凭证、AssumeRole，并可用保存的 TOTP 种子完成 MFA。</span></li>
+      <li><strong>TOTP &amp; signed JWTs</strong><span lang="en">Current two-factor codes; App Store Connect–style JWTs from a template.</span><span lang="zh">当前的两步验证码；按模板签发 App Store Connect 这类 JWT。</span></li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2><span lang="en">What it guarantees, and what it doesn’t</span><span lang="zh">能保证什么，不能保证什么</span></h2>
+    <p class="intro"><span lang="en">A credential tool should be precise about its limits. The full model is in <a data-repo-file="SECURITY.md" href="#">SECURITY.md</a>.</span><span lang="zh">凭证工具应该讲清楚自己的边界。完整的安全模型见 <a data-repo-file="SECURITY.md" href="#">SECURITY.md</a>。</span></p>
+    <div class="limits">
+      <div>
+        <h3><span lang="en">Guaranteed</span><span lang="zh">能保证</span></h3>
+        <ul>
+          <li><span lang="en">No credential is used without device-owner authentication.</span><span lang="zh">没有设备主人认证，任何凭证都用不了。</span></li>
+          <li><span lang="en">Long-term protocol secrets never leave the root helper.</span><span lang="zh">协议凭证的长期秘密不出 root 进程。</span></li>
+          <li><span lang="en">Adding hosts, loosening rules, overwriting or deleting needs your confirmation — enforced by root, not by the agent-facing server.</span><span lang="zh">新增域名、放宽规则、覆盖或删除都要你确认，由 root 进程强制，而不是面向 agent 的服务端。</span></li>
+          <li><span lang="en">Every use is logged; secrets never are.</span><span lang="zh">每次使用都有记录，记录里从不出现秘密。</span></li>
+        </ul>
+      </div>
+      <div>
+        <h3><span lang="en">Not guaranteed</span><span lang="zh">不能保证</span></h3>
+        <ul>
+          <li><span lang="en">An agent you granted a credential can misuse that grant within the session.</span><span lang="zh">你授权过的 agent，可以在本会话内滥用这次授权。</span></li>
+          <li><span lang="en">The purpose is the agent’s claim. Read it before you touch.</span><span lang="zh">目的由 agent 自己填写，按指纹前请先读一读。</span></li>
+          <li><span lang="en">Values you choose to reveal with <code>credential_get</code> are in the agent’s context.</span><span lang="zh">用 <code>credential_get</code> 取出的值会进入 agent 的上下文。</span></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <h2><span lang="en">Install</span><span lang="zh">安装</span></h2>
+    <div class="install">
+      <div>
+        <p><span lang="en">Needs macOS, Node.js 20+ from nvm or nodejs.org, and the Xcode Command Line Tools. The installer asks for your password once and adds a single sudoers rule that can only start the KeyValet helper.</span><span lang="zh">需要 macOS、来自 nvm 或 nodejs.org 的 Node.js 20+，以及 Xcode 命令行工具。安装时会要一次密码，并添加一条只能启动 KeyValet helper 的 sudoers 规则。</span></p>
+        <pre><code><span data-clone></span>
+cd keyvalet
+./scripts/install.sh</code></pre>
+      </div>
+      <div>
+        <p><span lang="en">Then register it with your MCP client. For Claude Code:</span><span lang="zh">然后在 MCP 客户端里注册。以 Claude Code 为例：</span></p>
+        <pre><code>claude mcp add keyvalet --scope user -- \
+  /usr/local/lib/keyvalet/bin/node \
+  /usr/local/lib/keyvalet/app/dist/server/index.js</code></pre>
+        <p><span lang="en">Ask your agent to store a key with the <code>openai</code> template, then to list your models. You will see the Touch ID prompt once.</span><span lang="zh">让 agent 用 <code>openai</code> 模板保存一个 key，再列出你的模型。你只会看到一次 Touch ID 弹窗。</span></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="wrap">
+  <footer>
+    <span>KeyValet · Apache-2.0</span>
+    <span><a data-repo href="https://github.com/">GitHub</a> &nbsp; <a data-repo-file="SECURITY.md" href="#"><span lang="en">Security</span><span lang="zh">安全模型</span></a> &nbsp; <a data-repo-file="README.zh-CN.md" href="#"><span lang="en">中文文档</span><span lang="zh">中文文档</span></a></span>
+  </footer>
+</div>
+
+<script>
+  // 仓库地址只在这里配置一次（部署时替换）
+  const REPO = "https://github.com/OWNER/keyvalet";
+  document.querySelectorAll("[data-repo]").forEach((a) => (a.href = REPO));
+  document.querySelectorAll("[data-repo-file]").forEach((a) => (a.href = `${REPO}/blob/main/${a.dataset.repoFile}`));
+  document.querySelectorAll("[data-clone]").forEach((el) => (el.textContent = `git clone ${REPO}.git`));
+
+  const html = document.documentElement;
+  function setLang(l) {
+    html.dataset.lang = l;
+    html.lang = l === "zh" ? "zh-CN" : "en";
+    document.querySelectorAll("[data-set-lang]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.setLang === l)));
+    try { localStorage.setItem("keyvalet-lang", l); } catch {}
+  }
+  document.querySelectorAll("[data-set-lang]").forEach((b) => b.addEventListener("click", () => setLang(b.dataset.setLang)));
+  let saved = null;
+  try { saved = localStorage.getItem("keyvalet-lang"); } catch {}
+  setLang(saved || ((navigator.language || "en").toLowerCase().startsWith("zh") ? "zh" : "en"));
+</script>
+</body>
+</html>

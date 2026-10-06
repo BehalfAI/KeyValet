@@ -3,10 +3,12 @@
 // 只通过 stdin/stdout（sudo 子进程管道）与父进程通信；stdin 关闭即退出，
 // 因此它的生命周期与 MCP session 绑定。
 
+import { setLang, t } from "../shared/i18n.js";
 import { HELPER_JS, VAULT_DIR } from "../shared/paths.js";
 import { MAX_LINE_BYTES, PROTOCOL_VERSION, cleanPurpose, type AuthMessage, type ReadyMessage, type Request } from "../shared/protocol.js";
 import { touchIdGate } from "./auth-gate.js";
 import { dispatch, resolveHint, type ClientContext, type SessionAuth } from "./dispatch.js";
+import { Gateway } from "./gateway.js";
 import { readSettings } from "./settings.js";
 import { fatal as fatalWith, verifyRootEnvironment } from "./trust.js";
 import { Vault } from "./vault.js";
@@ -32,8 +34,9 @@ async function authenticate(vault: Vault, line: string, ctx: ClientContext, auth
   try {
     msg = JSON.parse(line) as AuthMessage;
   } catch {
-    fatal("协议错误：握手消息不是合法 JSON");
+    fatal(t("协议错误：握手消息不是合法 JSON", "Protocol error: handshake message is not valid JSON"));
   }
+  setLang(msg.lang); // 与 MCP server 使用同一种界面语言
   const purpose = cleanPurpose(msg.purpose);
   const reject = (error: string): never => {
     try {
@@ -51,19 +54,22 @@ async function authenticate(vault: Vault, line: string, ctx: ClientContext, auth
     ppid: typeof msg.ppid === "number" ? msg.ppid : undefined,
     client: clip(msg.client, 100),
   });
-  if (msg.op !== "auth") fatal("协议错误：第一条消息必须是 auth");
-  if (!purpose) reject("必须说明解锁目的（purpose）");
+  if (msg.op !== "auth") fatal(t("协议错误：第一条消息必须是 auth", "Protocol error: the first message must be auth"));
+  if (!purpose) reject(t("必须说明解锁目的（purpose）", "A purpose is required to unlock"));
 
   // 授权范围：all 一次授权全部；per_credential 只授权触发解锁的那个凭证（如有）
   const mode = readSettings(VAULT_DIR).grant_mode;
   const hint = mode === "per_credential" ? resolveHint(vault, msg.credential) : null;
   const scope =
     mode === "all"
-      ? "解锁 KeyValet 凭证库（本会话可使用全部凭证）"
+      ? t("解锁 KeyValet 凭证库（本会话可使用全部凭证）", "Unlock the KeyValet vault (this session can use all credentials)")
       : hint
-        ? `授权本次 AI 会话使用凭证：${hint}`
-        : "打开 KeyValet 凭证库会话（仅可查看列表；使用具体凭证时需再次授权）";
-  const reason = `${scope}\n目的：${purpose}\n来源目录（agent 提供）：${ctx.cwd || "未知"}`;
+        ? t(`授权本次 AI 会话使用凭证：${hint}`, `Authorize this AI session to use credential: ${hint}`)
+        : t("打开 KeyValet 凭证库会话（仅可查看列表；使用具体凭证时需再次授权）", "Open a KeyValet vault session (list only; using a specific credential requires further authorization)");
+  const reason = t(
+    `${scope}\n目的：${purpose}\n来源目录（agent 提供）：${ctx.cwd || "未知"}`,
+    `${scope}\nPurpose: ${purpose}\nWorking directory (reported by agent): ${ctx.cwd || "unknown"}`,
+  );
   const gate = await touchIdGate(VAULT_DIR, reason);
   if (!gate.ok) reject(gate.error);
 
@@ -83,11 +89,13 @@ function main(): void {
   try {
     vault.init();
   } catch (e) {
-    fatal(`凭证库初始化失败：${(e as Error).message}`);
+    fatal(t(`凭证库初始化失败：${(e as Error).message}`, `Vault initialization failed: ${(e as Error).message}`));
   }
 
   const ctx: ClientContext = {};
   const auth: SessionAuth = { grantAll: false, grants: new Set(), authorize: (reason) => touchIdGate(VAULT_DIR, reason) };
+  // 网关只接受发起会话的用户的进程连接（其他 macOS 用户即使拿到令牌也无法使用）
+  auth.gateway = new Gateway(vault, (e) => vault.audit({ ...e, session: ctx.session, client: ctx }), { allowedUid: Number(process.env.SUDO_UID) });
   const queue: Request[] = [];
   let inFlight = 0;
   const pump = () => {
@@ -96,22 +104,22 @@ function main(): void {
       inFlight++;
       void dispatch(vault, req, ctx, auth)
         .then(send)
-        .catch((e: unknown) => send({ id: req.id, ok: false, error: `内部错误：${e instanceof Error ? e.message : String(e)}` }))
+        .catch((e: unknown) => send({ id: req.id, ok: false, error: t(`内部错误：${e instanceof Error ? e.message : String(e)}`, `Internal error: ${e instanceof Error ? e.message : String(e)}`) }))
         .finally(() => {
           inFlight--;
           pump();
         });
     }
-    if (queue.length > 1000) fatal("待处理请求过多");
+    if (queue.length > 1000) fatal(t("待处理请求过多", "Too many pending requests"));
   };
   let state: "handshake" | "authenticating" | "ready" = "handshake";
-  const handshakeTimer = setTimeout(() => fatal("等待握手超时"), HANDSHAKE_TIMEOUT_MS);
+  const handshakeTimer = setTimeout(() => fatal(t("等待握手超时", "Timed out waiting for handshake")), HANDSHAKE_TIMEOUT_MS);
 
   let buf = "";
   process.stdin.setEncoding("utf8");
   process.stdin.on("data", (chunk: string) => {
     buf += chunk;
-    if (buf.length > MAX_LINE_BYTES) fatal("请求过大");
+    if (buf.length > MAX_LINE_BYTES) fatal(t("请求过大", "Request too large"));
     let nl: number;
     while ((nl = buf.indexOf("\n")) >= 0) {
       const line = buf.slice(0, nl);
@@ -126,14 +134,14 @@ function main(): void {
         continue;
       }
       // 认证通过之前不处理任何请求
-      if (state !== "ready") fatal("协议错误：认证完成前收到请求");
+      if (state !== "ready") fatal(t("协议错误：认证完成前收到请求", "Protocol error: request received before authentication completed"));
       let req: Request;
       try {
         req = JSON.parse(line) as Request;
       } catch {
-        fatal("协议错误：非法 JSON");
+        fatal(t("协议错误：非法 JSON", "Protocol error: invalid JSON"));
       }
-      if (typeof req.id !== "number" || typeof req.op !== "string") fatal("协议错误：缺少 id/op");
+      if (typeof req.id !== "number" || typeof req.op !== "string") fatal(t("协议错误：缺少 id/op", "Protocol error: missing id/op"));
       // 并发处理（有上限）：协议请求可能要等网络，响应按 id 匹配
       queue.push(req);
       pump();

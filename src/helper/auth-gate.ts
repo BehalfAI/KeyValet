@@ -7,6 +7,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { t } from "../shared/i18n.js";
 import { TOUCHID_BIN } from "../shared/paths.js";
 import { untrustedReason } from "./trust.js";
 
@@ -72,7 +73,7 @@ function acquireAuthLock(vaultDir: string): (() => void) | null {
 
 export async function touchIdGate(vaultDir: string, reason: string): Promise<GateResult> {
   const release = acquireAuthLock(vaultDir);
-  if (!release) return { ok: false, error: "已有另一个解锁请求正在等待认证，请稍后再试" };
+  if (!release) return { ok: false, error: t("已有另一个解锁请求正在等待认证，请稍后再试", "Another unlock request is already waiting for authentication; please try again later") };
   try {
     return await gate(vaultDir, reason);
   } finally {
@@ -82,19 +83,19 @@ export async function touchIdGate(vaultDir: string, reason: string): Promise<Gat
 
 async function gate(vaultDir: string, reason: string): Promise<GateResult> {
   const wait = cooldownRemainingMs(vaultDir);
-  if (wait > 0) return { ok: false, error: `上次认证未通过，请 ${Math.ceil(wait / 1000)} 秒后再试` };
+  if (wait > 0) return { ok: false, error: t(`上次认证未通过，请 ${Math.ceil(wait / 1000)} 秒后再试`, `The last authentication failed; please try again in ${Math.ceil(wait / 1000)} seconds`) };
   let bad: string | null;
   try {
     bad = untrustedReason(TOUCHID_BIN);
   } catch {
-    bad = "文件不存在";
+    bad = t("文件不存在", "file does not exist");
   }
-  if (bad) return { ok: false, error: `Touch ID 程序不可信（${bad}），请重新安装` };
+  if (bad) return { ok: false, error: t(`Touch ID 程序不可信（${bad}），请重新安装`, `The Touch ID program is untrusted (${bad}); please reinstall`) };
   const user = invokingUser();
-  if (!user) return { ok: false, error: "无法确定发起请求的用户（SUDO_UID）" };
+  if (!user) return { ok: false, error: t("无法确定发起请求的用户（SUDO_UID）", "Cannot determine the requesting user (SUDO_UID)") };
 
   const code = await new Promise<number | null>((resolve) => {
-    const child = spawn(TOUCHID_BIN, [reason], {
+    const child = spawn(TOUCHID_BIN, [reason, t("拒绝", "Deny")], {
       uid: user.uid,
       gid: user.gid,
       cwd: "/",
@@ -114,6 +115,6 @@ async function gate(vaultDir: string, reason: string): Promise<GateResult> {
     return { ok: true };
   }
   recordFailure(vaultDir);
-  if (code === 2) return { ok: false, error: "本机不支持设备所有者认证（Touch ID / 登录密码）" };
-  return { ok: false, error: "Touch ID 认证未通过（已拒绝、取消或超时）" };
+  if (code === 2) return { ok: false, error: t("本机不支持设备所有者认证（Touch ID / 登录密码）", "This Mac does not support device owner authentication (Touch ID / login password)") };
+  return { ok: false, error: t("Touch ID 认证未通过（已拒绝、取消或超时）", "Touch ID authentication failed (denied, canceled, or timed out)") };
 }

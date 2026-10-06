@@ -2,6 +2,7 @@
 // 长期 secret key 永不离开 root helper；agent 只拿到最长数小时有效的临时凭证。
 
 import crypto from "node:crypto";
+import { t } from "../../shared/i18n.js";
 import { Vault, VaultError, type CredentialRecord } from "../vault.js";
 import { int, optStr, str } from "./check.js";
 import { httpRequest } from "./http.js";
@@ -63,23 +64,23 @@ export function sigv4(p: {
 
 export function validateAwsSetup(config: Record<string, unknown>, secrets: Record<string, unknown>) {
   const akid = str(config.access_key_id, "access_key_id", 128);
-  if (!/^AKIA[A-Z0-9]{12,124}$/.test(akid)) throw new VaultError("access_key_id 应为长期密钥（AKIA 开头）");
+  if (!/^AKIA[A-Z0-9]{12,124}$/.test(akid)) throw new VaultError(t("access_key_id 应为长期密钥（AKIA 开头）", "access_key_id must be a long-term key (starting with AKIA)"));
   const secret = str(secrets.secret_access_key, "secret_access_key", 256);
-  if (!/^[A-Za-z0-9/+=]{20,256}$/.test(secret)) throw new VaultError("secret_access_key 格式不对");
+  if (!/^[A-Za-z0-9/+=]{20,256}$/.test(secret)) throw new VaultError(t("secret_access_key 格式不对", "secret_access_key has an invalid format"));
   const region = str(config.region ?? "us-east-1", "region", 50);
-  if (!/^[a-z]{2}(-gov)?-[a-z]+-\d$/.test(region)) throw new VaultError(`非法或不支持的 region：${region}`);
+  if (!/^[a-z]{2}(-gov)?-[a-z]+-\d$/.test(region)) throw new VaultError(t(`非法或不支持的 region：${region}`, `Invalid or unsupported region: ${region}`));
   const roleArn = optStr(config.role_arn, "role_arn", 2048);
-  if (roleArn && !/^arn:aws[a-z-]*:iam::\d{12}:role\/[\w+=,.@/-]+$/.test(roleArn)) throw new VaultError("role_arn 格式不对");
+  if (roleArn && !/^arn:aws[a-z-]*:iam::\d{12}:role\/[\w+=,.@/-]+$/.test(roleArn)) throw new VaultError(t("role_arn 格式不对", "role_arn has an invalid format"));
   const mfaSerial = optStr(config.mfa_serial, "mfa_serial", 256);
-  if (mfaSerial && !/^(arn:aws[a-z-]*:iam::\d{12}:mfa\/[\w+=,.@/-]+|GAHT[A-Z0-9]+)$/.test(mfaSerial)) throw new VaultError("mfa_serial 格式不对");
+  if (mfaSerial && !/^(arn:aws[a-z-]*:iam::\d{12}:mfa\/[\w+=,.@/-]+|GAHT[A-Z0-9]+)$/.test(mfaSerial)) throw new VaultError(t("mfa_serial 格式不对", "mfa_serial has an invalid format"));
   let mfaTotp: AwsConfig["mfa_totp"];
   if (config.mfa_totp) {
     const m = config.mfa_totp as Record<string, unknown>;
     mfaTotp = { type: str(m.type, "mfa_totp.type", 64), name: str(m.name, "mfa_totp.name", 128) };
-    if (!mfaSerial) throw new VaultError("设置 mfa_totp 时必须同时设置 mfa_serial");
+    if (!mfaSerial) throw new VaultError(t("设置 mfa_totp 时必须同时设置 mfa_serial", "mfa_serial must be set when mfa_totp is set"));
   }
   const sessionName = str(config.role_session_name ?? "keyvalet", "role_session_name", 64);
-  if (!/^[\w+=,.@-]{2,64}$/.test(sessionName)) throw new VaultError("role_session_name 格式不对");
+  if (!/^[\w+=,.@-]{2,64}$/.test(sessionName)) throw new VaultError(t("role_session_name 格式不对", "role_session_name has an invalid format"));
   const cfg: AwsConfig = {
     access_key_id: akid,
     region,
@@ -98,8 +99,8 @@ function xmlTag(xml: string, tag: string): string | undefined {
 }
 
 export async function awsCredentials(vault: Vault, p: { type: unknown; name: unknown; duration_seconds?: unknown; force?: unknown }) {
-  const { type: t, name: n, record } = vault.getRecord(p.type, p.name);
-  if (record.kind !== "aws") throw new VaultError(`"${t}/${n}" 不是 AWS 凭证`);
+  const { type: ty, name: n, record } = vault.getRecord(p.type, p.name);
+  if (record.kind !== "aws") throw new VaultError(t(`"${ty}/${n}" 不是 AWS 凭证`, `"${ty}/${n}" is not an AWS credential`));
   const cfg = record.config as unknown as AwsConfig;
   const duration = int(p.duration_seconds, "duration_seconds", 900, cfg.role_arn ? 43_200 : 129_600, cfg.duration_seconds);
 
@@ -116,7 +117,7 @@ export async function awsCredentials(vault: Vault, p: { type: unknown; name: unk
     form.Action = "GetSessionToken";
   }
   if (cfg.mfa_serial) {
-    if (!cfg.mfa_totp) throw new VaultError("配置了 mfa_serial 但没有关联 TOTP 凭证（mfa_totp）");
+    if (!cfg.mfa_totp) throw new VaultError(t("配置了 mfa_serial 但没有关联 TOTP 凭证（mfa_totp）", "mfa_serial is configured but no TOTP credential is linked (mfa_totp)"));
     form.SerialNumber = cfg.mfa_serial;
     let mfa = totpCode(vault, cfg.mfa_totp);
     // AWS 拒绝重复使用同一个验证码：与上次相同则等到下一个周期
@@ -154,7 +155,8 @@ export async function awsCredentials(vault: Vault, p: { type: unknown; name: unk
     body,
   });
   if (r.status >= 300) {
-    throw new VaultError(`AWS STS 返回错误（HTTP ${r.status}）：${xmlTag(r.text, "Code") ?? ""} ${xmlTag(r.text, "Message") ?? r.text.slice(0, 200)}`);
+    const detail = `${xmlTag(r.text, "Code") ?? ""} ${xmlTag(r.text, "Message") ?? r.text.slice(0, 200)}`;
+    throw new VaultError(t(`AWS STS 返回错误（HTTP ${r.status}）：${detail}`, `AWS STS returned an error (HTTP ${r.status}): ${detail}`));
   }
   const creds: SessionCreds = {
     access_key_id: xmlTag(r.text, "AccessKeyId") ?? "",
@@ -163,9 +165,9 @@ export async function awsCredentials(vault: Vault, p: { type: unknown; name: unk
     expiration: Date.parse(xmlTag(r.text, "Expiration") ?? ""),
   };
   if (!creds.access_key_id || !creds.secret_access_key || !creds.session_token || !creds.expiration) {
-    throw new VaultError("AWS STS 响应缺少凭证字段");
+    throw new VaultError(t("AWS STS 响应缺少凭证字段", "AWS STS response is missing credential fields"));
   }
-  vault.patchRecord(t, n, "aws", record.generation, (rec: CredentialRecord) => {
+  vault.patchRecord(ty, n, "aws", record.generation, (rec: CredentialRecord) => {
     rec.state = {
       ...rec.state,
       ...(p.duration_seconds == null ? { session: creds } : {}),

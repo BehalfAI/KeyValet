@@ -1,6 +1,7 @@
 // TOTP（RFC 6238）两步验证码。agent 只能拿到当前验证码，拿不到种子。
 
 import crypto from "node:crypto";
+import { t } from "../../shared/i18n.js";
 import { Vault, VaultError } from "../vault.js";
 import { int, oneOf, optStr, str } from "./check.js";
 
@@ -23,7 +24,7 @@ export function base32Decode(input: string): Buffer {
   const out: number[] = [];
   for (const ch of clean) {
     const idx = alphabet.indexOf(ch);
-    if (idx < 0) throw new VaultError("TOTP 密钥不是合法的 Base32");
+    if (idx < 0) throw new VaultError(t("TOTP 密钥不是合法的 Base32", "TOTP secret is not valid Base32"));
     value = (value << 5) | idx;
     bits += 5;
     if (bits >= 8) {
@@ -45,7 +46,7 @@ export function totpAt(key: Buffer, unixSeconds: number, digits: number, period:
 
 /** secret 可以是 Base32 种子，也可以是二维码里的 otpauth://totp/... URI */
 export function validateTotpSetup(config: Record<string, unknown>, secrets: Record<string, unknown>) {
-  const raw = str(secrets.secret, "TOTP 密钥", 2000).trim();
+  const raw = str(secrets.secret, t("TOTP 密钥", "TOTP secret"), 2000).trim();
   let seed = raw;
   const fromUri: Record<string, unknown> = {};
   if (raw.toLowerCase().startsWith("otpauth://")) {
@@ -53,10 +54,10 @@ export function validateTotpSetup(config: Record<string, unknown>, secrets: Reco
     try {
       u = new URL(raw);
     } catch {
-      throw new VaultError("otpauth URI 格式错误");
+      throw new VaultError(t("otpauth URI 格式错误", "Malformed otpauth URI"));
     }
-    if (u.host.toLowerCase() !== "totp") throw new VaultError("只支持 otpauth://totp（不支持 hotp）");
-    seed = str(u.searchParams.get("secret") ?? "", "otpauth URI 中的 secret", 500);
+    if (u.host.toLowerCase() !== "totp") throw new VaultError(t("只支持 otpauth://totp（不支持 hotp）", "Only otpauth://totp is supported (hotp is not)"));
+    seed = str(u.searchParams.get("secret") ?? "", t("otpauth URI 中的 secret", "secret in the otpauth URI"), 500);
     const label = decodeURIComponent(u.pathname.replace(/^\//, ""));
     const [labelIssuer, labelAccount] = label.includes(":") ? label.split(":", 2) : [undefined, label];
     fromUri.issuer = u.searchParams.get("issuer") ?? labelIssuer;
@@ -66,7 +67,7 @@ export function validateTotpSetup(config: Record<string, unknown>, secrets: Reco
     if (u.searchParams.get("algorithm")) fromUri.algorithm = u.searchParams.get("algorithm")!.toUpperCase();
   }
   const key = base32Decode(seed);
-  if (key.length < 10) throw new VaultError("TOTP 密钥太短（至少 80 位）");
+  if (key.length < 10) throw new VaultError(t("TOTP 密钥太短（至少 80 位）", "TOTP secret is too short (at least 80 bits)"));
   const cfg: TotpConfig = {
     issuer: optStr(config.issuer ?? fromUri.issuer, "issuer", 200),
     account: optStr(config.account ?? fromUri.account, "account", 200),
@@ -78,8 +79,8 @@ export function validateTotpSetup(config: Record<string, unknown>, secrets: Reco
 }
 
 export function totpCode(vault: Vault, p: { type: unknown; name: unknown }) {
-  const { type: t, name: n, record } = vault.getRecord(p.type, p.name);
-  if (record.kind !== "totp") throw new VaultError(`"${t}/${n}" 不是 TOTP 凭证`);
+  const { type: ty, name: n, record } = vault.getRecord(p.type, p.name);
+  if (record.kind !== "totp") throw new VaultError(t(`"${ty}/${n}" 不是 TOTP 凭证`, `"${ty}/${n}" is not a TOTP credential`));
   const cfg = record.config as unknown as TotpConfig;
   const key = base32Decode(record.secrets!.secret!);
   const now = Date.now() / 1000;

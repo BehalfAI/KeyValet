@@ -40,6 +40,8 @@ export const OPS = [
   "settings",
   /** 本会话的授权状态 */
   "sessionInfo",
+  /** 开通本地网关入口（给 SDK / CLI 用，支持流式响应） */
+  "gatewayOpen",
 ] as const;
 
 export type Op = (typeof OPS)[number];
@@ -61,6 +63,7 @@ export const PURPOSE_REQUIRED_OPS: ReadonlySet<Op> = new Set<Op>([
   "httpRequest",
   "httpTest",
   "grant",
+  "gatewayOpen",
 ]);
 
 /** 需要该凭证已获授权的操作（per_credential 模式下） */
@@ -75,10 +78,14 @@ export const GRANT_REQUIRED_OPS: ReadonlySet<Op> = new Set<Op>([
   "oauthExchange",
   "oauthDeviceStart",
   "oauthDevicePoll",
+  "gatewayOpen",
 ]);
 
 /** helper 返回的“需要授权”错误前缀，后跟 type/name */
 export const GRANT_REQUIRED_PREFIX = "[GRANT_REQUIRED] ";
+
+/** helper 返回的“端点/client 已变化，不能沿用旧 client secret”错误标记（与界面语言无关） */
+export const SECRET_REBIND_MARK = "[SECRET_REBIND]";
 
 export interface Request {
   id: number;
@@ -93,6 +100,8 @@ export type Response =
 export interface AuthMessage {
   op: "auth";
   purpose: string;
+  /** 界面语言（helper 的提示、弹窗、错误信息与 MCP server 保持一致） */
+  lang?: "en" | "zh";
   /** 触发解锁的工具要使用的凭证（per_credential 模式下，本次 Touch ID 即授权该凭证） */
   credential?: { type?: string; name: string };
   cwd: string;

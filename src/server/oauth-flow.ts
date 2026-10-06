@@ -6,6 +6,7 @@ import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import http from "node:http";
 import { readLimited } from "../helper/protocols/http.js";
+import { t } from "../shared/i18n.js";
 
 const LOGIN_TIMEOUT_MS = 5 * 60_000;
 
@@ -66,14 +67,14 @@ export async function runBrowserFlow(opts: {
       return;
     }
     if (u.searchParams.get("state") !== state) {
-      res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" }).end(PAGE("授权失败", "state 不匹配，请回到 AI 会话重新发起授权。"));
+      res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" }).end(PAGE(t("授权失败", "Authorization failed"), t("state 不匹配，请回到 AI 会话重新发起授权。", "State mismatch. Please return to the AI session and start the authorization again.")));
       return; // 不结束流程：可能是伪造请求，继续等真正的回调
     }
     const err = u.searchParams.get("error");
     if (err) {
       const desc = u.searchParams.get("error_description") ?? "";
-      res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" }).end(PAGE("授权未完成", escapeHtml(`${err} ${desc}`)));
-      settle.reject(new Error(`授权被拒绝或失败：${err}${desc ? ` (${desc})` : ""}`));
+      res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" }).end(PAGE(t("授权未完成", "Authorization not completed"), escapeHtml(`${err} ${desc}`)));
+      settle.reject(new Error(t(`授权被拒绝或失败：${err}${desc ? ` (${desc})` : ""}`, `Authorization denied or failed: ${err}${desc ? ` (${desc})` : ""}`)));
       return;
     }
     const code = u.searchParams.get("code");
@@ -81,7 +82,7 @@ export async function runBrowserFlow(opts: {
       res.writeHead(400).end();
       return;
     }
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(PAGE("授权成功 ✅", "凭证已安全保存，可以关闭此页面并回到 AI 会话。"));
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(PAGE(t("授权成功 ✅", "Authorization successful ✅"), t("凭证已安全保存，可以关闭此页面并回到 AI 会话。", "The credential has been saved securely. You can close this page and return to the AI session.")));
     settle.resolve(code);
   };
 
@@ -95,7 +96,7 @@ export async function runBrowserFlow(opts: {
         srv.listen(port, addr, () => resolve());
       });
     } catch (e) {
-      if (servers.length === 0) throw new Error(`无法监听 ${addr}:${port}：${(e as Error).message}`);
+      if (servers.length === 0) throw new Error(t(`无法监听 ${addr}:${port}：${(e as Error).message}`, `Cannot listen on ${addr}:${port}: ${(e as Error).message}`));
       continue; // IPv6 不可用时只用 IPv4
     }
     servers.push(srv);
@@ -113,7 +114,7 @@ export async function runBrowserFlow(opts: {
   auth.searchParams.set("code_challenge", challenge);
   auth.searchParams.set("code_challenge_method", "S256");
 
-  const timer = setTimeout(() => settle.reject(new Error("等待浏览器授权超时（5 分钟）")), opts.timeoutMs ?? LOGIN_TIMEOUT_MS);
+  const timer = setTimeout(() => settle.reject(new Error(t("等待浏览器授权超时（5 分钟）", "Timed out waiting for browser authorization (5 minutes)"))), opts.timeoutMs ?? LOGIN_TIMEOUT_MS);
   try {
     await (opts.open ?? openInBrowser)(auth.toString());
     const code = await codePromise;
@@ -131,14 +132,14 @@ export async function discoverOidc(issuer: string): Promise<{
   device_authorization_url?: string;
 }> {
   const base = new URL(issuer);
-  if (base.protocol !== "https:") throw new Error("issuer 必须使用 https");
+  if (base.protocol !== "https:") throw new Error(t("issuer 必须使用 https", "issuer must use https"));
   const url = `${base.toString().replace(/\/+$/, "")}/.well-known/openid-configuration`;
   const res = await fetch(url, { redirect: "error", signal: AbortSignal.timeout(15_000), headers: { "Accept-Encoding": "identity" } });
-  if (!res.ok) throw new Error(`OIDC 发现失败：${url} 返回 HTTP ${res.status}`);
+  if (!res.ok) throw new Error(t(`OIDC 发现失败：${url} 返回 HTTP ${res.status}`, `OIDC discovery failed: ${url} returned HTTP ${res.status}`));
   const doc = JSON.parse((await readLimited(res, 256 * 1024, base.host)).toString("utf8")) as Record<string, unknown>;
   const norm = (s: unknown) => String(s ?? "").replace(/\/+$/, "");
-  if (norm(doc.issuer) !== norm(base.toString())) throw new Error(`OIDC 文档中的 issuer（${String(doc.issuer)}）与请求的不一致`);
-  if (typeof doc.token_endpoint !== "string") throw new Error("OIDC 文档缺少 token_endpoint");
+  if (norm(doc.issuer) !== norm(base.toString())) throw new Error(t(`OIDC 文档中的 issuer（${String(doc.issuer)}）与请求的不一致`, `The issuer in the OIDC document (${String(doc.issuer)}) does not match the requested one`));
+  if (typeof doc.token_endpoint !== "string") throw new Error(t("OIDC 文档缺少 token_endpoint", "OIDC document is missing token_endpoint"));
   return {
     authorization_url: typeof doc.authorization_endpoint === "string" ? doc.authorization_endpoint : undefined,
     token_url: doc.token_endpoint,

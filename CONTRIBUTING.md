@@ -26,7 +26,7 @@ The catalog lives in `scripts/build-catalog.mjs` (regenerate with `npm run templ
 
 ## Localization
 
-User-facing messages are currently in Chinese. English localization is very welcome.
+User-facing text is bilingual: wrap it with `t("中文", "English")` from `src/shared/i18n.ts`. In the root helper, call `t()` at the point of use (the language is set during the handshake), never in module-level constants. Tests run with `KEYVALET_LANG=zh`; `src/test/i18n.test.ts` checks that the English UI contains no Chinese.
 
 ## Reporting security issues
 

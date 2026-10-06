@@ -1,3 +1,5 @@
+import { t } from "../../shared/i18n.js";
+import { SECRET_REBIND_MARK } from "../../shared/protocol.js";
 import { Vault, VaultError, normalizeName, normalizeType, type CredentialRecord, type Kind } from "../vault.js";
 import { awsCredentials, validateAwsSetup } from "./aws.js";
 import { gitHubAppToken, validateGitHubAppSetup } from "./github-app.js";
@@ -22,7 +24,7 @@ const VALIDATORS: Record<Exclude<Kind, "static">, Validator> = {
 
 function asRecord(v: unknown, what: string): Record<string, unknown> {
   if (v === undefined || v === null) return {};
-  if (typeof v !== "object" || Array.isArray(v)) throw new VaultError(`${what} 必须是对象`);
+  if (typeof v !== "object" || Array.isArray(v)) throw new VaultError(t(`${what} 必须是对象`, `${what} must be an object`));
   return v as Record<string, unknown>;
 }
 
@@ -30,30 +32,35 @@ function asRecord(v: unknown, what: string): Record<string, unknown> {
 export function setupProtocol(vault: Vault, p: Record<string, unknown>) {
   const kind = p.kind as Kind;
   if (typeof kind !== "string" || kind === "static" || !Object.hasOwn(VALIDATORS, kind)) {
-    throw new VaultError(`未知的协议种类 ${String(p.kind)}`);
+    throw new VaultError(t(`未知的协议种类 ${String(p.kind)}`, `Unknown protocol kind ${String(p.kind)}`));
   }
   const inSecrets = { ...asRecord(p.secrets, "secrets") };
   let previous: CredentialRecord | undefined;
   if (p.reuseClientSecret === true) {
     // 只改 scope 等时沿用旧 client secret；但端点或 client 一旦变化就必须重新输入，
     // 防止把已保存的 secret 发往新的（可能是恶意的）地址。
-    if (kind !== "oauth2") throw new VaultError("只有 oauth2 凭证可以沿用 client secret");
+    if (kind !== "oauth2") throw new VaultError(t("只有 oauth2 凭证可以沿用 client secret", "Only oauth2 credentials can reuse the client secret"));
     previous = vault.getRecord(p.type, p.name).record;
-    if (previous.kind !== "oauth2") throw new VaultError("已有凭证不是 oauth2，不能沿用 client secret");
+    if (previous.kind !== "oauth2") throw new VaultError(t("已有凭证不是 oauth2，不能沿用 client secret", "The existing credential is not oauth2; cannot reuse the client secret"));
     if (previous.secrets?.client_secret) inSecrets.client_secret = previous.secrets.client_secret;
   }
   const { config, secrets } = VALIDATORS[kind as Exclude<Kind, "static">](asRecord(p.config, "config"), inSecrets);
   if (previous) {
     for (const k of ["client_id", "token_url", "authorization_url", "device_authorization_url", "token_auth_method"]) {
       if ((previous.config ?? {})[k] !== config[k]) {
-        throw new VaultError(`${k} 已变化，不能沿用旧的 client secret，请重新输入`);
+        throw new VaultError(
+          t(
+            `${SECRET_REBIND_MARK} ${k} 已变化，不能沿用旧的 client secret，请重新输入`,
+            `${SECRET_REBIND_MARK} ${k} has changed; the old client secret cannot be reused, please enter it again`,
+          ),
+        );
       }
     }
   }
   if (kind === "aws" && config.mfa_totp) {
     const ref = config.mfa_totp as { type: string; name: string };
     const target = vault.getRecord(ref.type, ref.name);
-    if (target.record.kind !== "totp") throw new VaultError(`mfa_totp 指向的 "${target.type}/${target.name}" 不是 TOTP 凭证`);
+    if (target.record.kind !== "totp") throw new VaultError(t(`mfa_totp 指向的 "${target.type}/${target.name}" 不是 TOTP 凭证`, `"${target.type}/${target.name}" referenced by mfa_totp is not a TOTP credential`));
     config.mfa_totp = { type: target.type, name: target.name };
   }
   return vault.setProtocol({
@@ -75,17 +82,17 @@ export function publicView(type: string, name: string, rec: CredentialRecord) {
   const cfg = { ...(rec.config ?? {}) };
   switch (kind) {
     case "oauth2":
-      return { ...base, config: cfg, status: oauth2State(rec), how_to_use: "调用 credential_access_token 获取 access token" };
+      return { ...base, config: cfg, status: oauth2State(rec), how_to_use: t("调用 credential_access_token 获取 access token", "Call credential_access_token to get an access token") };
     case "google_service_account":
     case "github_app":
     case "jwt":
-      return { ...base, config: cfg, how_to_use: "调用 credential_access_token 获取短期 token" };
+      return { ...base, config: cfg, how_to_use: t("调用 credential_access_token 获取短期 token", "Call credential_access_token to get a short-lived token") };
     case "totp":
-      return { ...base, config: cfg, how_to_use: "调用 credential_totp_code 获取当前验证码" };
+      return { ...base, config: cfg, how_to_use: t("调用 credential_totp_code 获取当前验证码", "Call credential_totp_code to get the current code") };
     case "aws":
-      return { ...base, config: cfg, how_to_use: "调用 credential_aws_credentials 获取临时凭证" };
+      return { ...base, config: cfg, how_to_use: t("调用 credential_aws_credentials 获取临时凭证", "Call credential_aws_credentials to get temporary credentials") };
     default:
-      throw new VaultError("static 凭证请使用 get");
+      throw new VaultError(t("static 凭证请使用 get", "Use get for static credentials"));
   }
 }
 
@@ -104,7 +111,12 @@ export async function accessToken(vault: Vault, p: Record<string, unknown>): Pro
   const { type, name, record } = vault.getRecord(p.type, p.name);
   // 只能代理调用的凭证：token 只在代理内部使用，不返回给调用方（p.viaProxy 只能由 helper 内部设置，见 dispatch）
   if (record.http?.proxy_only && p.viaProxy !== true) {
-    throw new VaultError(`"${type}/${name}" 设置为只能代理调用，不能取出 access token；请用 credential_http_request`);
+    throw new VaultError(
+      t(
+        `"${type}/${name}" 设置为只能代理调用，不能取出 access token；请用 credential_http_request`,
+        `"${type}/${name}" is proxy-only; its access token cannot be retrieved. Use credential_http_request instead`,
+      ),
+    );
   }
   const args = { ...p, type, name };
   const key = `${type}/${name}:${JSON.stringify([p.scopes ?? null, p.repositories ?? null, p.permissions ?? null, p.force === true])}`;
@@ -118,7 +130,7 @@ export async function accessToken(vault: Vault, p: Record<string, unknown>): Pro
     case "jwt":
       return jwtToken(vault, args);
     default:
-      throw new VaultError(`"${type}/${name}" 是 ${record.kind ?? "static"} 凭证，不能用于获取 access token`);
+      throw new VaultError(t(`"${type}/${name}" 是 ${record.kind ?? "static"} 凭证，不能用于获取 access token`, `"${type}/${name}" is a ${record.kind ?? "static"} credential and cannot be used to get an access token`));
   }
 }
 

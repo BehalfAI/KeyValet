@@ -4,13 +4,17 @@ import { readSettings, writeSettings, type GrantMode } from "./settings.js";
 import { deviceStart, devicePoll, exchangeCode } from "./protocols/oauth2.js";
 import { accessToken, aws, publicView, setupProtocol, totp } from "./protocols/index.js";
 import { validateHttpConfig } from "./http-config.js";
+import { Gateway, requireGateway } from "./gateway.js";
 import { configureHttp } from "./http-manage.js";
 import { confirmAsUser } from "./user-dialog.js";
 import { describeTarget, proxyRequest, testCredential } from "./http-proxy.js";
 import { Vault, VaultError, normalizeName, normalizeType, type HttpConfig } from "./vault.js";
+import { t } from "../shared/i18n.js";
 
 /** 会话的授权状态（不写入审计日志） */
 export interface SessionAuth {
+  /** 本会话的本地网关（仅 helper 主程序提供） */
+  gateway?: Gateway;
   grantAll: boolean;
   grants: Set<string>;
   /** 弹出 Touch ID（由 main 注入；测试中可替换） */
@@ -40,7 +44,12 @@ async function grantCredential(vault: Vault, p: Record<string, unknown>, ctx: Cl
   const key = `${type}/${name}`;
   if (auth.grantAll || auth.grants.has(key)) return { granted: key, already: true };
   const purpose = cleanPurpose(p.purpose) ?? "";
-  const r = await auth.authorize(`授权本次 AI 会话使用凭证：${key}\n目的：${purpose}\n来源目录（agent 提供）：${ctx.cwd || "未知"}`);
+  const r = await auth.authorize(
+    t(
+      `授权本次 AI 会话使用凭证：${key}\n目的：${purpose}\n来源目录（agent 提供）：${ctx.cwd || "未知"}`,
+      `Authorize this AI session to use credential: ${key}\nPurpose: ${purpose}\nWorking directory (reported by agent): ${ctx.cwd || "unknown"}`,
+    ),
+  );
   if (!r.ok) throw new VaultError(r.error);
   auth.grants.add(key);
   return { granted: key, already: false };
@@ -50,19 +59,22 @@ async function settingsOp(vault: Vault, p: Record<string, unknown>) {
   const current = readSettings(vault.dir);
   if (p.grant_mode === undefined || p.grant_mode === null) return current;
   const mode = p.grant_mode as GrantMode;
-  if (mode !== "all" && mode !== "per_credential") throw new VaultError("grant_mode 只能是 per_credential 或 all");
+  if (mode !== "all" && mode !== "per_credential") throw new VaultError(t("grant_mode 只能是 per_credential 或 all", "grant_mode must be per_credential or all"));
   if (mode === current.grant_mode) return current;
   // 放宽（改为一次授权全部）需要用户确认；收紧不需要
   if (mode === "all") {
     const purpose = cleanPurpose(p.purpose) ?? "";
     const ok = await confirmAsUser(
-      `AI 会话请求修改凭证库设置：\n\n授权范围改为「一次授权全部凭证」\n（之后每个会话按一次 Touch ID 即可使用所有凭证）\n\n目的：${purpose.slice(0, 200)}`,
-      "允许修改",
+      t(
+        `AI 会话请求修改凭证库设置：\n\n授权范围改为「一次授权全部凭证」\n（之后每个会话按一次 Touch ID 即可使用所有凭证）\n\n目的：${purpose.slice(0, 200)}`,
+        `An AI session is requesting a change to vault settings:\n\nSet grant scope to "authorize all credentials at once"\n(each session will then be able to use every credential after a single Touch ID)\n\nPurpose: ${purpose.slice(0, 200)}`,
+      ),
+      t("允许修改", "Allow Change"),
     );
-    if (!ok) throw new VaultError("用户拒绝了该修改");
+    if (!ok) throw new VaultError(t("用户拒绝了该修改", "The user denied this change"));
   }
   writeSettings(vault.dir, { ...current, grant_mode: mode });
-  return { ...readSettings(vault.dir), note: "对新的会话生效" };
+  return { ...readSettings(vault.dir), note: t("对新的会话生效", "Takes effect for new sessions") };
 }
 
 const FIELD_KEY_RE = /^[A-Za-z0-9_.-]{1,64}$/;
@@ -70,13 +82,13 @@ const FIELD_KEY_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 /** 模板凭证的多个秘密字段 */
 function checkSecrets(v: unknown): Record<string, string> | undefined {
   if (v === undefined || v === null) return undefined;
-  if (typeof v !== "object" || Array.isArray(v)) throw new VaultError("secrets 必须是对象");
+  if (typeof v !== "object" || Array.isArray(v)) throw new VaultError(t("secrets 必须是对象", "secrets must be an object"));
   const entries = Object.entries(v as Record<string, unknown>);
-  if (entries.length > 30) throw new VaultError("secrets 最多 30 项");
+  if (entries.length > 30) throw new VaultError(t("secrets 最多 30 项", "secrets may have at most 30 entries"));
   const out: Record<string, string> = {};
   for (const [k, x] of entries) {
-    if (!FIELD_KEY_RE.test(k)) throw new VaultError(`非法的字段名 "${k}"`);
-    if (typeof x !== "string" || x.length === 0 || x.length > 64 * 1024) throw new VaultError(`秘密字段 ${k} 必须是 1~65536 字符的字符串`);
+    if (!FIELD_KEY_RE.test(k)) throw new VaultError(t(`非法的字段名 "${k}"`, `Invalid field name "${k}"`));
+    if (typeof x !== "string" || x.length === 0 || x.length > 64 * 1024) throw new VaultError(t(`秘密字段 ${k} 必须是 1~65536 字符的字符串`, `Secret field ${k} must be a string of 1-65536 characters`));
     out[k] = x;
   }
   return Object.keys(out).length ? out : undefined;
@@ -147,9 +159,14 @@ async function confirmDestructive(vault: Vault, p: Record<string, unknown>, acti
   if (!vault.exists(p.type, p.name)) return;
   const label = `${String(p.type).trim().toLowerCase()}/${String(p.name).trim().toLowerCase()}`;
   const purpose = cleanPurpose(p.purpose) ?? "";
-  const tail = action === "覆盖" ? "旧的值和配置将被永久替换。" : "此操作不可恢复。";
-  if (!(await confirmAsUser(`AI 会话请求${action}凭证：\n\n${label}\n\n${tail}\n目的：${purpose.slice(0, 200)}`, `确认${action}`))) {
-    throw new VaultError(`用户拒绝了${action}操作`);
+  const overwrite = action === "覆盖";
+  const tail = overwrite ? t("旧的值和配置将被永久替换。", "The existing value and configuration will be permanently replaced.") : t("此操作不可恢复。", "This cannot be undone.");
+  const message = t(
+    `AI 会话请求${action}凭证：\n\n${label}\n\n${tail}\n目的：${purpose.slice(0, 200)}`,
+    `An AI session is requesting to ${overwrite ? "overwrite" : "delete"} a credential:\n\n${label}\n\n${tail}\nPurpose: ${purpose.slice(0, 200)}`,
+  );
+  if (!(await confirmAsUser(message, t(`确认${action}`, overwrite ? "Overwrite" : "Delete")))) {
+    throw new VaultError(t(`用户拒绝了${action}操作`, `The user denied the ${overwrite ? "overwrite" : "delete"} operation`));
   }
 }
 
@@ -206,6 +223,29 @@ async function run(vault: Vault, req: Request, ctx: ClientContext, auth: Session
       return grantCredential(vault, p, ctx, auth);
     case "settings":
       return settingsOp(vault, p);
+    case "gatewayOpen": {
+      const { type, name, record } = vault.getRecord(p.type, p.name);
+      if (!record.http) {
+        throw new VaultError(
+          t(
+            `"${type}/${name}" 没有配置代理调用，请先用 credential_configure_http 设置允许的域名`,
+            `"${type}/${name}" has no proxy configuration; set the allowed hosts with credential_configure_http first`,
+          ),
+        );
+      }
+      const g = await requireGateway(auth?.gateway).open(type, name, cleanPurpose(p.purpose) ?? undefined);
+      const hosts = record.http.allowed_hosts.filter((h) => !h.startsWith("*."));
+      return {
+        type,
+        name,
+        base: g.base,
+        // 令牌交给 MCP server 写入仅用户可读的环境变量文件，不放进 URL、不返回给 agent
+        token: g.token,
+        template: record.template ?? null,
+        allowed_hosts: record.http.allowed_hosts,
+        base_urls: Object.fromEntries(hosts.map((h) => [h, `${g.base}/${h}`])),
+      };
+    }
     case "sessionInfo":
       return {
         grant_mode: readSettings(vault.dir).grant_mode,
@@ -280,8 +320,8 @@ export async function dispatch(vault: Vault, req: Request, ctx: ClientContext, a
   // 只读的元数据查询不记日志，避免刷屏
   const quiet = ["exists", "info", "oauthDevicePoll", "auditQuery", "sessionInfo"].includes(req.op) || (req.op === "settings" && p.grant_mode == null);
   try {
-    if (!OPS.includes(req.op)) throw new VaultError(`未知操作 ${String(req.op)}`);
-    if (PURPOSE_REQUIRED_OPS.has(req.op) && !purpose) throw new VaultError("必须说明本次操作的目的（purpose）");
+    if (!OPS.includes(req.op)) throw new VaultError(t(`未知操作 ${String(req.op)}`, `Unknown operation ${String(req.op)}`));
+    if (PURPOSE_REQUIRED_OPS.has(req.op) && !purpose) throw new VaultError(t("必须说明本次操作的目的（purpose）", "A purpose is required for this operation"));
     if (auth && !auth.grantAll && GRANT_REQUIRED_OPS.has(req.op)) {
       const key = credKey(p.type, p.name);
       if (!auth.grants.has(key)) throw new VaultError(`${GRANT_REQUIRED_PREFIX}${key}`);
@@ -299,7 +339,7 @@ export async function dispatch(vault: Vault, req: Request, ctx: ClientContext, a
     }
     return { id: req.id, ok: true, result };
   } catch (e) {
-    const message = e instanceof VaultError ? e.message : `内部错误：${e instanceof Error ? e.message : String(e)}`;
+    const message = e instanceof VaultError ? e.message : t(`内部错误：${e instanceof Error ? e.message : String(e)}`, `Internal error: ${e instanceof Error ? e.message : String(e)}`);
     try {
       vault.audit({ ...auditBase, ok: false, error: message.slice(0, 500) });
     } catch {

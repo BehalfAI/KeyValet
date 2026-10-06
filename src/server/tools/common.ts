@@ -2,6 +2,7 @@ import { confirm } from "../dialog.js";
 import { readSecretFile, resolveSecretFile } from "../files.js";
 import { z } from "zod";
 import type { Requester } from "../session.js";
+import { t } from "../../shared/i18n.js";
 
 export type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
 
@@ -18,7 +19,7 @@ export function wrap<A>(fn: (args: A) => Promise<ToolResult>): (args: A) => Prom
     try {
       return await fn(args);
     } catch (e) {
-      return fail(`错误：${(e as Error).message}`);
+      return fail(t(`错误：${(e as Error).message}`, `Error: ${(e as Error).message}`));
     }
   };
 }
@@ -30,15 +31,20 @@ export const purposeField = z
   .string()
   .min(2)
   .max(300)
-  .describe("本次操作的目的（必填）：需要解锁时会显示在 Touch ID 弹窗中，并记入审计日志。例如“读取订单 #6 的测试邮件”");
+  .describe(
+    t(
+      "本次操作的目的（必填）：需要解锁时会显示在 Touch ID 弹窗中，并记入审计日志。例如“读取订单 #6 的测试邮件”",
+      "Purpose of this operation (required): shown in the Touch ID prompt when unlocking is needed, and recorded in the audit log. E.g. \"Read the test email for order #6\"",
+    ),
+  );
 
-export const optionalPurposeField = purposeField.optional().describe("本次操作的目的（可选）：需要解锁时显示在 Touch ID 弹窗中");
+export const optionalPurposeField = purposeField.optional().describe(t("本次操作的目的（可选）：需要解锁时显示在 Touch ID 弹窗中", "Purpose of this operation (optional): shown in the Touch ID prompt when unlocking is needed"));
 
 export const CLIENT_ID_RE = /^[A-Za-z0-9._@:/-]{1,200}$/;
 
 /** 会出现在原生弹窗里的值：必须匹配严格格式，杜绝 agent 写入诱导性文字 */
 export function safeDisplay(v: unknown, re: RegExp, what: string): string {
-  if (typeof v !== "string" || !re.test(v)) throw new Error(`${what} 格式不对`);
+  if (typeof v !== "string" || !re.test(v)) throw new Error(t(`${what} 格式不对`, `${what} has an invalid format`));
   return v;
 }
 
@@ -49,7 +55,7 @@ export function httpsHost(url: unknown, what: string): string {
   } catch {
     /* fallthrough */
   }
-  throw new Error(`${what} 必须是 https URL`);
+  throw new Error(t(`${what} 必须是 https URL`, `${what} must be an https URL`));
 }
 
 /**
@@ -58,10 +64,15 @@ export function httpsHost(url: unknown, what: string): string {
  */
 export async function importFile(p: string, label: string): Promise<{ content: string; path: string }> {
   const abs = resolveSecretFile(p);
-  if (/[\u0000-\u001f\u007f]/.test(abs) || abs.length > 500) throw new Error("文件路径包含非法字符");
+  if (/[\u0000-\u001f\u007f]/.test(abs) || abs.length > 500) throw new Error(t("文件路径包含非法字符", "File path contains invalid characters"));
   // 先确认，后读取
-  if (!(await confirm(`AI agent 请求从以下文件导入秘密：\n\n${abs}\n\n保存为凭证：${label}`, "允许导入"))) {
-    throw new Error("用户拒绝了文件导入。");
+  if (
+    !(await confirm(
+      t(`AI agent 请求从以下文件导入秘密：\n\n${abs}\n\n保存为凭证：${label}`, `An AI agent wants to import a secret from this file:\n\n${abs}\n\nSave as credential: ${label}`),
+      t("允许导入", "Allow import"),
+    ))
+  ) {
+    throw new Error(t("用户拒绝了文件导入。", "The user declined the file import."));
   }
   return { content: readSecretFile(abs), path: abs };
 }
@@ -87,8 +98,13 @@ export async function resolveType(session: Requester, name: string, type: string
   const all = await session.request<Array<{ type: string; name: string; kind: string }>>("list", {});
   const hits = all.filter((c) => c.name === norm(name) && kinds.includes(c.kind));
   if (hits.length === 1) return hits[0]!.type;
-  if (hits.length === 0) throw new Error(`找不到名为 "${norm(name)}" 的 ${kinds.join("/")} 凭证`);
-  throw new Error(`有多个名为 "${norm(name)}" 的凭证（${hits.map((h) => h.type).join("、")}），请指定 type`);
+  if (hits.length === 0) throw new Error(t(`找不到名为 "${norm(name)}" 的 ${kinds.join("/")} 凭证`, `No ${kinds.join("/")} credential named "${norm(name)}" found`));
+  throw new Error(
+    t(
+      `有多个名为 "${norm(name)}" 的凭证（${hits.map((h) => h.type).join("、")}），请指定 type`,
+      `Multiple credentials are named "${norm(name)}" (${hits.map((h) => h.type).join(", ")}); please specify type`,
+    ),
+  );
 }
 
 /**
@@ -98,6 +114,12 @@ export async function resolveType(session: Requester, name: string, type: string
 export async function guardOverwrite(session: Requester, type: string, name: string, overwrite: boolean | undefined): Promise<boolean> {
   const exists = await session.request<boolean>("exists", { type, name });
   if (!exists) return false;
-  if (!overwrite) throw new Error(`凭证 "${norm(type)}/${norm(name)}" 已存在。如需替换，请设置 overwrite=true（会弹窗请用户确认）。`);
+  if (!overwrite)
+    throw new Error(
+      t(
+        `凭证 "${norm(type)}/${norm(name)}" 已存在。如需替换，请设置 overwrite=true（会弹窗请用户确认）。`,
+        `Credential "${norm(type)}/${norm(name)}" already exists. To replace it, set overwrite=true (the user will be asked to confirm).`,
+      ),
+    );
   return true;
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// 生成 KeyValet 自带的模板库 templates/catalog.json（Apache-2.0，随项目分发）。
-// 内容依据各服务官方 API 文档整理：认证方式（注入规则）、验证接口、API 域名。
-// 修改模板请编辑本文件后运行：npm run templates:build
+// Generates KeyValet's bundled template catalog templates/catalog.json (Apache-2.0, distributed with the project).
+// Compiled from each service's official API docs: auth method (injection rule), verification endpoint, API host.
+// To change templates, edit this file and run: npm run templates:build
 
 import fs from "node:fs";
 import path from "node:path";
@@ -15,7 +15,7 @@ const get = (u, extra = {}) => ({ method: "GET", url: u, ...extra });
 
 /** @type {Array<Record<string, unknown>>} */
 const T = [
-  // ---------- AI / 大模型 ----------
+  // ---------- AI / LLMs ----------
   { id: "openai", name: "OpenAI", fields: [key()], inject: bearer(), test: get("https://api.openai.com/v1/models") },
   {
     id: "anthropic",
@@ -52,7 +52,7 @@ const T = [
   { id: "tavily", name: "Tavily", fields: [key()], inject: bearer(), hosts: ["api.tavily.com"] },
   { id: "firecrawl", name: "Firecrawl", fields: [key()], inject: bearer(), hosts: ["api.firecrawl.dev"] },
 
-  // ---------- 开发平台 / 云 ----------
+  // ---------- Developer platforms / cloud ----------
   {
     id: "github",
     name: "GitHub (Personal Access Token)",
@@ -83,7 +83,7 @@ const T = [
   {
     id: "datadog",
     name: "Datadog",
-    fields: [url("https://api.datadoghq.com", "API URL（按站点，如 https://api.datadoghq.eu）"), key(), { name: "appKey", label: "Application Key", secret: true, required: true }],
+    fields: [url("https://api.datadoghq.com", "API URL (per site, e.g. https://api.datadoghq.eu)"), key(), { name: "appKey", label: "Application Key", secret: true, required: true }],
     inject: { headers: { "DD-API-KEY": "{{apiKey}}", "DD-APPLICATION-KEY": "{{appKey}}" } },
     test: get("{{apiUrl}}/api/v1/validate"),
   },
@@ -95,7 +95,7 @@ const T = [
     test: get("https://api.pagerduty.com/abilities"),
   },
 
-  // ---------- 通讯 / 邮件 ----------
+  // ---------- Messaging / email ----------
   { id: "slack", name: "Slack (Bot / User Token)", fields: [tok("Token (xoxb- / xoxp-)")], inject: bearer("token"), test: get("https://slack.com/api/auth.test") },
   {
     id: "discord_bot",
@@ -116,7 +116,7 @@ const T = [
   {
     id: "mailgun",
     name: "Mailgun",
-    fields: [url("https://api.mailgun.net", "API URL（欧盟区：https://api.eu.mailgun.net）"), key()],
+    fields: [url("https://api.mailgun.net", "API URL (EU region: https://api.eu.mailgun.net)"), key()],
     inject: { basic: { username: "api", password: "{{apiKey}}" } },
     test: get("{{apiUrl}}/v3/domains"),
   },
@@ -128,11 +128,11 @@ const T = [
     test: get("https://api.postmarkapp.com/server"),
   },
 
-  // ---------- 支付 / 业务 ----------
+  // ---------- Payments / business ----------
   { id: "stripe", name: "Stripe", fields: [key("Secret Key")], inject: bearer(), test: get("https://api.stripe.com/v1/balance") },
   { id: "hubspot", name: "HubSpot (Private App Token)", fields: [tok("Access Token")], inject: bearer("token"), test: get("https://api.hubapi.com/account-info/v3/details") },
 
-  // ---------- 协作 / 项目管理 ----------
+  // ---------- Collaboration / project management ----------
   {
     id: "notion",
     name: "Notion (Internal Integration)",
@@ -145,8 +145,8 @@ const T = [
     id: "jira",
     name: "Jira Cloud / Atlassian (API Token)",
     fields: [
-      { name: "domain", label: "站点子域名（xxx.atlassian.net 中的 xxx）", secret: false, required: true },
-      { name: "email", label: "Atlassian 账号邮箱", secret: false, required: true },
+      { name: "domain", label: "Site subdomain (the xxx in xxx.atlassian.net)", secret: false, required: true },
+      { name: "email", label: "Atlassian account email", secret: false, required: true },
       { name: "apiToken", label: "API Token", secret: true, required: true },
     ],
     inject: { basic: { username: "{{email}}", password: "{{apiToken}}" } },
@@ -172,8 +172,8 @@ const T = [
     id: "zendesk",
     name: "Zendesk (API Token)",
     fields: [
-      { name: "subdomain", label: "子域名（xxx.zendesk.com 中的 xxx）", secret: false, required: true },
-      { name: "email", label: "代理人邮箱", secret: false, required: true },
+      { name: "subdomain", label: "Subdomain (the xxx in xxx.zendesk.com)", secret: false, required: true },
+      { name: "email", label: "Agent email", secret: false, required: true },
       { name: "apiToken", label: "API Token", secret: true, required: true },
     ],
     inject: { basic: { username: "{{email}}/token", password: "{{apiToken}}" } },
@@ -181,7 +181,7 @@ const T = [
   },
   { id: "figma", name: "Figma (Personal Access Token)", fields: [tok("Personal Access Token")], inject: { headers: { "X-Figma-Token": "{{token}}" } }, test: get("https://api.figma.com/v1/me") },
 
-  // ---------- 搜索 / 数据 ----------
+  // ---------- Search / data ----------
   {
     id: "brave_search",
     name: "Brave Search API",
@@ -200,13 +200,13 @@ const T = [
   {
     id: "deepl",
     name: "DeepL",
-    fields: [url("https://api-free.deepl.com", "API URL（Pro 账号：https://api.deepl.com）"), key("Authentication Key")],
+    fields: [url("https://api-free.deepl.com", "API URL (Pro accounts: https://api.deepl.com)"), key("Authentication Key")],
     inject: { headers: { Authorization: "DeepL-Auth-Key {{apiKey}}" } },
     test: get("{{apiUrl}}/v2/usage"),
   },
 ];
 
-// 计算模板中写死的域名（URL 中的域名部分不含占位符时）
+// Compute the fixed API host (when the host part of the URL contains no placeholders)
 for (const t of T) {
   t.source = "catalog";
   t.kind = "static";
@@ -217,20 +217,20 @@ for (const t of T) {
       const h = new URL(rendered).hostname;
       if (!h.includes("zzph")) t.hosts = [h];
     } catch {
-      /* 含占位符 */
+      /* contains placeholders */
     }
   }
 }
 
 const ids = new Set();
 for (const t of T) {
-  if (ids.has(t.id)) throw new Error(`重复的模板 id：${t.id}`);
+  if (ids.has(t.id)) throw new Error(`Duplicate template id: ${t.id}`);
   ids.add(t.id);
 }
 
 const out = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "templates", "catalog.json");
 fs.writeFileSync(
   out,
-  JSON.stringify({ source: "keyvalet", license: "Apache-2.0", note: "依据各服务官方 API 文档整理；由 scripts/build-catalog.mjs 生成", templates: T }, null, 1) + "\n",
+  JSON.stringify({ source: "keyvalet", license: "Apache-2.0", note: "Compiled from official API docs of each service; generated by scripts/build-catalog.mjs", templates: T }, null, 1) + "\n",
 );
-console.log(`已写入 ${out}：${T.length} 个模板（可验证 ${T.filter((t) => t.test).length} 个）`);
+console.log(`Wrote ${out}: ${T.length} templates (${T.filter((t) => t.test).length} verifiable)`);

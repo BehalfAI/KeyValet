@@ -4,6 +4,7 @@
 
 import { execFile } from "node:child_process";
 import { OSASCRIPT_BIN } from "../shared/paths.js";
+import { t } from "../shared/i18n.js";
 
 const TITLE = "KeyValet";
 
@@ -24,12 +25,19 @@ function runAppleScript(script: string, args: string[], timeoutMs: number): Prom
  */
 export async function promptSecret(message: string): Promise<string | null> {
   const script = `on run argv
-  set r to display dialog (item 1 of argv) with title (item 2 of argv) default answer "" with hidden answer buttons {"取消", "保存"} default button "保存" cancel button "取消" with icon note giving up after 300
+  set r to display dialog (item 1 of argv) with title (item 2 of argv) default answer "" with hidden answer buttons {(item 3 of argv), (item 4 of argv)} default button (item 4 of argv) cancel button (item 3 of argv) with icon note giving up after 300
   if gave up of r then error number -128
   return text returned of r
 end run`;
-  const full = `【保存秘密】${message}\n\n⚠️ 这里不是 Mac 登录密码 / sudo 密码，请勿在此输入登录密码。`;
-  const { ok, stdout } = await runAppleScript(script, [full, `${TITLE} · 保存秘密`], 310_000);
+  const full = t(
+    `【保存秘密】${message}\n\n⚠️ 这里不是 Mac 登录密码 / sudo 密码，请勿在此输入登录密码。`,
+    `[Save secret] ${message}\n\n⚠️ This is NOT your Mac login / sudo password. Do not enter your login password here.`,
+  );
+  const { ok, stdout } = await runAppleScript(
+    script,
+    [full, `${TITLE} · ${t("保存秘密", "Save Secret")}`, t("取消", "Cancel"), t("保存", "Save")],
+    310_000,
+  );
   if (!ok) return null;
   const value = stdout.endsWith("\n") ? stdout.slice(0, -1) : stdout;
   return value.length > 0 ? value : null;
@@ -38,20 +46,20 @@ end run`;
 /** 确认框，默认按钮为“取消”。 */
 export async function confirm(message: string, okLabel: string): Promise<boolean> {
   const script = `on run argv
-  set r to display dialog (item 1 of argv) with title (item 2 of argv) buttons {"取消", (item 3 of argv)} default button "取消" cancel button "取消" with icon caution giving up after 120
+  set r to display dialog (item 1 of argv) with title (item 2 of argv) buttons {(item 4 of argv), (item 3 of argv)} default button (item 4 of argv) cancel button (item 4 of argv) with icon caution giving up after 120
   if gave up of r then error number -128
   return button returned of r
 end run`;
-  const { ok, stdout } = await runAppleScript(script, [message, TITLE, okLabel], 130_000);
+  const { ok, stdout } = await runAppleScript(script, [message, TITLE, okLabel, t("取消", "Cancel")], 130_000);
   return ok && stdout.trim() === okLabel;
 }
 
 /** 非阻塞的提示框（如显示设备码），返回关闭函数 */
 export function showNotice(message: string, timeoutSec = 900): () => void {
   const script = `on run argv
-  display dialog (item 1 of argv) with title (item 2 of argv) buttons {"好"} default button "好" giving up after ${Math.floor(timeoutSec)}
+  display dialog (item 1 of argv) with title (item 2 of argv) buttons {(item 3 of argv)} default button (item 3 of argv) giving up after ${Math.floor(timeoutSec)}
 end run`;
-  const child = execFile(OSASCRIPT_BIN, ["-e", script, "--", message, TITLE], { env: { PATH: "/usr/bin:/bin" } }, () => {});
+  const child = execFile(OSASCRIPT_BIN, ["-e", script, "--", message, TITLE, t("好", "OK")], { env: { PATH: "/usr/bin:/bin" } }, () => {});
   return () => {
     if (child.exitCode === null) child.kill();
   };

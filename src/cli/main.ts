@@ -2,6 +2,7 @@
 // 由 /usr/local/bin/keyvalet 通过 `sudo -k` 启动，直接以 root 读写凭证库。
 
 import fs from "node:fs";
+import { setLang, t } from "../shared/i18n.js";
 import { CLI_JS, VAULT_DIR } from "../shared/paths.js";
 import { fatal as fatalWith, verifyRootEnvironment } from "../helper/trust.js";
 import { readSettings, writeSettings } from "../helper/settings.js";
@@ -11,7 +12,9 @@ function fatal(msg: string): never {
   return fatalWith("keyvalet", msg);
 }
 
-const USAGE = `用法：keyvalet <命令>
+function usage(): string {
+  return t(
+    `用法：keyvalet <命令>
 
   types                              列出凭证类型
   list [type]                        列出凭证（不含值）
@@ -24,7 +27,23 @@ const USAGE = `用法：keyvalet <命令>
   delete <type> <name>               删除凭证
   delete-type <type>                 删除空的凭证类型
   audit [行数]                       查看审计日志（默认 50 行）
-  grant-mode [per-credential|all]    查看/设置授权范围：每个凭证单独授权，或每个会话一次授权全部`;
+  grant-mode [per-credential|all]    查看/设置授权范围：每个凭证单独授权，或每个会话一次授权全部`,
+    `Usage: keyvalet <command>
+
+  types                              List credential types
+  list [type]                        List credentials (without values)
+  get <type> <name>                  Print a credential value (protocol credentials print full config and secrets)
+  set <type> <name> [options]        Save a credential (value read from hidden input or a pipe; the type is created if missing)
+      --desc <text>                  Credential description
+      --type-desc <text>             Type description when creating a new type
+      --attr key=value               Non-secret attribute, repeatable
+      --overwrite                    Overwrite an existing credential
+  delete <type> <name>               Delete a credential
+  delete-type <type>                 Delete an empty credential type
+  audit [lines]                      Show the audit log (default 50 lines)
+  grant-mode [per-credential|all]    Show/set grant scope: authorize each credential separately, or all at once per session`,
+  );
+}
 
 function readHidden(prompt: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -45,7 +64,7 @@ function readHidden(prompt: string): Promise<string> {
     const onData = (chunk: string) => {
       for (const ch of chunk) {
         if (ch === "\r" || ch === "\n") return done();
-        if (ch === "\u0003") return done(new Error("已取消"));
+        if (ch === "\u0003") return done(new Error(t("已取消", "Canceled")));
         if (ch === "\u007f" || ch === "\b") value = value.slice(0, -1);
         else if (ch >= " ") value += ch;
       }
@@ -56,9 +75,9 @@ function readHidden(prompt: string): Promise<string> {
 
 async function readValue(label: string): Promise<string> {
   if (process.stdin.isTTY) {
-    const a = await readHidden(`输入 ${label} 的值（不回显）：`);
-    const b = await readHidden("再输入一次确认：");
-    if (a !== b) fatal("两次输入不一致");
+    const a = await readHidden(t(`输入 ${label} 的值（不回显）：`, `Enter the value for ${label} (hidden): `));
+    const b = await readHidden(t("再输入一次确认：", "Enter it again to confirm: "));
+    if (a !== b) fatal(t("两次输入不一致", "The two entries do not match"));
     return a;
   }
   // 管道输入：如 `pbpaste | keyvalet set api_key openai`
@@ -75,14 +94,14 @@ function parseOptions(args: string[]) {
   };
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
-    const next = () => args[++i] ?? fatal(`${a} 缺少参数`);
+    const next = () => args[++i] ?? fatal(t(`${a} 缺少参数`, `${a} requires an argument`));
     if (a === "--desc") opts.desc = next();
     else if (a === "--type-desc") opts.typeDesc = next();
     else if (a === "--overwrite") opts.overwrite = true;
     else if (a === "--attr") {
       const kv = next();
       const eq = kv.indexOf("=");
-      if (eq <= 0) fatal(`--attr 格式应为 key=value：${kv}`);
+      if (eq <= 0) fatal(t(`--attr 格式应为 key=value：${kv}`, `--attr must be key=value: ${kv}`));
       opts.attrs[kv.slice(0, eq)] = kv.slice(eq + 1);
     } else opts.rest.push(a);
   }
@@ -92,9 +111,15 @@ function parseOptions(args: string[]) {
 async function main(): Promise<void> {
   process.umask(0o077);
   verifyRootEnvironment("keyvalet", import.meta.url, CLI_JS);
-  const [cmd, ...args] = process.argv.slice(2);
+  let argv = process.argv.slice(2);
+  // 包装脚本以用户身份检测语言后通过 --lang 传入（root 读不到用户的语言偏好）
+  if (argv[0] === "--lang") {
+    setLang(argv[1]);
+    argv = argv.slice(2);
+  }
+  const [cmd, ...args] = argv;
   if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") {
-    console.log(USAGE);
+    console.log(usage());
     return;
   }
 
@@ -115,13 +140,13 @@ async function main(): Promise<void> {
   switch (cmd) {
     case "types": {
       const types = audited("listTypes", {}, () => vault.listTypes());
-      if (!types.length) console.log("（暂无凭证类型）");
-      for (const t of types) console.log(`${t.name}\t${t.count} 个\t${t.description}`);
+      if (!types.length) console.log(t("（暂无凭证类型）", "(no credential types)"));
+      for (const ty of types) console.log(t(`${ty.name}\t${ty.count} 个\t${ty.description}`, `${ty.name}\t${ty.count}\t${ty.description}`));
       break;
     }
     case "list": {
       const items = audited("list", { type: args[0] }, () => vault.list(args[0]));
-      if (!items.length) console.log("（暂无凭证）");
+      if (!items.length) console.log(t("（暂无凭证）", "(no credentials)"));
       for (const c of items) {
         const attrs = Object.entries(c.attributes).map(([k, v]) => `${k}=${v}`).join(" ");
         const kind = c.kind === "static" ? "" : ` [${c.kind}]`;
@@ -131,7 +156,7 @@ async function main(): Promise<void> {
     }
     case "get": {
       const [type, name] = args;
-      if (!type || !name) fatal("用法：get <type> <name>");
+      if (!type || !name) fatal(t("用法：get <type> <name>", "Usage: get <type> <name>"));
       const { record } = audited("get", { type, name }, () => vault.getRecord(type, name));
       if ((record.kind ?? "static") === "static") {
         process.stdout.write(record.value + (process.stdout.isTTY ? "\n" : ""));
@@ -144,30 +169,30 @@ async function main(): Promise<void> {
     case "set": {
       const opts = parseOptions(args);
       const [type, name] = opts.rest;
-      if (!type || !name) fatal("用法：set <type> <name> [选项]");
-      if (!opts.overwrite && vault.exists(type, name)) fatal(`凭证 ${type}/${name} 已存在，如需替换请加 --overwrite`);
+      if (!type || !name) fatal(t("用法：set <type> <name> [选项]", "Usage: set <type> <name> [options]"));
+      if (!opts.overwrite && vault.exists(type, name)) fatal(t(`凭证 ${type}/${name} 已存在，如需替换请加 --overwrite`, `Credential ${type}/${name} already exists; add --overwrite to replace it`));
       const value = await readValue(`${type}/${name}`);
-      if (!value) fatal("值不能为空");
-      if (value.length > MAX_VALUE_LENGTH) fatal("值过长");
+      if (!value) fatal(t("值不能为空", "Value must not be empty"));
+      if (value.length > MAX_VALUE_LENGTH) fatal(t("值过长", "Value is too long"));
       const r = audited("set", { type, name }, () =>
         vault.set({ type, name, value, description: opts.desc, attributes: opts.attrs, typeDescription: opts.typeDesc, overwrite: opts.overwrite }),
       );
-      if (r.typeCreated) console.log(`凭证类型 "${r.type}" 不存在，已先创建`);
-      console.log(r.replaced ? `已覆盖 ${r.type}/${r.name}` : `已保存 ${r.type}/${r.name}`);
+      if (r.typeCreated) console.log(t(`凭证类型 "${r.type}" 不存在，已先创建`, `Credential type "${r.type}" did not exist and was created`));
+      console.log(r.replaced ? t(`已覆盖 ${r.type}/${r.name}`, `Overwrote ${r.type}/${r.name}`) : t(`已保存 ${r.type}/${r.name}`, `Saved ${r.type}/${r.name}`));
       break;
     }
     case "delete": {
       const [type, name] = args;
-      if (!type || !name) fatal("用法：delete <type> <name>");
+      if (!type || !name) fatal(t("用法：delete <type> <name>", "Usage: delete <type> <name>"));
       const r = audited("delete", { type, name }, () => vault.delete(type, name));
-      console.log(`已删除 ${r.type}/${r.name}`);
+      console.log(t(`已删除 ${r.type}/${r.name}`, `Deleted ${r.type}/${r.name}`));
       break;
     }
     case "delete-type": {
       const [type] = args;
-      if (!type) fatal("用法：delete-type <type>");
+      if (!type) fatal(t("用法：delete-type <type>", "Usage: delete-type <type>"));
       const r = audited("deleteType", { type }, () => vault.deleteType(type));
-      console.log(`已删除凭证类型 ${r.name}`);
+      console.log(t(`已删除凭证类型 ${r.name}`, `Deleted credential type ${r.name}`));
       break;
     }
     case "grant-mode": {
@@ -177,10 +202,10 @@ async function main(): Promise<void> {
         break;
       }
       const mode = m.replace("-", "_");
-      if (mode !== "per_credential" && mode !== "all") fatal("用法：grant-mode [per-credential|all]");
+      if (mode !== "per_credential" && mode !== "all") fatal(t("用法：grant-mode [per-credential|all]", "Usage: grant-mode [per-credential|all]"));
       writeSettings(VAULT_DIR, { ...readSettings(VAULT_DIR), grant_mode: mode });
       vault.audit({ op: "settings", grant_mode: mode, ok: true, client });
-      console.log(`授权范围已设为 ${mode}（对新的会话生效）`);
+      console.log(t(`授权范围已设为 ${mode}（对新的会话生效）`, `Grant scope set to ${mode} (takes effect for new sessions)`));
       break;
     }
     case "audit": {
@@ -190,7 +215,7 @@ async function main(): Promise<void> {
       break;
     }
     default:
-      fatal(`未知命令 ${cmd}\n\n${USAGE}`);
+      fatal(t(`未知命令 ${cmd}\n\n${usage()}`, `Unknown command ${cmd}\n\n${usage()}`));
   }
 }
 
