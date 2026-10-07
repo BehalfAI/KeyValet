@@ -18,7 +18,7 @@ Tests run as your normal user in temporary directories with local mock servers â
 - Never return, log or include in error messages any secret (or a string built from one).
 - The helper depends only on Node.js built-ins.
 - Every security-relevant change needs a regression test.
-- Keep `README.md`, `README.zh-CN.md` and `SECURITY.md` in sync with behavior changes.
+- Keep `README.md`, `README.zh-CN.md`, `docs/guide.md`, `docs/guide.zh-CN.md` and `SECURITY.md` in sync with behavior changes.
 
 ## Templates
 

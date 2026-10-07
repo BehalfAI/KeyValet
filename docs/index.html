@@ -350,17 +350,16 @@
     <h2><span lang="en">Install</span><span lang="zh">安装</span></h2>
     <div class="install">
       <div>
-        <p><span lang="en">Needs macOS, Node.js 20+ from nvm or nodejs.org, and the Xcode Command Line Tools. The installer asks for your password once and adds a single sudoers rule that can only start the KeyValet helper.</span><span lang="zh">需要 macOS、来自 nvm 或 nodejs.org 的 Node.js 20+，以及 Xcode 命令行工具。安装时会要一次密码，并添加一条只能启动 KeyValet helper 的 sudoers 规则。</span></p>
-        <pre><code><span data-clone></span>
-cd KeyValet
-./scripts/install.sh</code></pre>
+        <p><span lang="en">One command. It checks the requirements, asks for your password once, and sets up Claude Code for you. Run it again to upgrade.</span><span lang="zh">一条命令。它会检查运行环境，要你输一次密码，并自动配置好 Claude Code。重跑即可升级。</span></p>
+        <pre><code>curl -fsSL https://behalfai.github.io/KeyValet/install.sh | sh</code></pre>
+        <p><span lang="en">Needs macOS, Node.js 20+ from nodejs.org or nvm, and the Xcode Command Line Tools.</span><span lang="zh">需要 macOS、来自 nodejs.org 或 nvm 的 Node.js 20+，以及 Xcode 命令行工具。</span></p>
       </div>
       <div>
-        <p><span lang="en">Then register it with your MCP client. For Claude Code:</span><span lang="zh">然后在 MCP 客户端里注册。以 Claude Code 为例：</span></p>
-        <pre><code>claude mcp add keyvalet --scope user -- \
-  /usr/local/lib/keyvalet/bin/node \
-  /usr/local/lib/keyvalet/app/dist/server/index.js</code></pre>
-        <p><span lang="en">Ask your agent to store a key with the <code>openai</code> template, then to list your models. You will see the Touch ID prompt once.</span><span lang="zh">让 agent 用 <code>openai</code> 模板保存一个 key，再列出你的模型。你只会看到一次 Touch ID 弹窗。</span></p>
+        <p><span lang="en">Then just ask your agent:</span><span lang="zh">然后直接对 agent 说：</span></p>
+        <pre><code><span lang="en">“Store my OpenAI key in KeyValet with the openai template.”
+“Use KeyValet to list my OpenAI models.”</span><span lang="zh">“用 KeyValet 的 openai 模板保存我的 OpenAI key。”
+“用 KeyValet 列出我的 OpenAI 模型。”</span></code></pre>
+        <p><span lang="en">You type the key into a native dialog, and approve its use with Touch ID. The agent never sees it.</span><span lang="zh">key 由你在原生对话框里输入，使用时由你用 Touch ID 批准。agent 始终看不到它。</span></p>
       </div>
     </div>
   </div>
