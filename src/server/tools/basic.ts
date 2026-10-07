@@ -1,8 +1,9 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { confirm, promptSecret } from "../dialog.js";
+import { writeSecretFile } from "../gateway-env.js";
 import type { HelperSession } from "../session.js";
-import { fail, guardOverwrite, importFile, norm, ok, optionalPurposeField, purposeField, resolveType, wrap } from "./common.js";
+import { confirmDeleteSourceFile, fail, guardOverwrite, importFile, norm, ok, optionalPurposeField, purposeField, resolveType, wrap } from "./common.js";
 import { setFromTemplate } from "./http.js";
 import { t } from "../../shared/i18n.js";
 
@@ -125,6 +126,64 @@ export function registerBasicTools(server: McpServer, session: HelperSession): v
   );
 
   server.registerTool(
+    "credential_export_file",
+    {
+      description: t(
+        "把一个 static 凭证的原始值写入只有你本人账户可读的私有临时文件（~/.keyvalet/run，0600），只把文件路径返回给 AI，内容本身不经过 AI 上下文。" +
+          "用于必须读本地文件才能工作的场景，典型例子是 SSH 私钥（配合 ssh -i <路径> 使用）、证书等。" +
+          "能走代理时优先用 credential_http_request / credential_gateway；只有代理不适用、又必须落地成文件时才用这个——" +
+          "不要先 credential_get 拿到值再自己写文件，那样秘密会先经过 AI 上下文。文件在本会话结束时自动删除。",
+        "Write a static credential's raw value to a private temp file readable only by your own account (~/.keyvalet/run, 0600); only the file path is returned, never the content. " +
+          "For cases where a program must read a local file to work - the typical examples are SSH private keys (used with ssh -i <path>) and certificates. " +
+          "Prefer the proxy (credential_http_request / credential_gateway) when it applies; use this only when the proxy doesn't fit and the secret must land on disk as a file - " +
+          "don't call credential_get and write the file yourself, since that routes the secret through the AI context first. The file is deleted automatically when this session ends.",
+      ),
+      inputSchema: {
+        type: typeField.optional().describe(t("凭证类型；省略时按名字在 static 凭证中查找", "Credential type; looked up among static credentials by name if omitted")),
+        name: nameField,
+        field: z
+          .string()
+          .optional()
+          .describe(t("多秘密字段的模板凭证：要导出的字段名；省略则导出主值（value）", "For template credentials with multiple secret fields: which field to export; omitted exports the main value")),
+        purpose: purposeField,
+      },
+    },
+    wrap(async ({ type, name, field, purpose }) => {
+      const s = session.scoped(purpose, { type, name });
+      const resolvedType = type ?? (await resolveType(s, name, undefined, ["static"]));
+      const r = await s.request<{ type: string; name: string; value?: string; fields?: Record<string, string>; kind?: string }>("get", { type: resolvedType, name });
+      if (typeof r.value !== "string") {
+        return fail(
+          t(
+            `凭证 "${r.type}/${r.name}" 不是 static 凭证，没有可导出的原始值。`,
+            `Credential "${r.type}/${r.name}" is not a static credential; it has no raw value to export.`,
+          ),
+        );
+      }
+      const secret = field ? r.fields?.[field] : r.value || undefined;
+      if (!secret) {
+        const available = Object.keys(r.fields ?? {}).join(t("、", ", "));
+        return fail(
+          field
+            ? t(`凭证 "${r.type}/${r.name}" 没有字段 "${field}"（可用：${available || "无"}）`, `Credential "${r.type}/${r.name}" has no field "${field}" (available: ${available || "none"})`)
+            : t(
+                `凭证 "${r.type}/${r.name}" 没有主值，请传 field 指定具体字段（可用：${available || "无"}）`,
+                `Credential "${r.type}/${r.name}" has no main value; pass field to select one (available: ${available || "none"})`,
+              ),
+        );
+      }
+      const path = writeSecretFile(session.sessionId, r.type, r.name, field, secret);
+      return ok(t("已写入私有文件（内容未返回给我）：", "Written to a private file (content not returned to me):"), {
+        path,
+        note: t(
+          "只有你本人账户可读；本会话结束时自动删除，提前用完也可以自己删掉。不要让我读取或打印它的内容，直接把这个路径传给需要文件的命令（如 ssh -i）。",
+          "Readable only by your own account; deleted automatically when this session ends, or delete it yourself once done. Don't have me read or print its contents - pass this path directly to the command that needs a file (e.g. ssh -i).",
+        ),
+      });
+    }),
+  );
+
+  server.registerTool(
     "credential_set",
     {
       description: t(
@@ -133,13 +192,15 @@ export function registerBasicTools(server: McpServer, session: HelperSession): v
           "按模板逐个弹窗输入秘密字段，并自动配置代理调用（credential_http_request）和验证。" +
           "value 和 value_file 都省略时会弹出 macOS 隐藏输入框让用户直接输入（推荐，凭证不经过 AI 上下文）；" +
           "用户已在对话中给出秘密时，直接用 value 传入并主动保存。" +
-          "多行内容（如私钥）用 value_file 从文件导入。覆盖已有凭证需要 overwrite=true，并且会弹窗请用户确认。",
+          "多行内容（如私钥）用 value_file 从文件导入；可加 delete_source_file: true，在保存成功后弹窗请用户确认删除原文件，避免明文留两份。" +
+          "覆盖已有凭证需要 overwrite=true，并且会弹窗请用户确认。之后要把 SSH 私钥这类文件型秘密用到本地程序（如 ssh -i）时，用 credential_export_file，不要用 credential_get。",
         "Save a static credential (API key, password, token, SSH private key, etc.). The credential type is created first if it does not exist. " +
           "Passing template is recommended (search with credential_templates, e.g. openai, anthropic, github, or the generic bearer / header / query / basic): " +
           "the user is prompted for each secret field in a dialog, and proxied calls (credential_http_request) and verification are configured automatically. " +
           "If both value and value_file are omitted, a hidden macOS input dialog lets the user type the value directly (recommended - the secret never passes through the AI context); " +
           "if the user already gave the secret in the chat, pass it via value and store it proactively. " +
-          "import multi-line content (e.g. private keys) from a file with value_file. Overwriting an existing credential requires overwrite=true and the user is asked to confirm.",
+          "Import multi-line content (e.g. private keys) from a file with value_file; add delete_source_file: true to have the user confirm deleting the original file once the save succeeds, so the plaintext doesn't end up in two places. " +
+          "Overwriting an existing credential requires overwrite=true and the user is asked to confirm. Later, to use a file-shaped secret like an SSH private key with a local program (e.g. ssh -i), use credential_export_file, not credential_get.",
       ),
       inputSchema: {
         type: typeField
@@ -165,6 +226,15 @@ export function registerBasicTools(server: McpServer, session: HelperSession): v
             ),
           ),
         value_file: z.string().optional().describe(t("从该文件读取凭证值（内容不会进入 AI 上下文），如 ~/.ssh/id_ed25519", "Read the credential value from this file (content never enters the AI context), e.g. ~/.ssh/id_ed25519")),
+        delete_source_file: z
+          .boolean()
+          .optional()
+          .describe(
+            t(
+              "配合 value_file：保存成功后删除原文件（会弹窗请用户单独确认，不可恢复）。默认 false，即原文件原样保留",
+              "With value_file: delete the original file after a successful save (the user is asked to confirm separately; cannot be undone). Default false - the original file is left in place",
+            ),
+          ),
         description: z.string().optional().describe(t("凭证说明，例如用途", "Credential description, e.g. what it is used for")),
         attributes: z
           .record(z.string(), z.string())
@@ -181,8 +251,9 @@ export function registerBasicTools(server: McpServer, session: HelperSession): v
       },
     },
     wrap(async (a) => {
-      const { name, value, value_file, description, attributes, type_description, overwrite, purpose } = a;
+      const { name, value, value_file, delete_source_file, description, attributes, type_description, overwrite, purpose } = a;
       const s = session.scoped(purpose, { type: a.type, name });
+      if (delete_source_file && !value_file) return fail(t("delete_source_file 只能配合 value_file 使用。", "delete_source_file can only be used together with value_file."));
       if (a.template) {
         if (value_file || attributes) return fail(
             t(
@@ -235,7 +306,16 @@ export function registerBasicTools(server: McpServer, session: HelperSession): v
           ? t(`已覆盖凭证 "${r.type}/${r.name}"`, `Overwrote credential "${r.type}/${r.name}"`)
           : t(`已保存凭证 "${r.type}/${r.name}"`, `Saved credential "${r.type}/${r.name}"`),
       );
-      if (source) steps.push(t(`内容来自 ${source}（如不再需要，建议删除原文件）`, `Content read from ${source} (consider deleting the original file if no longer needed)`));
+      if (source && delete_source_file) {
+        const deleted = await confirmDeleteSourceFile(source);
+        steps.push(
+          deleted
+            ? t(`内容来自 ${source}，原文件已删除`, `Content read from ${source}; the original file was deleted`)
+            : t(`内容来自 ${source}（用户拒绝删除原文件，或删除失败，请自行处理）`, `Content read from ${source} (the user declined to delete the original file, or deletion failed; handle it yourself)`),
+        );
+      } else if (source) {
+        steps.push(t(`内容来自 ${source}（如不再需要，建议删除原文件，可传 delete_source_file: true 让我代为确认删除）`, `Content read from ${source} (consider deleting the original file if no longer needed; pass delete_source_file: true to have me confirm and delete it)`));
+      }
       return ok(steps.join(t("；", "; ")) + t("。", "."));
     }),
   );

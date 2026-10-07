@@ -166,7 +166,8 @@ Every tool that reads, uses or changes a credential **requires** a `purpose`. It
 - `credential_http_request` reads streaming (SSE) responses in full and returns the text assembled from LLM deltas in `stream.text` (OpenAI Chat Completions and Responses, Anthropic, Gemini formats).
 - `credential_gateway` opens a per-session gateway on `127.0.0.1` for programs: `http://127.0.0.1:<port>/<token>/<host>/<path>` → `https://<host>/<path>`. The gateway drops whatever auth headers the program sends, injects the real credential, enforces the host allowlist, never follows redirects, and redacts responses while streaming (it holds back only bytes that could be the start of a secret). The token is random per credential and session, requests must target `127.0.0.1`/`localhost` (DNS-rebinding protection), and every request is audited. For known templates it returns ready-to-use SDK environment variables.
 
-When neither fits (databases, SSH, tools that insist on reading the key), `credential_get` still returns the value after your approval.
+When a tool needs the secret as a local file to work (the typical example: an SSH private key used with `ssh -i`), use `credential_export_file` — only the file path goes back to the agent, never the content, and the file is deleted automatically when the session ends.
+When neither fits and the raw value itself is genuinely needed (e.g. a database password), `credential_get` still returns the value after your approval.
 
 ### Templates
 
@@ -198,6 +199,7 @@ Long-term secrets of protocol credentials (client secrets, refresh tokens, priva
 | `credential_settings` | View / change the grant mode |
 | `credential_audit_log` | Query the audit log |
 | `credential_list` / `credential_list_types` / `credential_get` | List metadata; read a static value (unless proxy-only) |
+| `credential_export_file` | Write a static credential's raw value to a private temp file, returning only the path; for SSH keys and other secrets that must be a local file |
 | `credential_set` / `credential_delete` / `credential_create_type` / `credential_delete_type` | Manage credentials |
 | `credential_templates` | Search templates |
 | `credential_http_request` / `credential_test` / `credential_configure_http` | Proxy calls (incl. SSE), verification, proxy configuration |

@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { confirm } from "../dialog.js";
 import { readSecretFile, resolveSecretFile } from "../files.js";
 import { z } from "zod";
@@ -75,6 +76,26 @@ export async function importFile(p: string, label: string): Promise<{ content: s
     throw new Error(t("用户拒绝了文件导入。", "The user declined the file import."));
   }
   return { content: readSecretFile(abs), path: abs };
+}
+
+/**
+ * 导入后删除原文件前再次确认（独立于导入确认）：删除不可恢复，必须让用户看清具体路径再点头。
+ */
+export async function confirmDeleteSourceFile(abs: string): Promise<boolean> {
+  if (
+    !(await confirm(
+      t(`AI agent 请求删除刚刚导入的原文件：\n\n${abs}\n\n此操作不可恢复。`, `An AI agent wants to delete the original file it just imported from:\n\n${abs}\n\nThis cannot be undone.`),
+      t("确认删除", "Delete"),
+    ))
+  ) {
+    return false;
+  }
+  try {
+    fs.rmSync(abs);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export interface CredentialInfo {

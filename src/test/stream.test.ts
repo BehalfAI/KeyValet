@@ -8,7 +8,7 @@ import { dispatch, type SessionAuth } from "../helper/dispatch.js";
 import { Gateway, StreamRedactor } from "../helper/gateway.js";
 import { aggregateSse, redact, redactionList } from "../helper/http-proxy.js";
 import { execFile } from "node:child_process";
-import { cleanupGatewayEnv, writeGatewayEnv } from "../server/gateway-env.js";
+import { cleanupGatewayEnv, writeGatewayEnv, writeSecretFile } from "../server/gateway-env.js";
 import { allowInsecureLoopbackForTests } from "../helper/protocols/http.js";
 import { Vault } from "../helper/vault.js";
 
@@ -272,6 +272,28 @@ describe("网关环境变量文件", () => {
       assert.match(fs.readFileSync(f, "utf8"), /export OPENAI_API_KEY='kv_x'\\''y'/);
       cleanupGatewayEnv();
       assert.equal(fs.existsSync(f), false);
+    } finally {
+      process.env.HOME = prev;
+    }
+  });
+});
+
+describe("秘密文件（credential_export_file 用）", () => {
+  it("只有用户可读（0600），内容原样写入，不做 shell 转义；会话结束删除", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "kv-home-"));
+    const prev = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const key = "-----BEGIN OPENSSH PRIVATE KEY-----\nabc'\"$(whoami)\ndef\n-----END OPENSSH PRIVATE KEY-----\n";
+      const f = writeSecretFile("sess1", "ssh_key", "simvito", undefined, key);
+      assert.match(f, /sess1-ssh_key-simvito\.key$/);
+      assert.equal(fs.statSync(f).mode & 0o777, 0o600);
+      assert.equal(fs.readFileSync(f, "utf8"), key);
+      const f2 = writeSecretFile("sess1", "password", "db", "secret_access_key", "s3cr3t");
+      assert.match(f2, /sess1-password-db-secret_access_key\.key$/);
+      cleanupGatewayEnv();
+      assert.equal(fs.existsSync(f), false);
+      assert.equal(fs.existsSync(f2), false);
     } finally {
       process.env.HOME = prev;
     }

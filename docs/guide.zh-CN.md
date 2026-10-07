@@ -208,7 +208,8 @@ credential_configure_http {
 OPENAI_BASE_URL=http://127.0.0.1:52011/<令牌>/api.openai.com/v1 OPENAI_API_KEY=keyvalet python summarize.py
 ```
 
-两者都用不了的场景，比如数据库、SSH，或者一定要读取 key 的工具，仍然用 `credential_get` 读原值。
+需要把秘密落地成本地文件才能用的工具（典型例子：SSH 私钥配合 `ssh -i`），用 `credential_export_file`——只把文件路径还给 agent，内容不经过 AI 上下文，会话结束自动删除。
+两者都用不了、必须拿到原值本身的场景（比如数据库密码），仍然用 `credential_get` 读原值。
 
 ## 授权模式：多久按一次 Touch ID
 
@@ -270,7 +271,8 @@ OPENAI_BASE_URL=http://127.0.0.1:52011/<令牌>/api.openai.com/v1 OPENAI_API_KEY
 | `credential_create_type` | 创建类型（通常不需要，`credential_set` 会自动创建） |
 | `credential_list` | 列出凭证（不含值） |
 | `credential_get` | 读取 static 凭证值，模板凭证含所有秘密字段；设为 `proxy_only` 的凭证和协议凭证只返回配置和状态 |
-| `credential_set` | 保存 static 凭证。推荐传 `template`，秘密字段弹窗输入，并自动配置代理；不传模板时，`value` 留空会弹窗，`value_file` 从文件导入；覆盖需 `overwrite=true` 并经你确认 |
+| `credential_export_file` | 把 static 凭证的原始值写入只有你可读的私有临时文件，只返回路径；用于 SSH 私钥等必须是本地文件的场景 |
+| `credential_set` | 保存 static 凭证。推荐传 `template`，秘密字段弹窗输入，并自动配置代理；不传模板时，`value` 留空会弹窗，`value_file` 从文件导入（可加 `delete_source_file: true` 在保存后弹窗确认删除原文件）；覆盖需 `overwrite=true` 并经你确认 |
 | `credential_delete` / `credential_delete_type` | 删除（需你确认） |
 | `credential_oauth_login` | 配置并完成 OAuth 授权 |
 | `credential_access_token` | 获取 oauth2 / 服务账号 / GitHub App / JWT 的短期 token |
