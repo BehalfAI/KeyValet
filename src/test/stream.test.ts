@@ -8,7 +8,7 @@ import { dispatch, type SessionAuth } from "../helper/dispatch.js";
 import { Gateway, StreamRedactor } from "../helper/gateway.js";
 import { aggregateSse, redact, redactionList } from "../helper/http-proxy.js";
 import { execFile } from "node:child_process";
-import { cleanupGatewayEnv, writeGatewayEnv, writeSecretFile } from "../server/gateway-env.js";
+import { cleanupGatewayEnv, recordSecrets, writeGatewayEnv, writeSecretFile } from "../server/gateway-env.js";
 import { allowInsecureLoopbackForTests } from "../helper/protocols/http.js";
 import { Vault } from "../helper/vault.js";
 
@@ -294,6 +294,26 @@ describe("秘密文件（credential_export_file 用）", () => {
       cleanupGatewayEnv();
       assert.equal(fs.existsSync(f), false);
       assert.equal(fs.existsSync(f2), false);
+    } finally {
+      process.env.HOME = prev;
+    }
+  });
+});
+
+describe("已返回值记录（recordSecrets，供 PreToolUse hook 精确匹配）", () => {
+  it("只记录达到最短长度的值，去重后逐行追加，会话结束删除", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "kv-home-"));
+    const prev = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      recordSecrets("sess1", ["rqspdbmnzfvjbeac", "123456", undefined, "rqspdbmnzfvjbeac"]);
+      recordSecrets("sess1", ["AKIAABCDEFGHIJKLMNOP"]);
+      const file = path.join(home, ".keyvalet", "run", "sess1.redact");
+      assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+      const lines = fs.readFileSync(file, "utf8").trim().split("\n");
+      assert.deepEqual(lines, ["rqspdbmnzfvjbeac", "AKIAABCDEFGHIJKLMNOP"]);
+      cleanupGatewayEnv();
+      assert.equal(fs.existsSync(file), false);
     } finally {
       process.env.HOME = prev;
     }

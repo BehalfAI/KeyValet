@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { confirm, promptSecret } from "../dialog.js";
-import { writeSecretFile } from "../gateway-env.js";
+import { recordSecrets, writeSecretFile } from "../gateway-env.js";
 import type { HelperSession } from "../session.js";
 import { confirmDeleteSourceFile, fail, guardOverwrite, importFile, norm, ok, optionalPurposeField, purposeField, resolveType, wrap } from "./common.js";
 import { setFromTemplate } from "./http.js";
@@ -122,7 +122,11 @@ export function registerBasicTools(server: McpServer, session: HelperSession): v
       ),
       inputSchema: { type: typeField, name: nameField, purpose: purposeField },
     },
-    wrap(async ({ type, name, purpose }) => ok(t("凭证：", "Credential:"), await session.scoped(purpose, { type, name }).request("get", { type, name }))),
+    wrap(async ({ type, name, purpose }) => {
+      const r = await session.scoped(purpose, { type, name }).request<{ value?: string; fields?: Record<string, string> }>("get", { type, name });
+      recordSecrets(session.sessionId, [r.value, ...Object.values(r.fields ?? {})]);
+      return ok(t("凭证：", "Credential:"), r);
+    }),
   );
 
   server.registerTool(

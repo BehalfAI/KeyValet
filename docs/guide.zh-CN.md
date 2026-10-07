@@ -246,7 +246,7 @@ OPENAI_BASE_URL=http://127.0.0.1:52011/<令牌>/api.openai.com/v1 OPENAI_API_KEY
 
 - **在对话里贴了密钥**（“这是我的 Stripe key：sk_live_…”），Claude 会用对应模板把它存进 KeyValet，之后通过代理或网关使用，而不是写进 `.env`。`UserPromptSubmit` hook 能识别约 25 种密钥格式（OpenAI、Anthropic、GitHub、AWS、Stripe、Slack、Google 等），只把掩码后的预览告诉 Claude。
 - **更推荐 `/keyvalet:add openai`**：在 KeyValet 的私密弹窗里输入密钥，它不会经过对话，也不会进入模型服务商的日志。
-- **要把明文密钥写进文件或命令行时**，`PreToolUse` hook 会先请你确认，并提示 Claude 改用 KeyValet。
+- **要把明文密钥写进文件或命令行时**，`PreToolUse` hook 会先请你确认，并提示 Claude 改用 KeyValet。这一步也会精确匹配本会话里 KeyValet 自己刚刚返回过的值（`credential_get`、`credential_totp_code`、`credential_access_token`、`credential_aws_credentials`）——不止是认得出格式的密钥，像授权码、应用密码这种没有固定前缀的值，只要是 KeyValet 亲手交出来的，一样会被拦下来。
 - 发现 `.env` 或配置文件里的密钥时，Claude 会提议迁移到 KeyValet；已存的密钥失效（401/403）时，会提议替换。
 
 如需关闭这些 hook，在 Claude Code 的运行环境中设置 `KEYVALET_HOOKS=off`。

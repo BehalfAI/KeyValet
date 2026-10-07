@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { recordSecrets } from "../server/gateway-env.js";
 import { setFromTemplate } from "../server/tools/http.js";
 import type { Op } from "../shared/protocol.js";
 
@@ -10,6 +13,7 @@ const hookPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../
 type Hit = { id: string | null; label: string; preview: string; tool?: string; ambiguous?: boolean };
 const hooks = (await import(pathToFileURL(hookPath).href)) as {
   detect(text: string, opts?: { generic?: boolean }): Hit[];
+  detectReturnedSecrets(text: string): Array<{ preview: string }>;
   handle(mode: string, input: unknown): { hookSpecificOutput: Record<string, string> } | null;
 };
 
@@ -61,6 +65,29 @@ describe("hook：识别对话和工具调用中的密钥", () => {
     assert.match(bash!.hookSpecificOutput.permissionDecisionReason!, /shell command/);
     assert.equal(hooks.handle("tool", { tool_name: "Bash", tool_input: { command: "npm test" } }), null);
     assert.equal(hooks.handle("tool", { tool_name: "Read", tool_input: { file_path: OPENAI } }), null);
+  });
+
+  it("PreToolUse：精确匹配 KeyValet 本会话已经返回过的值（不管像不像密钥）", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "kv-home-"));
+    const prev = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const AUTH_CODE = "rqspdbmnzfvjbeac"; // 不匹配任何已知厂商前缀
+      recordSecrets("sessX", [AUTH_CODE]);
+      const hit = hooks.detectReturnedSecrets(`QQ_IMAP_PWD='${AUTH_CODE}' python3 -c '...'`);
+      assert.equal(hit.length, 1);
+      assert.ok(!hit[0]!.preview.includes(AUTH_CODE));
+
+      const bash = hooks.handle("tool", { tool_name: "Bash", tool_input: { command: `QQ_IMAP_PWD='${AUTH_CODE}' python3 -c '...'` } });
+      assert.equal(bash?.hookSpecificOutput.permissionDecision, "ask");
+      assert.match(bash!.hookSpecificOutput.permissionDecisionReason!, /credential_export_file/);
+      const out = JSON.stringify(bash);
+      assert.ok(!out.includes(AUTH_CODE));
+
+      assert.equal(hooks.handle("tool", { tool_name: "Bash", tool_input: { command: "echo unrelated" } }), null);
+    } finally {
+      process.env.HOME = prev;
+    }
   });
 });
 

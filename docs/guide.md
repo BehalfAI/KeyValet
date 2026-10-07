@@ -143,7 +143,7 @@ The plugin makes Claude Code maintain your vault for you:
 
 - **Paste a key in the chat** ("here's my Stripe key: sk_live_…") and Claude stores it in KeyValet with the matching template, then uses it through the proxy or gateway instead of a `.env` file. A `UserPromptSubmit` hook recognizes ~25 key formats (OpenAI, Anthropic, GitHub, AWS, Stripe, Slack, Google, …) and tells Claude what to store, showing only a masked preview.
 - **Better: `/keyvalet:add openai`** — you type the key into KeyValet's private dialog, so it never passes through the chat or the model provider's logs.
-- **Before a literal key is written to a file or shell command**, a `PreToolUse` hook asks you to confirm and points Claude to KeyValet instead.
+- **Before a literal key is written to a file or shell command**, a `PreToolUse` hook asks you to confirm and points Claude to KeyValet instead. This also catches values KeyValet itself already handed back this session (via `credential_get`, `credential_totp_code`, `credential_access_token`, `credential_aws_credentials`) by exact match, not just known key formats — so a value with no recognizable prefix (an app password, an authorization code) is still caught if Claude tries to put it in a command or a file.
 - Claude also offers to move secrets it finds in `.env`/config files into KeyValet, and to replace a stored key when it stops working (401/403).
 
 Disable the hooks with `KEYVALET_HOOKS=off` in the environment Claude Code runs in.

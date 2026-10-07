@@ -6,6 +6,7 @@ import { oauthProviderNames, resolveOAuthProvider } from "../templates.js";
 import { ask, promptSecret, showNotice } from "../dialog.js";
 import { xoauth2 } from "../mail.js";
 import { copyToClipboard, discoverOidc, openInBrowser, runBrowserFlow } from "../oauth-flow.js";
+import { recordSecrets } from "../gateway-env.js";
 import type { HelperSession } from "../session.js";
 import { CLIENT_ID_RE, fail, guardOverwrite, httpsHost, importFile, norm, ok, purposeField, resolveType, safeDisplay, tryInfo, wrap } from "./common.js";
 
@@ -303,8 +304,11 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
       if (a.format === "xoauth2") {
         const username = a.username ?? r.account;
         if (!username) return fail(t("无法确定邮箱地址：请传 username，或在授权 scope 中包含 openid email。", "Cannot determine the email address: pass username, or include openid email in the authorization scopes."));
-        return ok(t("access token（含 XOAUTH2）：", "access token (with XOAUTH2):"), { ...r, username, xoauth2: xoauth2(username, r.access_token) });
+        const x = xoauth2(username, r.access_token);
+        recordSecrets(session.sessionId, [r.access_token, x]);
+        return ok(t("access token（含 XOAUTH2）：", "access token (with XOAUTH2):"), { ...r, username, xoauth2: x });
       }
+      recordSecrets(session.sessionId, [r.access_token]);
       return ok(t("access token：", "access token:"), r);
     }),
   );
@@ -543,7 +547,9 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
     wrap(async (a) => {
       const s = session.scoped(a.purpose, { type: a.type, name: a.name });
       const type = await resolveType(s, a.name, a.type, ["totp"]);
-      return ok(t("验证码：", "Code:"), await s.request("totp", { type, name: a.name }));
+      const r = await s.request<{ code: string; next_code?: string }>("totp", { type, name: a.name });
+      recordSecrets(session.sessionId, [r.code, r.next_code]);
+      return ok(t("验证码：", "Code:"), r);
     }),
   );
 
@@ -640,7 +646,13 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
     wrap(async (a) => {
       const s = session.scoped(a.purpose, { type: a.type, name: a.name });
       const type = await resolveType(s, a.name, a.type, ["aws"]);
-      const c = await s.request("aws", { type, name: a.name, duration_seconds: a.duration_seconds, force: a.force_refresh === true });
+      const c = await s.request<{ access_key_id: string; secret_access_key: string; session_token: string }>("aws", {
+        type,
+        name: a.name,
+        duration_seconds: a.duration_seconds,
+        force: a.force_refresh === true,
+      });
+      recordSecrets(session.sessionId, [c.access_key_id, c.secret_access_key, c.session_token]);
       return ok(t("AWS 临时凭证：", "AWS temporary credentials:"), c);
     }),
   );
