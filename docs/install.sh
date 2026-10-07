@@ -53,7 +53,8 @@ curl -fsSL "$URL" | tar -xz -C "$TMP" --strip-components 1 || fail "Download fai
 # Give the installer a real terminal for the sudo password when we have one (curl | sh pipes stdin);
 # without a terminal it falls back to a native macOS password dialog.
 run() {
-  if [ -r /dev/tty ] && [ -w /dev/tty ]; then (cd "$TMP" && "$@" </dev/tty); else (cd "$TMP" && "$@"); fi
+  # 不能只看 -r/-w：没有控制终端时（例如由 agent 运行）/dev/tty 存在但打不开
+  if (: </dev/tty) 2>/dev/null; then (cd "$TMP" && "$@" </dev/tty); else (cd "$TMP" && "$@"); fi
 }
 
 if [ "$ACTION" = uninstall ]; then
@@ -99,4 +100,4 @@ else
 fi
 
 echo
-say "Done. Ask your agent: \"Use KeyValet to store my OpenAI key with the openai template.\""
+say "Done. In Claude Code, run /keyvalet:add openai to store your first key."
