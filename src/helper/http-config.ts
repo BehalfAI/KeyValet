@@ -139,7 +139,11 @@ export function validateTest(raw: unknown, f: FieldValues, allowSecrets: boolean
   return out;
 }
 
-/** 校验完整的代理配置。token 类凭证（oauth2 等）不需要 inject。 */
+/**
+ * 校验完整的代理配置。token 类凭证（oauth2 等）默认注入 Authorization: Bearer <token>；
+ * 也可以自定义注入规则，用 {{access_token}} 引用当次的短期 token（如 GitHub 的 git 推送要求
+ * Basic 认证：{"basic": {"username": "x-access-token", "password": "{{access_token}}"}}）。
+ */
 export function validateHttpConfig(
   raw: unknown,
   rec: Pick<CredentialRecord, "kind" | "secrets" | "attributes" | "value">,
@@ -147,11 +151,12 @@ export function validateHttpConfig(
 ): HttpConfig {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new VaultError(t("http 配置必须是对象", "http config must be an object"));
   const r = raw as Record<string, unknown>;
-  const f = fieldValues(rec as CredentialRecord);
   const kind = rec.kind ?? "static";
+  const base = fieldValues(rec as CredentialRecord);
+  // token 类凭证：只能引用当次的短期 token（长期秘密不参与渲染）和非敏感字段
+  const f = kind === "static" ? base : { ...base, secrets: { access_token: "<access_token>" } };
   const inject = validateInject(r.inject, f);
   if (kind === "static" && !inject) throw new VaultError(t("static 凭证的代理调用需要注入规则（inject）", "Proxied calls with a static credential require an injection rule (inject)"));
-  if (kind !== "static" && inject) throw new VaultError(t(`${kind} 凭证自动注入 access token，不能自定义注入规则`, `${kind} credentials inject the access token automatically; custom injection rules are not allowed`));
   if (!["static", "oauth2", "google_service_account", "github_app", "jwt"].includes(kind)) {
     throw new VaultError(t(`${kind} 凭证不支持代理调用`, `${kind} credentials do not support proxied calls`));
   }

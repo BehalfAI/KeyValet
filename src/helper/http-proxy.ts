@@ -174,8 +174,22 @@ export async function buildInjection(vault: Vault, type: string, name: string, r
   secrets.push(...Object.values(rec.secrets ?? {}), rec.value ?? "");
   if (TOKEN_KINDS.includes(kind)) {
     const tok = (await accessToken(vault, { type, name, viaProxy: true })) as { access_token: string };
-    headers.Authorization = `Bearer ${tok.access_token}`;
     secrets.push(tok.access_token);
+    const rule = rec.http?.inject;
+    if (!rule) {
+      headers.Authorization = `Bearer ${tok.access_token}`;
+    } else {
+      // 自定义注入规则：{{access_token}} 引用当次 token
+      const f = { secrets: { access_token: tok.access_token }, attributes: rec.attributes ?? {}, value: "" };
+      for (const [k, v] of Object.entries(rule.headers ?? {})) headers[k] = render(v, f);
+      for (const [k, v] of Object.entries(rule.query ?? {})) query[k] = render(v, f);
+      if (rule.basic) {
+        const basic = Buffer.from(`${render(rule.basic.username, f)}:${render(rule.basic.password, f)}`).toString("base64");
+        headers.Authorization = `Basic ${basic}`;
+        secrets.push(basic);
+      }
+      secrets.push(...Object.values(headers), ...Object.values(query));
+    }
   } else {
     const rule = rec.http!.inject;
     if (!rule) throw new VaultError(t("该凭证没有注入规则", "This credential has no injection rule"));

@@ -219,7 +219,11 @@ describe("代理调用", () => {
     vault.patchRecord("oauth2", "svc", "oauth2", gen, (rec) => {
       rec.state = { access_token: "AT-TOKEN-777777", expires_at: Date.now() + 3600_000 };
     });
-    await assert.rejects(call("httpConfigure", { type: "oauth2", name: "svc", allowed_hosts: ["127.0.0.1"], inject: { headers: { A: "b" } } }), /自动注入/);
+    await assert.rejects(
+      call("httpConfigure", { type: "oauth2", name: "svc", allowed_hosts: ["127.0.0.1"], inject: { headers: { A: "{{client_secret}}" } } }),
+      /不存在的字段 client_secret/,
+      "token 类凭证的自定义规则不能引用长期秘密",
+    );
     await call("httpConfigure", { type: "oauth2", name: "svc", allowed_hosts: ["127.0.0.1"] });
     assert.equal(confirms.length, 1, "首次为已有凭证开启代理需要确认");
     const r = await call<{ body: string }>("httpRequest", { type: "oauth2", name: "svc", url: `${base}/graph` });
@@ -305,5 +309,23 @@ describe("代理调用", () => {
   it("GET 请求不能带请求体", async () => {
     await setOpenAiLike();
     await assert.rejects(call("httpRequest", { type: "open_ai_api", name: "main", url: `${base}/x`, body: "x" }), /不能带请求体/);
+  });
+
+  it("token 类凭证可自定义注入：{{access_token}}（如 GitHub git 推送要求的 Basic 认证）", async () => {
+    await call("setupProtocol", {
+      kind: "oauth2", type: "oauth2", name: "gh", secrets: {},
+      config: { provider: "github", client_id: "cid", authorization_url: "https://a.example.com/auth", token_url: "https://a.example.com/token", token_auth_method: "none" },
+    });
+    vault.patchRecord("oauth2", "gh", "oauth2", vault.getRecord("oauth2", "gh").record.generation, (rec) => {
+      rec.state = { access_token: "gho_TOKEN_123456", expires_at: Date.now() + 3600_000 };
+    });
+    await call("httpConfigure", {
+      type: "oauth2", name: "gh", allowed_hosts: ["127.0.0.1"],
+      inject: { basic: { username: "x-access-token", password: "{{access_token}}" } },
+    });
+    const r = await call<{ body: string }>("httpRequest", { type: "oauth2", name: "gh", url: `${base}/git` });
+    assert.equal(received.at(-1)!.headers.authorization, `Basic ${Buffer.from("x-access-token:gho_TOKEN_123456").toString("base64")}`);
+    assert.equal(r.body.includes("gho_TOKEN_123456"), false);
+    assert.equal(r.body.includes(Buffer.from("x-access-token:gho_TOKEN_123456").toString("base64")), false);
   });
 });

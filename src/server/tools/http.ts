@@ -285,7 +285,12 @@ export function registerHttpTools(server: McpServer, session: HelperSession): vo
             basic: z.object({ username: z.string(), password: z.string() }).optional(),
           })
           .optional()
-          .describe(t("注入规则（仅 static 凭证）", "Injection rule (static credentials only)")),
+          .describe(
+            t(
+              "注入规则。static 凭证用 {{字段名}}；oauth2 等 token 类凭证默认注入 Bearer，也可用 {{access_token}} 自定义，如 GitHub git 推送：{\"basic\": {\"username\": \"x-access-token\", \"password\": \"{{access_token}}\"}}",
+              "Injection rule. Static credentials use {{field}}; token credentials (oauth2 etc.) inject a Bearer token by default or can use {{access_token}}, e.g. for GitHub git pushes: {\"basic\": {\"username\": \"x-access-token\", \"password\": \"{{access_token}}\"}}",
+            ),
+          ),
         test: z
           .object({
             method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]).optional(),
