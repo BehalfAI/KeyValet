@@ -352,7 +352,7 @@
       <div>
         <p><span lang="en">Needs macOS, Node.js 20+ from nvm or nodejs.org, and the Xcode Command Line Tools. The installer asks for your password once and adds a single sudoers rule that can only start the KeyValet helper.</span><span lang="zh">需要 macOS、来自 nvm 或 nodejs.org 的 Node.js 20+，以及 Xcode 命令行工具。安装时会要一次密码，并添加一条只能启动 KeyValet helper 的 sudoers 规则。</span></p>
         <pre><code><span data-clone></span>
-cd keyvalet
+cd KeyValet
 ./scripts/install.sh</code></pre>
       </div>
       <div>
@@ -375,7 +375,7 @@ cd keyvalet
 
 <script>
   // 仓库地址只在这里配置一次（部署时替换）
-  const REPO = "https://github.com/OWNER/keyvalet";
+  const REPO = "https://github.com/BehalfAI/KeyValet";
   document.querySelectorAll("[data-repo]").forEach((a) => (a.href = REPO));
   document.querySelectorAll("[data-repo-file]").forEach((a) => (a.href = `${REPO}/blob/main/${a.dataset.repoFile}`));
   document.querySelectorAll("[data-clone]").forEach((el) => (el.textContent = `git clone ${REPO}.git`));

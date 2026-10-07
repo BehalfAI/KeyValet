@@ -54,10 +54,21 @@ end run`;
   return ok && stdout.trim() === okLabel;
 }
 
-/** 非阻塞的提示框（如显示设备码），返回关闭函数 */
+/** 询问框：默认按钮为执行操作（回车即执行），“取消”为取消按钮。返回是否点了执行。 */
+export async function ask(message: string, okLabel: string): Promise<boolean> {
+  const script = `on run argv
+  set r to display dialog (item 1 of argv) with title (item 2 of argv) buttons {(item 4 of argv), (item 3 of argv)} default button 2 cancel button 1 with icon note giving up after 600
+  if gave up of r then error number -128
+  return button returned of r
+end run`;
+  const { ok, stdout } = await runAppleScript(script, [message, TITLE, okLabel, t("取消", "Cancel")], 610_000);
+  return ok && stdout.trim() === okLabel;
+}
+
+/** 非阻塞的提示框（如显示设备码），没有默认按钮（回车不会误关），返回关闭函数 */
 export function showNotice(message: string, timeoutSec = 900): () => void {
   const script = `on run argv
-  display dialog (item 1 of argv) with title (item 2 of argv) buttons {(item 3 of argv)} default button (item 3 of argv) giving up after ${Math.floor(timeoutSec)}
+  display dialog (item 1 of argv) with title (item 2 of argv) buttons {(item 3 of argv)} giving up after ${Math.floor(timeoutSec)}
 end run`;
   const child = execFile(OSASCRIPT_BIN, ["-e", script, "--", message, TITLE, t("好", "OK")], { env: { PATH: "/usr/bin:/bin" } }, () => {});
   return () => {

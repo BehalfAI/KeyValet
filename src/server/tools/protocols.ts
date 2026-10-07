@@ -3,7 +3,7 @@ import { z } from "zod";
 import { t } from "../../shared/i18n.js";
 import { SECRET_REBIND_MARK } from "../../shared/protocol.js";
 import { oauthProviderNames, resolveOAuthProvider } from "../templates.js";
-import { promptSecret, showNotice } from "../dialog.js";
+import { ask, promptSecret, showNotice } from "../dialog.js";
 import { xoauth2 } from "../mail.js";
 import { copyToClipboard, discoverOidc, openInBrowser, runBrowserFlow } from "../oauth-flow.js";
 import type { HelperSession } from "../session.js";
@@ -209,13 +209,21 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
         const userCode = safeDisplay(d.user_code, /^[A-Za-z0-9-]{4,20}$/, t("服务商返回的 user_code", "user_code returned by the provider"));
         const url = d.verification_uri_complete ?? d.verification_uri;
         if (url && (url.length > 300 || /\s/.test(url))) throw new Error(t("服务商返回的验证网址格式异常", "The verification URL returned by the provider is malformed"));
+        // 先让用户看清验证码，点按钮后再打开浏览器（浏览器抢焦点时，弹窗容易被误按回车关掉）
         copyToClipboard(userCode);
-        if (url) await openInBrowser(url).catch(() => {});
-        const close = showNotice(
+        const proceed = await ask(
           t(
-            `请在浏览器中完成授权。\n\n验证码：${userCode}\n（已复制到剪贴板）\n\n网址：${url ?? "见服务商说明"}`,
-            `Please complete authorization in your browser.\n\nCode: ${userCode}\n(copied to the clipboard)\n\nURL: ${url ?? "see the provider's instructions"}`,
+            `请在 ${url ?? "服务商的验证页面"} 输入验证码：\n\n${userCode}\n\n（已复制到剪贴板）点击下方按钮打开验证页面。`,
+            `Enter this code at ${url ?? "the provider's verification page"}:\n\n${userCode}\n\n(Copied to the clipboard.) Click the button below to open the page.`,
           ),
+          t("打开验证页面", "Open verification page"),
+        );
+        if (!proceed) return fail(t("用户取消了授权。", "Authorization was cancelled by the user."));
+        copyToClipboard(userCode); // 再复制一次，防止期间剪贴板被覆盖
+        if (url) await openInBrowser(url).catch(() => {});
+        // 等待期间的提示没有默认按钮：回车不会误关
+        const close = showNotice(
+          t(`等待浏览器中完成授权…\n\n验证码：${userCode}`, `Waiting for authorization in the browser…\n\nCode: ${userCode}`),
           d.expires_in,
         );
         try {

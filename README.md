@@ -60,7 +60,7 @@ KeyValet's answer: **secrets stay on your machine, owned by root. Agents ask; yo
 ## Install
 
 ```sh
-git clone <this repo> keyvalet && cd keyvalet
+git clone https://github.com/BehalfAI/KeyValet && cd KeyValet
 ./scripts/install.sh        # run as your user; privileged steps use sudo
 ```
 
