@@ -5,7 +5,7 @@ import fs from "node:fs";
 import { setLang, t } from "../shared/i18n.js";
 import { CLI_JS, VAULT_DIR } from "../shared/paths.js";
 import { fatal as fatalWith, verifyRootEnvironment } from "../helper/trust.js";
-import { readSettings, writeSettings } from "../helper/settings.js";
+import { parseMode, readSettings, writeSettings } from "../helper/settings.js";
 import { MAX_VALUE_LENGTH, Vault } from "../helper/vault.js";
 
 function fatal(msg: string): never {
@@ -27,7 +27,8 @@ function usage(): string {
   delete <type> <name>               删除凭证
   delete-type <type>                 删除空的凭证类型
   audit [行数]                       查看审计日志（默认 50 行）
-  grant-mode [per-credential|all]    查看/设置授权范围：每个凭证单独授权，或每个会话一次授权全部`,
+  grant-mode [per-use|per-credential|per-session|remember [小时]|forget]
+                                     查看/设置授权模式：每次 / 每个凭证 / 每个会话按 Touch ID，或按一次后记住一段时间`,
     `Usage: keyvalet <command>
 
   types                              List credential types
@@ -41,7 +42,8 @@ function usage(): string {
   delete <type> <name>               Delete a credential
   delete-type <type>                 Delete an empty credential type
   audit [lines]                      Show the audit log (default 50 lines)
-  grant-mode [per-credential|all]    Show/set grant scope: authorize each credential separately, or all at once per session`,
+  grant-mode [per-use|per-credential|per-session|remember [hours]|forget]
+                                     Show/set grant mode: Touch ID per use / per credential / per session, or once and remember for a while`,
   );
 }
 
@@ -196,16 +198,26 @@ async function main(): Promise<void> {
       break;
     }
     case "grant-mode": {
-      const [m] = args;
+      const [m, h] = args;
+      const cur = readSettings(VAULT_DIR);
       if (!m) {
-        console.log(readSettings(VAULT_DIR).grant_mode);
+        console.log(`${cur.grant_mode}${cur.grant_mode === "remember" ? ` (${cur.remember_hours === 0 ? "forever" : `${cur.remember_hours}h`})` : ""}`);
         break;
       }
-      const mode = m.replace("-", "_");
-      if (mode !== "per_credential" && mode !== "all") fatal(t("用法：grant-mode [per-credential|all]", "Usage: grant-mode [per-credential|all]"));
-      writeSettings(VAULT_DIR, { ...readSettings(VAULT_DIR), grant_mode: mode });
-      vault.audit({ op: "settings", grant_mode: mode, ok: true, client });
-      console.log(t(`授权范围已设为 ${mode}（对新的会话生效）`, `Grant scope set to ${mode} (takes effect for new sessions)`));
+      if (m === "forget") {
+        writeSettings(VAULT_DIR, { grant_mode: cur.grant_mode, remember_hours: cur.remember_hours });
+        vault.audit({ op: "settings", forget: true, ok: true, client });
+        console.log(t("已清除“记住”状态", "Cleared the remembered authorization"));
+        break;
+      }
+      const mode = parseMode(m.replace(/-/g, "_"));
+      if (!mode) fatal(t("用法：grant-mode [per-use|per-credential|per-session|remember [小时，0=永久]|forget]", "Usage: grant-mode [per-use|per-credential|per-session|remember [hours, 0=forever]|forget]"));
+      const hours = h === undefined ? cur.remember_hours : Number(h);
+      if (!Number.isFinite(hours) || hours < 0 || hours > 8760) fatal(t("小时数必须在 0~8760 之间", "Hours must be between 0 and 8760"));
+      // 你本人在终端以 root 执行（已输入密码），无需再确认；记住窗口从下一次 Touch ID 开始
+      writeSettings(VAULT_DIR, { grant_mode: mode, remember_hours: hours });
+      vault.audit({ op: "settings", grant_mode: mode, remember_hours: hours, ok: true, client });
+      console.log(t(`授权模式已设为 ${mode}（新会话生效）`, `Grant mode set to ${mode} (new sessions)`));
       break;
     }
     case "audit": {

@@ -58,9 +58,12 @@ run() {
 
 if [ "$ACTION" = uninstall ]; then
   run sh scripts/uninstall.sh
-  if command -v claude >/dev/null 2>&1 && claude mcp get keyvalet >/dev/null 2>&1; then
-    claude mcp remove keyvalet --scope user >/dev/null 2>&1 || true
-    say "Removed the keyvalet MCP server from Claude Code."
+  if command -v claude >/dev/null 2>&1; then
+    if claude mcp get keyvalet >/dev/null 2>&1; then
+      claude mcp remove keyvalet --scope user >/dev/null 2>&1 || true
+      say "Removed the keyvalet MCP server from Claude Code."
+    fi
+    claude plugin uninstall keyvalet@keyvalet >/dev/null 2>&1 && say "Removed the KeyValet plugin." || true
   fi
   exit 0
 fi
@@ -72,8 +75,23 @@ if [ -z "${KEYVALET_NO_REGISTER:-}" ] && command -v claude >/dev/null 2>&1; then
     say "Claude Code already has the keyvalet MCP server."
   else
     claude mcp add keyvalet --scope user -- "$INSTALL_DIR/bin/node" "$INSTALL_DIR/app/dist/server/index.js" >/dev/null
-    say "Registered KeyValet with Claude Code (restart open sessions to load it)."
+    say "Registered KeyValet with Claude Code."
   fi
+  # 插件：/keyvalet:mode、/keyvalet:status、/keyvalet:lock、/keyvalet:audit 以及使用指引
+  if claude plugin marketplace list 2>/dev/null | grep -q keyvalet; then
+    claude plugin marketplace update keyvalet >/dev/null 2>&1 || true
+  else
+    claude plugin marketplace add "$REPO" >/dev/null 2>&1 || true
+  fi
+  if claude plugin list 2>/dev/null | grep -q "keyvalet@keyvalet"; then
+    claude plugin update keyvalet@keyvalet >/dev/null 2>&1 || true
+    say "Updated the KeyValet plugin for Claude Code."
+  elif claude plugin install keyvalet@keyvalet >/dev/null 2>&1; then
+    say "Installed the KeyValet plugin (/keyvalet:mode, /keyvalet:status, /keyvalet:lock, /keyvalet:audit)."
+  else
+    say "Could not install the Claude Code plugin automatically; run: claude plugin marketplace add $REPO && claude plugin install keyvalet@keyvalet"
+  fi
+  say "Restart open Claude Code sessions to load KeyValet."
 else
   say "Add KeyValet to your MCP client as a stdio server:"
   echo "    command: $INSTALL_DIR/bin/node"

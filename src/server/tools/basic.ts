@@ -57,10 +57,17 @@ export function registerBasicTools(server: McpServer, session: HelperSession): v
 
   server.registerTool(
     "credential_lock",
-    { description: t("立即锁定凭证库，之后再访问需要重新通过 Touch ID 认证", "Lock the vault immediately; further access requires Touch ID authentication again"), inputSchema: {} },
-    wrap(async () => {
+    {
+      description: t(
+        "立即锁定凭证库，之后再访问需要重新通过 Touch ID 认证。remember 模式下传 forget=true 同时清除“记住”状态（否则下次访问会自动解锁）。",
+        "Lock the vault now; further access requires Touch ID again. In remember mode pass forget=true to also clear the remembered authorization (otherwise the next access unlocks automatically).",
+      ),
+      inputSchema: { forget: z.boolean().optional().describe(t("同时清除“记住”状态", "Also clear the remembered authorization")) },
+    },
+    wrap(async ({ forget }) => {
+      if (forget) await session.request("settings", { forget: true, purpose: t("锁定并清除记住状态", "Lock and forget") }, t("锁定并清除记住状态", "Lock and forget"));
       session.lock();
-      return ok(t("凭证库已锁定。", "Vault locked."));
+      return ok(forget ? t("凭证库已锁定，“记住”状态已清除。", "Vault locked and remembered authorization cleared.") : t("凭证库已锁定。", "Vault locked."));
     }),
   );
 
@@ -303,20 +310,31 @@ export function registerBasicTools(server: McpServer, session: HelperSession): v
     "credential_settings",
     {
       description: t(
-        "查看或修改凭证库设置。grant_mode：per_credential（默认，每个凭证单独 Touch ID 授权）或 all（每个会话一次授权全部凭证）。" +
-          "改为 all 会由凭证库弹窗请用户确认；改回 per_credential 不需要。修改对新的会话生效。",
-        "View or change vault settings. grant_mode: per_credential (default; each credential is authorized separately with Touch ID) or all (one authorization per session grants all credentials). " +
-          "Switching to all requires user confirmation in a vault dialog; switching back to per_credential does not. Changes apply to new sessions.",
+        "查看或修改 KeyValet 的授权模式。grant_mode：per_use（每次使用凭证都按 Touch ID）、per_credential（默认，每个会话中每个凭证按一次）、" +
+          "per_session（每个会话按一次）、remember（按一次后，remember_hours 小时内所有会话都不用再按；0 表示永久）。" +
+          "放宽（更宽松的模式或更长的记住时长）需要用户按 Touch ID；收紧立即生效。修改对当前会话也立即生效。forget=true 清除“记住”状态。" +
+          "只在用户明确要求时修改设置。",
+        "View or change KeyValet's authorization mode. grant_mode: per_use (Touch ID for every use), per_credential (default; Touch ID once per credential per session), " +
+          "per_session (Touch ID once per session), remember (Touch ID once, then no prompts for any session for remember_hours hours; 0 = forever). " +
+          "Loosening (a more permissive mode or a longer remember window) requires the user's Touch ID; tightening applies immediately. Changes take effect in the current session too. forget=true clears the remembered authorization. " +
+          "Only change settings when the user explicitly asks.",
       ),
       inputSchema: {
-        grant_mode: z.enum(["per_credential", "all"]).optional().describe(t("省略则只查看", "Omit to only view")),
+        grant_mode: z.enum(["per_use", "per_credential", "per_session", "remember", "all"]).optional().describe(t("省略则只查看（all 等同 per_session）", "Omit to only view (all = per_session)")),
+        remember_hours: z.number().min(0).max(8760).optional().describe(t("remember 模式的时长（小时），0 表示永久", "Duration for remember mode in hours; 0 = forever")),
+        forget: z.boolean().optional().describe(t("清除当前的“记住”状态", "Clear the current remembered authorization")),
         purpose: optionalPurposeField,
       },
     },
     wrap(async (a) => {
-      if (a.grant_mode && !a.purpose) return fail(t("修改设置需要说明目的（purpose）。", "Changing settings requires a purpose."));
-      const r = await session.request("settings", { grant_mode: a.grant_mode, purpose: a.purpose }, a.purpose ?? t("查看凭证库设置", "View vault settings"));
-      return ok(a.grant_mode ? t("设置已更新：", "Settings updated:") : t("当前设置：", "Current settings:"), r);
+      const changing = a.grant_mode !== undefined || a.remember_hours !== undefined || a.forget === true;
+      if (changing && !a.purpose) return fail(t("修改设置需要说明目的（purpose）。", "Changing settings requires a purpose."));
+      const r = await session.request(
+        "settings",
+        { grant_mode: a.grant_mode, remember_hours: a.remember_hours, forget: a.forget, purpose: a.purpose },
+        a.purpose ?? t("查看凭证库设置", "View vault settings"),
+      );
+      return ok(changing ? t("设置已更新：", "Settings updated:") : t("当前设置：", "Current settings:"), r);
     }),
   );
 }

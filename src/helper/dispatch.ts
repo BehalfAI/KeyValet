@@ -1,6 +1,6 @@
 import { GRANT_REQUIRED_OPS, GRANT_REQUIRED_PREFIX, OPS, PURPOSE_REQUIRED_OPS, cleanPurpose, type Request, type Response } from "../shared/protocol.js";
 import type { GateResult } from "./auth-gate.js";
-import { readSettings, writeSettings, type GrantMode } from "./settings.js";
+import { GRANT_MODES, isLoosening, parseMode, readSettings, rememberActive, rememberUntil, stricter, writeSettings, type GrantMode, type Settings } from "./settings.js";
 import { deviceStart, devicePoll, exchangeCode } from "./protocols/oauth2.js";
 import { accessToken, aws, publicView, setupProtocol, totp } from "./protocols/index.js";
 import { validateHttpConfig } from "./http-config.js";
@@ -17,6 +17,12 @@ export interface SessionAuth {
   gateway?: Gateway;
   grantAll: boolean;
   grants: Set<string>;
+  /** 本会话生效的授权模式（全局设置与客户端请求中更严格的那个）；省略视为 per_credential */
+  mode?: GrantMode;
+  /** 客户端请求的模式（只能收严），设置变化后用于重新计算 */
+  requested?: GrantMode | null;
+  /** per_use 模式：已认证、尚未使用的单次授权 */
+  oneShot?: Set<string>;
   /** 弹出 Touch ID（由 main 注入；测试中可替换） */
   authorize: (reason: string) => Promise<GateResult>;
 }
@@ -42,39 +48,99 @@ export function resolveHint(vault: Vault, hint: unknown): string | null {
 async function grantCredential(vault: Vault, p: Record<string, unknown>, ctx: ClientContext, auth: SessionAuth) {
   const { type, name } = vault.getRecord(p.type, p.name);
   const key = `${type}/${name}`;
-  if (auth.grantAll || auth.grants.has(key)) return { granted: key, already: true };
+  const perUse = auth.mode === "per_use";
+  if (!perUse && (auth.grantAll || auth.grants.has(key))) return { granted: key, already: true };
   const purpose = cleanPurpose(p.purpose) ?? "";
+  const where = t(`目的：${purpose}\n来源目录（agent 提供）：${ctx.cwd || "未知"}`, `Purpose: ${purpose}\nWorking directory (reported by agent): ${ctx.cwd || "unknown"}`);
   const r = await auth.authorize(
-    t(
-      `授权本次 AI 会话使用凭证：${key}\n目的：${purpose}\n来源目录（agent 提供）：${ctx.cwd || "未知"}`,
-      `Authorize this AI session to use credential: ${key}\nPurpose: ${purpose}\nWorking directory (reported by agent): ${ctx.cwd || "unknown"}`,
-    ),
+    perUse
+      ? t(`授权本次使用凭证（仅此一次）：${key}\n${where}`, `Authorize a single use of credential: ${key}\n${where}`)
+      : t(`授权本次 AI 会话使用凭证：${key}\n${where}`, `Authorize this AI session to use credential: ${key}\n${where}`),
   );
   if (!r.ok) throw new VaultError(r.error);
-  auth.grants.add(key);
-  return { granted: key, already: false };
+  if (perUse) (auth.oneShot ??= new Set()).add(key);
+  else auth.grants.add(key);
+  return { granted: key, already: false, single_use: perUse };
 }
 
-async function settingsOp(vault: Vault, p: Record<string, unknown>) {
-  const current = readSettings(vault.dir);
-  if (p.grant_mode === undefined || p.grant_mode === null) return current;
-  const mode = p.grant_mode as GrantMode;
-  if (mode !== "all" && mode !== "per_credential") throw new VaultError(t("grant_mode 只能是 per_credential 或 all", "grant_mode must be per_credential or all"));
-  if (mode === current.grant_mode) return current;
-  // 放宽（改为一次授权全部）需要用户确认；收紧不需要
-  if (mode === "all") {
-    const purpose = cleanPurpose(p.purpose) ?? "";
-    const ok = await confirmAsUser(
-      t(
-        `AI 会话请求修改凭证库设置：\n\n授权范围改为「一次授权全部凭证」\n（之后每个会话按一次 Touch ID 即可使用所有凭证）\n\n目的：${purpose.slice(0, 200)}`,
-        `An AI session is requesting a change to vault settings:\n\nSet grant scope to "authorize all credentials at once"\n(each session will then be able to use every credential after a single Touch ID)\n\nPurpose: ${purpose.slice(0, 200)}`,
-      ),
-      t("允许修改", "Allow Change"),
-    );
-    if (!ok) throw new VaultError(t("用户拒绝了该修改", "The user denied this change"));
+/** 按设置更新当前会话的授权状态（设置修改后立即生效） */
+export function applyMode(auth: SessionAuth, s: Settings): void {
+  auth.mode = stricter(s.grant_mode, auth.requested ?? null);
+  if (auth.mode === "per_use") {
+    auth.grantAll = false;
+    auth.grants.clear();
+    auth.oneShot = new Set();
+  } else if (auth.mode === "per_credential") {
+    auth.grantAll = false;
+  } else {
+    auth.grantAll = true; // per_session / remember：本会话可使用全部凭证
   }
-  writeSettings(vault.dir, { ...current, grant_mode: mode });
-  return { ...readSettings(vault.dir), note: t("对新的会话生效", "Takes effect for new sessions") };
+}
+
+function settingsView(s: Settings, auth?: SessionAuth) {
+  return {
+    grant_mode: s.grant_mode,
+    remember_hours: s.remember_hours,
+    remembered_until: rememberActive(s) ? (s.remember_until === Number.MAX_SAFE_INTEGER ? "forever" : new Date(s.remember_until!).toISOString()) : null,
+    session: auth
+      ? { effective_mode: auth.mode ?? "per_credential", requested_mode: auth.requested ?? null, grants_all: auth.grantAll, granted: [...auth.grants].sort() }
+      : null,
+  };
+}
+
+function describeSettings(s: Settings): string {
+  const hours = s.remember_hours === 0 ? t("永久", "forever") : t(`${s.remember_hours} 小时`, `${s.remember_hours} hours`);
+  switch (s.grant_mode) {
+    case "per_use":
+      return t("每次使用凭证都要 Touch ID", "Touch ID for every use of a credential");
+    case "per_credential":
+      return t("每个会话中，每个凭证按一次 Touch ID", "Touch ID once per credential per session");
+    case "per_session":
+      return t("每个会话按一次 Touch ID，之后可使用全部凭证", "Touch ID once per session, then all credentials");
+    case "remember":
+      return t(`按一次 Touch ID，${hours}内所有会话都不再需要认证`, `Touch ID once, then no authentication for any session for ${hours}`);
+  }
+}
+
+/**
+ * 查看/修改授权设置。放宽（更宽松的模式、更长的记住时长）必须由用户按 Touch ID——
+ * 指纹无法用脚本伪造，而确认框在终端有“辅助功能”权限时可能被脚本点击。收紧立即生效、无需认证。
+ */
+async function settingsOp(vault: Vault, p: Record<string, unknown>, auth?: SessionAuth) {
+  const current = readSettings(vault.dir);
+  if (p.forget === true) {
+    const next: Settings = { grant_mode: current.grant_mode, remember_hours: current.remember_hours };
+    writeSettings(vault.dir, next);
+    if (auth) applyMode(auth, next);
+    return { ...settingsView(next, auth), note: t("已清除“记住”状态", "Cleared the remembered authorization") };
+  }
+  if (p.grant_mode == null && p.remember_hours == null) return settingsView(current, auth);
+
+  const mode = p.grant_mode == null ? current.grant_mode : parseMode(p.grant_mode);
+  if (!mode) throw new VaultError(t(`grant_mode 只能是 ${GRANT_MODES.join(" / ")}`, `grant_mode must be one of ${GRANT_MODES.join(" / ")}`));
+  let hours = current.remember_hours;
+  if (p.remember_hours != null) {
+    hours = Number(p.remember_hours);
+    if (!Number.isFinite(hours) || hours < 0 || hours > 8760) throw new VaultError(t("remember_hours 必须在 0~8760 之间（0 表示永久）", "remember_hours must be between 0 and 8760 (0 = forever)"));
+  }
+  const next: Settings = { grant_mode: mode, remember_hours: hours };
+  if (mode === "remember" && rememberActive(current)) next.remember_until = current.remember_until;
+
+  if (isLoosening(current, next)) {
+    const purpose = cleanPurpose(p.purpose) ?? "";
+    const msg = t(
+      `修改 KeyValet 授权设置为：${describeSettings(next)}\n目的：${purpose.slice(0, 200)}`,
+      `Change KeyValet authorization to: ${describeSettings(next)}\nPurpose: ${purpose.slice(0, 200)}`,
+    );
+    const approved = auth ? (await auth.authorize(msg)).ok : await confirmAsUser(msg, t("允许修改", "Allow Change"));
+    if (!approved) throw new VaultError(t("用户拒绝了该修改", "The user denied this change"));
+    if (mode === "remember") next.remember_until = rememberUntil(hours); // 本次 Touch ID 即开始记住
+  } else if (next.remember_until !== undefined) {
+    next.remember_until = Math.min(next.remember_until, rememberUntil(hours)); // 缩短时长：同时缩短当前窗口
+  }
+  writeSettings(vault.dir, next);
+  if (auth) applyMode(auth, next);
+  return { ...settingsView(next, auth), note: t("已生效（包括当前会话）", "In effect now, including this session") };
 }
 
 const FIELD_KEY_RE = /^[A-Za-z0-9_.-]{1,64}$/;
@@ -222,7 +288,7 @@ async function run(vault: Vault, req: Request, ctx: ClientContext, auth: Session
       if (!auth) return { granted: credKey(p.type, p.name), already: true };
       return grantCredential(vault, p, ctx, auth);
     case "settings":
-      return settingsOp(vault, p);
+      return settingsOp(vault, p, auth);
     case "gatewayOpen": {
       const { type, name, record } = vault.getRecord(p.type, p.name);
       if (!record.http) {
@@ -247,11 +313,7 @@ async function run(vault: Vault, req: Request, ctx: ClientContext, auth: Session
       };
     }
     case "sessionInfo":
-      return {
-        grant_mode: readSettings(vault.dir).grant_mode,
-        session_grants_all: auth ? auth.grantAll : true,
-        granted: auth ? [...auth.grants].sort() : [],
-      };
+      return settingsView(readSettings(vault.dir), auth);
   }
 }
 
@@ -318,17 +380,21 @@ export async function dispatch(vault: Vault, req: Request, ctx: ClientContext, a
     client: ctx,
   };
   // 只读的元数据查询不记日志，避免刷屏
-  const quiet = ["exists", "info", "oauthDevicePoll", "auditQuery", "sessionInfo"].includes(req.op) || (req.op === "settings" && p.grant_mode == null);
+  const quiet =
+    ["exists", "info", "oauthDevicePoll", "auditQuery", "sessionInfo"].includes(req.op) ||
+    (req.op === "settings" && p.grant_mode == null && p.remember_hours == null && p.forget !== true);
   try {
     if (!OPS.includes(req.op)) throw new VaultError(t(`未知操作 ${String(req.op)}`, `Unknown operation ${String(req.op)}`));
     if (PURPOSE_REQUIRED_OPS.has(req.op) && !purpose) throw new VaultError(t("必须说明本次操作的目的（purpose）", "A purpose is required for this operation"));
-    if (auth && !auth.grantAll && GRANT_REQUIRED_OPS.has(req.op)) {
+    if (auth && GRANT_REQUIRED_OPS.has(req.op)) {
       const key = credKey(p.type, p.name);
-      if (!auth.grants.has(key)) throw new VaultError(`${GRANT_REQUIRED_PREFIX}${key}`);
+      // per_use：每次 Touch ID 只换来一次使用
+      const allowed = auth.mode === "per_use" ? auth.oneShot?.delete(key) === true : auth.grantAll || auth.grants.has(key);
+      if (!allowed) throw new VaultError(`${GRANT_REQUIRED_PREFIX}${key}`);
     }
     const result = await run(vault, { ...req, params: p }, ctx, auth);
     // 本会话新建/覆盖（已确认）的凭证：秘密刚由用户提供，自动授权
-    if (auth && (req.op === "set" || req.op === "setupProtocol")) {
+    if (auth && auth.mode !== "per_use" && (req.op === "set" || req.op === "setupProtocol")) {
       const r = result as { type: string; name: string };
       auth.grants.add(`${r.type}/${r.name}`);
     }

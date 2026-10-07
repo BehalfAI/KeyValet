@@ -100,6 +100,8 @@ export type Response =
 export interface AuthMessage {
   op: "auth";
   purpose: string;
+  /** 客户端请求的授权模式（来自 KEYVALET_GRANT_MODE）：只能比全局设置更严 */
+  requested_mode?: string;
   /** 界面语言（helper 的提示、弹窗、错误信息与 MCP server 保持一致） */
   lang?: "en" | "zh";
   /** 触发解锁的工具要使用的凭证（per_credential 模式下，本次 Touch ID 即授权该凭证） */

@@ -33,7 +33,7 @@ OAuth, refresh tokens and private keys stay in KeyValet; the agent only ever get
 ## Why
 
 - **Use, don't see** — keys are injected inside a root-owned helper; the agent gets responses, not secrets.
-- **Touch ID per credential** — each grant shows the credential and the agent's stated purpose.
+- **You choose how often to touch** — per use, per credential (default), per session, or once and remembered for hours. Switch with `/keyvalet:mode` in Claude Code; loosening always needs your fingerprint.
 - **SDKs and streaming** — a local gateway lets scripts and SDKs (`OPENAI_BASE_URL=…`) stream without holding the real key.
 - **Every auth flow** — API keys (~50 templates), OAuth 2.0, Google service accounts, GitHub Apps, JWT, TOTP, AWS STS.
 - **Audit log** — every unlock, read and call, with its purpose. Local only, nothing in the cloud.

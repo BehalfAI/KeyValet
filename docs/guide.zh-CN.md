@@ -210,20 +210,33 @@ OPENAI_BASE_URL=http://127.0.0.1:52011/<令牌>/api.openai.com/v1 OPENAI_API_KEY
 
 两者都用不了的场景，比如数据库、SSH，或者一定要读取 key 的工具，仍然用 `credential_get` 读原值。
 
-## 授权范围：每次一个，还是一次全部
+## 授权模式：多久按一次 Touch ID
 
-| 模式 | 行为 |
+| 模式 | 什么时候按 Touch ID |
 |---|---|
-| `per_credential`（**默认**） | 每个凭证单独授权。Touch ID 弹窗写明「授权本次 AI 会话使用凭证：oauth2/outlook-graph」，本会话只能使用已授权的凭证，用到其他凭证时会再弹一次 |
-| `all` | 每个会话按一次 Touch ID，即可使用全部凭证 |
+| `per_use` | 每次使用凭证都按 |
+| `per_credential`（**默认**） | 每个会话中，每个凭证按一次；本会话新建的凭证自动获得授权 |
+| `per_session` | 每个会话按一次，之后可用全部凭证 |
+| `remember` | 按一次，之后 `remember_hours` 小时内**所有会话**都不用再按（默认 8 小时；`0` 表示永久） |
 
-- 查看凭证列表、搜索模板、查看审计日志、查看凭证配置这类**不涉及凭证本身**的操作，不需要单独授权。
-- 本会话新建，或经你确认覆盖的凭证，自动获得授权，因为秘密刚由你本人提供。
-- 设置保存在 root 专属的 `/var/db/keyvalet/settings.json`：
-  - agent 可以用 `credential_settings` 申请切换；改为 `all` 时会由 root helper 弹窗请你确认，改回 `per_credential` 不用确认；
-  - 你本人可以在终端执行 `keyvalet grant-mode [per-credential|all]`；
-  - 修改对新的会话生效。
-- `credential_status` 会显示当前模式，以及本会话已授权了哪些凭证。
+查看凭证列表、搜索模板、查看审计日志这类操作，任何模式下都不需要按 Touch ID。
+
+**在 Claude Code 里用 `/` 命令修改**（一行安装会自动装好插件）：
+
+```text
+/keyvalet:mode remember 8      # 按一次，记住 8 小时
+/keyvalet:mode per-use         # 最严格：每次都按
+/keyvalet:status               # 当前模式、记住到何时、本会话已授权的凭证
+/keyvalet:lock                 # 立即锁定，并清除“记住”状态
+/keyvalet:audit 20             # 最近的使用记录
+```
+
+保证安全的规则：
+
+- 模式保存在 root 专属的 `/var/db/keyvalet/settings.json`。**放宽**（更宽松的模式，或更长的记住时长）必须按 **Touch ID** 确认，而不是一个能被脚本点击的确认框，所以 agent 无法自己放宽。收紧立即生效。修改对当前会话也立即生效。
+- 客户端只能**收严**：比如给 Codex 注册时加上 `KEYVALET_GRANT_MODE=per_use`，最终生效的是全局设置和客户端设置中更严格的那个。
+- `remember` 模式下，有效期内本机任何进程都能直接使用你的凭证，不会弹出提示。不过秘密依然看不到，每次使用照常记录。想提前结束，用 `/keyvalet:lock`。
+- 在终端里：`keyvalet grant-mode remember 8`、`keyvalet grant-mode forget`。
 
 ## 目的（purpose）与审计
 

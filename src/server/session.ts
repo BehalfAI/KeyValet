@@ -181,6 +181,8 @@ export class HelperSession {
       session: this.sessionId,
       client: "keyvalet",
       lang: lang(),
+      // 客户端级别的收严（如给 Codex 配置 KEYVALET_GRANT_MODE=per_use）；不能放宽全局设置
+      ...(process.env.KEYVALET_GRANT_MODE ? { requested_mode: process.env.KEYVALET_GRANT_MODE } : {}),
       ...(target?.name ? { credential: { type: target.type, name: target.name } } : {}),
     };
     child.stdin.write(JSON.stringify(auth) + "\n");

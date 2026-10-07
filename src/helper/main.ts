@@ -7,9 +7,9 @@ import { setLang, t } from "../shared/i18n.js";
 import { HELPER_JS, VAULT_DIR } from "../shared/paths.js";
 import { MAX_LINE_BYTES, PROTOCOL_VERSION, cleanPurpose, type AuthMessage, type ReadyMessage, type Request } from "../shared/protocol.js";
 import { touchIdGate } from "./auth-gate.js";
-import { dispatch, resolveHint, type ClientContext, type SessionAuth } from "./dispatch.js";
+import { applyMode, dispatch, resolveHint, type ClientContext, type SessionAuth } from "./dispatch.js";
 import { Gateway } from "./gateway.js";
-import { readSettings } from "./settings.js";
+import { parseMode, readSettings, rememberActive, rememberUntil, stricter, writeSettings } from "./settings.js";
 import { fatal as fatalWith, verifyRootEnvironment } from "./trust.js";
 import { Vault } from "./vault.js";
 
@@ -57,25 +57,41 @@ async function authenticate(vault: Vault, line: string, ctx: ClientContext, auth
   if (msg.op !== "auth") fatal(t("协议错误：第一条消息必须是 auth", "Protocol error: the first message must be auth"));
   if (!purpose) reject(t("必须说明解锁目的（purpose）", "A purpose is required to unlock"));
 
-  // 授权范围：all 一次授权全部；per_credential 只授权触发解锁的那个凭证（如有）
-  const mode = readSettings(VAULT_DIR).grant_mode;
-  const hint = mode === "per_credential" ? resolveHint(vault, msg.credential) : null;
-  const scope =
-    mode === "all"
-      ? t("解锁 KeyValet 凭证库（本会话可使用全部凭证）", "Unlock the KeyValet vault (this session can use all credentials)")
-      : hint
-        ? t(`授权本次 AI 会话使用凭证：${hint}`, `Authorize this AI session to use credential: ${hint}`)
-        : t("打开 KeyValet 凭证库会话（仅可查看列表；使用具体凭证时需再次授权）", "Open a KeyValet vault session (list only; using a specific credential requires further authorization)");
-  const reason = t(
-    `${scope}\n目的：${purpose}\n来源目录（agent 提供）：${ctx.cwd || "未知"}`,
-    `${scope}\nPurpose: ${purpose}\nWorking directory (reported by agent): ${ctx.cwd || "unknown"}`,
-  );
-  const gate = await touchIdGate(VAULT_DIR, reason);
-  if (!gate.ok) reject(gate.error);
+  // 授权模式：全局设置与客户端请求（KEYVALET_GRANT_MODE，只能收严）中更严格的那个
+  const settings = readSettings(VAULT_DIR);
+  auth.requested = parseMode(msg.requested_mode);
+  const mode = stricter(settings.grant_mode, auth.requested);
+  const remembered = mode === "remember" && rememberActive(settings);
 
-  auth.grantAll = mode === "all";
-  if (hint) auth.grants.add(hint);
-  vault.audit({ op: "unlock", ok: true, purpose, grant_mode: mode, granted: hint ?? undefined, session: ctx.session, client: ctx });
+  if (!remembered) {
+    const hint = mode === "per_credential" || mode === "per_use" ? resolveHint(vault, msg.credential) : null;
+    const hours = settings.remember_hours === 0 ? t("永久", "forever") : t(`${settings.remember_hours} 小时`, `${settings.remember_hours} hours`);
+    const scope =
+      mode === "remember"
+        ? t(`解锁 KeyValet，并在${hours}内记住（期间所有 AI 会话无需再认证）`, `Unlock KeyValet and remember it for ${hours} (no authentication for any AI session meanwhile)`)
+        : mode === "per_session"
+          ? t("解锁 KeyValet 凭证库（本会话可使用全部凭证）", "Unlock the KeyValet vault (this session can use all credentials)")
+          : hint
+            ? mode === "per_use"
+              ? t(`授权本次使用凭证（仅此一次）：${hint}`, `Authorize a single use of credential: ${hint}`)
+              : t(`授权本次 AI 会话使用凭证：${hint}`, `Authorize this AI session to use credential: ${hint}`)
+            : t("打开 KeyValet 凭证库会话（仅可查看列表；使用具体凭证时需再次授权）", "Open a KeyValet vault session (list only; using a specific credential requires further authorization)");
+    const reason = t(
+      `${scope}\n目的：${purpose}\n来源目录（agent 提供）：${ctx.cwd || "未知"}`,
+      `${scope}\nPurpose: ${purpose}\nWorking directory (reported by agent): ${ctx.cwd || "unknown"}`,
+    );
+    const gate = await touchIdGate(VAULT_DIR, reason);
+    if (!gate.ok) reject(gate.error);
+    if (mode === "remember") writeSettings(VAULT_DIR, { ...settings, remember_until: rememberUntil(settings.remember_hours) });
+    applyMode(auth, settings);
+    if (hint && mode === "per_use") (auth.oneShot ??= new Set()).add(hint);
+    else if (hint) auth.grants.add(hint);
+    vault.audit({ op: "unlock", ok: true, purpose, grant_mode: mode, granted: hint ?? undefined, session: ctx.session, client: ctx });
+  } else {
+    // remember 模式且仍在有效期内：不弹 Touch ID（每次使用照常审计）
+    applyMode(auth, settings);
+    vault.audit({ op: "unlock", ok: true, purpose, grant_mode: mode, remembered: true, session: ctx.session, client: ctx });
+  }
   onReady(); // 先切换状态再通知，保证随后到达的请求一定会被处理
   const ready: ReadyMessage = { ready: true, protocol: PROTOCOL_VERSION };
   send(ready);

@@ -110,12 +110,31 @@ credential_http_request   { name: "work", url: "https://www.googleapis.com/drive
 
 ### Grant modes
 
-| Mode | Behavior |
+| Mode | Touch ID |
 |---|---|
-| `per_credential` (**default**) | Each credential needs its own Touch ID approval per session. Listing, templates and audit queries don't. Credentials you create in the session are granted automatically. |
-| `all` | One Touch ID per session unlocks every credential. |
+| `per_use` | every time a credential is used |
+| `per_credential` (**default**) | once per credential per session; credentials you create in the session are granted automatically |
+| `per_session` | once per session, then every credential |
+| `remember` | once, then no prompts in **any** session for `remember_hours` (default 8; `0` = forever) |
 
-Switch with `credential_settings` (switching to `all` requires your confirmation in a dialog shown by the root helper) or `keyvalet grant-mode all` in your terminal.
+Listing, templates and audit queries never need Touch ID.
+
+**Change it from inside Claude Code** with the plugin's slash commands (installed by the one-line installer):
+
+```text
+/keyvalet:mode remember 8      # Touch ID once, then remembered for 8 hours
+/keyvalet:mode per-use         # strictest
+/keyvalet:status               # current mode, remembered-until, grants of this session
+/keyvalet:lock                 # lock now and forget the remembered authorization
+/keyvalet:audit 20             # recent usage
+```
+
+Rules that keep this safe:
+
+- The mode lives in the root-only `/var/db/keyvalet/settings.json`. **Loosening** (a more permissive mode or a longer remember window) requires your **Touch ID** — not a clickable dialog — so an agent can't loosen it on its own. Tightening applies immediately. Changes take effect in the current session as well.
+- A client can only make it **stricter**: e.g. register Codex with `KEYVALET_GRANT_MODE=per_use`; the stricter of the global and the client setting wins.
+- In `remember` mode any local process can use your credentials without a prompt until the window ends (secrets still stay hidden and every use is audited). `/keyvalet:lock` ends it early.
+- From a terminal: `keyvalet grant-mode remember 8`, `keyvalet grant-mode forget`.
 
 ### Purpose and audit
 

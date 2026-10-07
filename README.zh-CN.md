@@ -33,7 +33,7 @@ OAuth、refresh token、私钥都留在 KeyValet 里，agent 只拿到短期 tok
 ## 为什么用它
 
 - **用而不见**：key 在 root 进程里注入，agent 拿到的是结果，不是秘密；
-- **每个凭证一次 Touch ID**：弹窗写明是哪个凭证，以及 agent 自称的目的；
+- **你决定多久按一次指纹**：每次、每个凭证（默认）、每个会话，或按一次后记住几个小时。在 Claude Code 里用 `/keyvalet:mode` 切换，放宽一定要你的指纹；
 - **SDK 和流式输出**：本地网关让脚本和 SDK（`OPENAI_BASE_URL=…`）边收边输出，却拿不到真实 key；
 - **各种认证都支持**：API key（约 50 个模板）、OAuth 2.0、Google 服务账号、GitHub App、JWT、TOTP、AWS STS；
 - **审计日志**：每次解锁、读取、调用都连同目的一起记录。只在本机，不上云。

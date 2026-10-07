@@ -1,0 +1,10 @@
+{
+  "name": "keyvalet",
+  "version": "0.1.0",
+  "description": "Slash commands and usage guidance for KeyValet: control how often Touch ID is required, check status, lock, and review the audit log.",
+  "author": { "name": "BehalfAI", "url": "https://github.com/BehalfAI" },
+  "homepage": "https://behalfai.github.io/KeyValet/",
+  "repository": "https://github.com/BehalfAI/KeyValet",
+  "license": "Apache-2.0",
+  "keywords": ["credentials", "secrets", "mcp", "touch-id", "security"]
+}
