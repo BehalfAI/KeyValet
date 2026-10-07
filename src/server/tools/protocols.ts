@@ -99,7 +99,7 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
         a.extra_auth_params !== undefined || a.token_auth_method !== undefined;
 
       if (!existing || wantsChange) {
-        // ---- 组装配置：已保存的配置 ← 预设 ← OIDC 发现 ← 显式参数 ----
+        // ---- Assemble the config: saved config <- preset <- OIDC discovery <- explicit params ----
         const providerChanged = a.provider !== undefined && a.provider !== base.provider;
         const provider = a.provider ?? base.provider ?? (a.issuer ? "oidc" : "custom");
         const preset = a.provider || a.tenant ? resolveOAuthProvider(provider, a.tenant) : null;
@@ -137,14 +137,14 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
         if (flow === "authorization_code" && !config.authorization_url) return fail(t("授权码流程缺少 authorization_url。", "The authorization code flow requires authorization_url."));
         if (flow === "device_code" && !config.device_authorization_url) return fail(t("该服务商没有设备码端点，请改用 authorization_code 或指定 device_authorization_url。", "This provider has no device code endpoint; use authorization_code or specify device_authorization_url."));
         if (flow === "client_credentials" && publicClient) return fail(t("client_credentials 流程需要 client secret。", "The client_credentials flow requires a client secret."));
-        // 会显示在弹窗中的值必须先严格校验，防止 agent 写入诱导文字（如“请输入 Mac 密码”）
+        // Values that will appear in a dialog must be strictly validated first, to prevent an agent from injecting misleading text (e.g. “Please enter your Mac password”)
         const clientId = safeDisplay(config.client_id, CLIENT_ID_RE, "client_id");
         const tokenHost = httpsHost(config.token_url, "token_url");
 
-        // 修改已有凭证的配置：一律需要用户确认（即使是公共客户端、即使只改 scope）
+        // Changing an existing credential's config always requires user confirmation (even for a public client, even if only the scope changes)
         if (existing) await guardOverwrite(s, type, a.name, true);
 
-        // ---- client secret：端点和 client 不变时沿用；否则必须由用户重新输入 ----
+        // ---- client secret: reused when the endpoints and client are unchanged; otherwise the user must re-enter it ----
         const sameBinding = !!existing && SECRET_BINDING_KEYS.every((k) => (base as Record<string, unknown>)[k] === (config as Record<string, unknown>)[k]);
         const askSecret = async () => {
           const s = await promptSecret(
@@ -172,7 +172,7 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
         try {
           setup = await doSetup(!publicClient && sameBinding);
         } catch (e) {
-          // helper 的绑定校验更严格（如切换 flow 后端点被规范化），以它为准：请用户重新输入
+          // The helper's binding check is stricter (e.g. endpoints get normalized after switching flow); defer to it and have the user re-enter
           if (!publicClient && sameBinding && (e as Error).message.includes(SECRET_REBIND_MARK)) {
             clientSecret = await askSecret();
             setup = await doSetup(false);
@@ -182,7 +182,7 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
         }
       }
 
-      // ---- 执行授权 ----
+      // ---- Perform the authorization ----
       const info = await s.request<{ type: string; name: string; config: OAuthConfigView }>("info", { type, name: a.name });
       const cfg = info.config;
       let result: Record<string, unknown>;
@@ -206,11 +206,11 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
           interval: number;
           expires_in: number;
         }>("oauthDeviceStart", { type, name: a.name });
-        // 设备码和网址来自服务商，显示前校验格式
+        // The device code and URL come from the provider; validate their format before displaying them
         const userCode = safeDisplay(d.user_code, /^[A-Za-z0-9-]{4,20}$/, t("服务商返回的 user_code", "user_code returned by the provider"));
         const url = d.verification_uri_complete ?? d.verification_uri;
         if (url && (url.length > 300 || /\s/.test(url))) throw new Error(t("服务商返回的验证网址格式异常", "The verification URL returned by the provider is malformed"));
-        // 先让用户看清验证码，点按钮后再打开浏览器（浏览器抢焦点时，弹窗容易被误按回车关掉）
+        // Let the user see the verification code first, and open the browser only after they click the button (if the browser steals focus, the dialog is easily dismissed by an accidental Enter key)
         copyToClipboard(userCode);
         const proceed = await ask(
           t(
@@ -220,9 +220,9 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
           t("打开验证页面", "Open verification page"),
         );
         if (!proceed) return fail(t("用户取消了授权。", "Authorization was cancelled by the user."));
-        copyToClipboard(userCode); // 再复制一次，防止期间剪贴板被覆盖
+        copyToClipboard(userCode); // Copy again, in case the clipboard was overwritten in the meantime
         if (url) await openInBrowser(url).catch(() => {});
-        // 等待期间的提示没有默认按钮：回车不会误关
+        // The waiting notice has no default button, so pressing Enter won't dismiss it accidentally
         const close = showNotice(
           t(`等待浏览器中完成授权…\n\n验证码：${userCode}`, `Waiting for authorization in the browser…\n\nCode: ${userCode}`),
           d.expires_in,
@@ -265,7 +265,7 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
     }),
   );
 
-  // ---------------- 统一取 token ----------------
+  // ---------------- Unified token retrieval ----------------
   server.registerTool(
     "credential_access_token",
     {
@@ -313,7 +313,7 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
     }),
   );
 
-  // ---------------- Google 服务账号 ----------------
+  // ---------------- Google service account ----------------
   server.registerTool(
     "credential_setup_google_service_account",
     {
@@ -408,7 +408,7 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
     }),
   );
 
-  // ---------------- 通用 JWT ----------------
+  // ---------------- Generic JWT ----------------
   server.registerTool(
     "credential_setup_jwt",
     {

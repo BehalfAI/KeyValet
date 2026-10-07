@@ -40,7 +40,7 @@ export function registerMailTools(server: McpServer, session: HelperSession): vo
       const hints: string[] = [];
       const scope = tok.scope ?? "";
       if (/authenticated but not connected/i.test(r.server_error ?? "")) {
-        // token 有效、认证已通过，问题在邮箱侧
+        // The token is valid and authentication succeeded; the problem is on the mailbox side
         hints.push(t("token 有效且认证已通过，但服务器无法连接到该用户名对应的邮箱", "The token is valid and authentication succeeded, but the server could not connect to the mailbox for this username"));
         hints.push(
           t(

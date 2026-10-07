@@ -1,6 +1,6 @@
-// Bilingual UI text (English / 简体中文).
+// Bilingual UI text (English / Simplified Chinese).
 //
-// Usage: t("中文文案", "English text") — both variants live side by side at the call site.
+// Usage: t("Chinese copy", "English text") — both variants live side by side at the call site.
 // Language resolution (first match wins):
 //   1. setLang() — the root helper receives the language from the MCP server in the handshake;
 //      the CLI receives it via --lang from its wrapper script
@@ -24,7 +24,7 @@ function fromString(v: string | undefined): Lang | null {
 }
 
 function macLanguage(): Lang | null {
-  if (process.platform !== "darwin" || process.getuid?.() === 0) return null; // root 读到的是 root 自己的偏好
+  if (process.platform !== "darwin" || process.getuid?.() === 0) return null; // running as root would read root's own preference, not the user's
   try {
     const out = execFileSync("/usr/bin/defaults", ["read", "-g", "AppleLanguages"], { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] });
     const first = /"?([A-Za-z]{2}[-_A-Za-z]*)"?/.exec(out.replace(/[()\s,]/g, " "));

@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/kv-i18n",
+  "crates/kv-ipc",
+  "crates/kv-vault",
+  "crates/kv-platform",
+  "crates/kv-core",
+  "crates/kv-protocols",
+  "crates/kv-proxy",
+  "crates/kv-touchid",
+  "crates/kv-helper",
+  "crates/kv-mcp",
+  "crates/kv-cli",
+]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.80"
+
+[profile.release]
+# Hardening for a setuid-adjacent, root-launched binary: smaller surface, no unwind tables to leak layout info.
+panic = "abort"
+strip = true

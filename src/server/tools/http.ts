@@ -11,7 +11,7 @@ import { t } from "../../shared/i18n.js";
 const PROXY_KINDS = ["static", "oauth2", "google_service_account", "github_app", "jwt"];
 const HOST_RE = /^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$/;
 
-/** 模板 id → 默认凭证类型名：openAiApi → open_ai_api */
+/** Template id -> default credential type name: openAiApi -> open_ai_api */
 export function typeFromTemplate(id: string): string {
   return (
     id
@@ -23,7 +23,7 @@ export function typeFromTemplate(id: string): string {
   );
 }
 
-/** 用非敏感字段值渲染 URL 模板，算出其域名（路径里的秘密占位符不影响域名） */
+/** Render the URL template with non-sensitive field values to compute its host (secret placeholders in the path don't affect the host) */
 export function hostFromUrlTemplate(urlTpl: string, attrs: Record<string, string>): string | null {
   const MARK = "zzsecretzz";
   const rendered = urlTpl.replace(PLACEHOLDER_RE, (_m, n: string) => (Object.hasOwn(attrs, n) ? attrs[n]! : MARK));
@@ -44,7 +44,7 @@ export interface TemplateSetArgs {
   name: string;
   fields?: Record<string, string | number | boolean>;
   secret_fields?: string[];
-  /** 用户已在对话中提供的秘密值（如粘贴的 API key）：模板只有一个需输入的秘密字段时直接使用，不再弹窗 */
+  /** A secret value the user already provided in the chat (e.g. a pasted API key): used directly, without a dialog, when the template has exactly one secret field to enter */
   value?: string;
   allowed_hosts?: string[];
   proxy_only?: boolean;
@@ -53,7 +53,7 @@ export interface TemplateSetArgs {
   verify?: boolean;
 }
 
-/** 按模板保存 static 凭证：非敏感字段来自参数/默认值，秘密字段逐个弹窗输入，同时写入代理配置 */
+/** Save a static credential from a template: non-sensitive fields come from params/defaults, secret fields are entered one by one in dialogs, and the proxy configuration is written at the same time */
 export async function setFromTemplate(s: Requester, a: TemplateSetArgs) {
   const tpl = getTemplate(a.template);
   if (!tpl) throw new Error(t(`找不到模板 "${a.template}"，可用 credential_templates 搜索`, `Template "${a.template}" not found; search with credential_templates`));
@@ -62,7 +62,7 @@ export async function setFromTemplate(s: Requester, a: TemplateSetArgs) {
   const type = a.type ?? typeFromTemplate(tpl.id);
   const label = `${norm(type)}/${norm(a.name)}`;
 
-  // ---- 非敏感字段 ----
+  // ---- Non-sensitive fields ----
   const byName = new Map(tpl.fields.map((f) => [f.name, f]));
   const attrs: Record<string, string> = {};
   for (const f of tpl.fields) if (!f.secret && f.default !== undefined) attrs[f.name] = String(f.default);
@@ -87,7 +87,7 @@ export async function setFromTemplate(s: Requester, a: TemplateSetArgs) {
       ),
     );
 
-  // ---- 要输入的秘密字段：指定的 / 必填的 / 注入规则引用的 ----
+  // ---- Secret fields to prompt for: explicitly specified / required / referenced by the injection rule ----
   const secretFields = tpl.fields.filter((f) => f.secret);
   const referenced = new Set(placeholders(injectStrings(tpl.inject)));
   let wanted = a.secret_fields?.length
@@ -97,7 +97,7 @@ export async function setFromTemplate(s: Requester, a: TemplateSetArgs) {
   for (const n of [...referenced]) if (byName.get(n)?.secret && !wanted.includes(n)) wanted.push(n);
   for (const n of wanted) if (!byName.get(n)?.secret) throw new Error(t(`${n} 不是模板 ${tpl.id} 的秘密字段`, `${n} is not a secret field of template ${tpl.id}`));
 
-  // ---- 允许的域名 ----
+  // ---- Allowed hosts ----
   let hosts = a.allowed_hosts?.map((h) => h.trim().toLowerCase());
   if (!hosts?.length) {
     const computed = new Set<string>();
@@ -126,12 +126,12 @@ export async function setFromTemplate(s: Requester, a: TemplateSetArgs) {
 
   const exists = await guardOverwrite(s, type, a.name, a.overwrite);
 
-  // ---- 弹窗输入秘密（文案只含模板名、字段名和校验过的域名） ----
+  // ---- Prompt for secrets in dialogs (text includes only the template name, field name and validated hosts) ----
   const secrets: Record<string, string> = {};
   for (const n of wanted) {
     const f = byName.get(n)!;
     if (a.value !== undefined) {
-      secrets[n] = a.value; // 用户已在对话中给出
+      secrets[n] = a.value; // The user already gave this in the chat
       continue;
     }
     const where = tpl.inject ? t(`\n该凭证只会被代理发送到：${hosts.join("、")}`, `\nThis credential will only be sent by the proxy to: ${hosts.join(", ")}`) : "";
@@ -148,7 +148,7 @@ export async function setFromTemplate(s: Requester, a: TemplateSetArgs) {
     secrets[n] = v;
   }
 
-  // 验证请求只在其引用的字段都有值时保留
+  // Keep the verification request only if all the fields it references have values
   const have = new Set([...Object.keys(attrs), ...Object.keys(secrets)]);
   const test =
     tpl.test && placeholders([tpl.test.url, ...Object.values(tpl.test.headers ?? {}), ...Object.values(tpl.test.query ?? {})]).every((n) => have.has(n))
@@ -383,7 +383,7 @@ export function registerHttpTools(server: McpServer, session: HelperSession): vo
   );
 }
 
-/** 常见 SDK 的环境变量（API key 填占位值即可，网关会替换为真实凭证） */
+/** Environment variables for common SDKs (the API key can be a placeholder; the gateway swaps in the real credential) */
 function sdkEnv(template: string | undefined, urls: Record<string, string>, token: string): Record<string, string> | undefined {
   const u = (host: string, suffix = "") => (urls[host] ? `${urls[host]}${suffix}` : undefined);
   const env = (pairs: Array<[string, string | undefined]>) =>

@@ -1,5 +1,5 @@
-// AWS：用长期 access key 通过 STS 换取临时凭证（GetSessionToken 或 AssumeRole）。
-// 长期 secret key 永不离开 root helper；agent 只拿到最长数小时有效的临时凭证。
+// AWS: exchange a long-term access key for temporary credentials via STS (GetSessionToken or AssumeRole).
+// The long-term secret key never leaves the root helper; the agent only ever gets temporary credentials valid for at most a few hours.
 
 import crypto from "node:crypto";
 import { t } from "../../shared/i18n.js";
@@ -15,7 +15,7 @@ interface AwsConfig {
   external_id?: string;
   role_session_name: string;
   duration_seconds: number;
-  /** MFA 设备 ARN；配合 mfa_totp 引用的 TOTP 凭证自动生成验证码 */
+  /** MFA device ARN; paired with the TOTP credential referenced by mfa_totp to auto-generate the verification code */
   mfa_serial?: string;
   mfa_totp?: { type: string; name: string };
 }
@@ -28,7 +28,7 @@ interface SessionCreds {
 }
 
 let stsEndpointOverride: string | null = null;
-/** 仅供测试：把 STS 请求发到本地模拟服务 */
+/** Test-only: send STS requests to a local mock service */
 export function setStsEndpointForTests(url: string | null): void {
   stsEndpointOverride = url;
 }
@@ -36,7 +36,7 @@ export function setStsEndpointForTests(url: string | null): void {
 const sha256 = (s: string | Buffer) => crypto.createHash("sha256").update(s).digest("hex");
 const hmac = (k: Buffer | string, s: string) => crypto.createHmac("sha256", k).update(s).digest();
 
-/** AWS Signature Version 4，返回 Authorization 头 */
+/** AWS Signature Version 4; returns the Authorization header */
 export function sigv4(p: {
   method: string;
   path: string;
@@ -120,7 +120,7 @@ export async function awsCredentials(vault: Vault, p: { type: unknown; name: unk
     if (!cfg.mfa_totp) throw new VaultError(t("配置了 mfa_serial 但没有关联 TOTP 凭证（mfa_totp）", "mfa_serial is configured but no TOTP credential is linked (mfa_totp)"));
     form.SerialNumber = cfg.mfa_serial;
     let mfa = totpCode(vault, cfg.mfa_totp);
-    // AWS 拒绝重复使用同一个验证码：与上次相同则等到下一个周期
+    // AWS rejects reusing the same verification code: if it matches the previous one, wait for the next cycle
     if (mfa.code === (record.state ?? {}).last_mfa_code) {
       await new Promise((r) => setTimeout(r, (mfa.remaining_seconds + 1) * 1000));
       mfa = totpCode(vault, cfg.mfa_totp);
@@ -148,7 +148,7 @@ export async function awsCredentials(vault: Vault, p: { type: unknown; name: unk
     secretAccessKey: record.secrets!.secret_access_key!,
     amzDate,
   });
-  const { host: _h, ...sendHeaders } = headers; // host 头由 fetch 自动设置
+  const { host: _h, ...sendHeaders } = headers; // the host header is set automatically by fetch
   const r = await httpRequest(stsEndpointOverride ?? `https://${host}/`, {
     method: "POST",
     headers: { ...sendHeaders, Authorization: authorization, Accept: "application/xml" },

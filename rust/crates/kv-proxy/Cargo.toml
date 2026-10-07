@@ -1,0 +1,30 @@
+[package]
+name = "kv-proxy"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kv-i18n = { path = "../kv-i18n" }
+kv-platform = { path = "../kv-platform" }
+kv-protocols = { path = "../kv-protocols" }
+kv-vault = { path = "../kv-vault" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+futures-util = "0.3"
+url = "2"
+base64 = "0.22"
+regex = "1"
+tokio = { version = "1", features = ["net", "rt", "sync", "time", "process"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "server-auto", "tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+getrandom = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+wiremock = "0.6"

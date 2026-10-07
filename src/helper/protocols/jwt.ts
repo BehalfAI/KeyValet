@@ -7,7 +7,7 @@ export type JwtAlgorithm = (typeof JWT_ALGORITHMS)[number];
 
 const b64url = (b: Buffer | string) => Buffer.from(b).toString("base64url");
 
-/** 校验密钥能否用于该算法，返回规范化后的密钥（PEM 或 HMAC 秘密） */
+/** Verify that the key can be used with this algorithm, and return the normalized key (PEM or HMAC secret) */
 export function checkJwtKey(alg: JwtAlgorithm, key: string): string {
   if (alg.startsWith("HS")) {
     if (key.length < 16) throw new VaultError(t("HMAC 密钥太短（至少 16 字符）", "HMAC key is too short (at least 16 characters)"));
@@ -39,7 +39,7 @@ export function signJwt(alg: JwtAlgorithm, key: string, claims: Record<string, u
   } else if (alg === "EdDSA") {
     sig = crypto.sign(null, Buffer.from(input), key);
   } else if (alg.startsWith("ES")) {
-    // JWS 要求 ECDSA 签名为 r||s 定长格式，而不是 DER
+    // JWS requires the ECDSA signature to be in fixed-length r||s format, not DER
     sig = crypto.sign(`sha${bits}`, Buffer.from(input), { key, dsaEncoding: "ieee-p1363" });
   } else if (alg.startsWith("PS")) {
     sig = crypto.sign(`sha${bits}`, Buffer.from(input), {
@@ -53,7 +53,7 @@ export function signJwt(alg: JwtAlgorithm, key: string, claims: Record<string, u
   return `${input}.${b64url(sig)}`;
 }
 
-/** 解出 JWT payload（不验签，只用于展示 token 端点直接返回的 id_token 里的账号信息） */
+/** Decode the JWT payload (signature not verified; used only to display account info from an id_token returned directly by the token endpoint) */
 export function decodeJwtPayload(jwt: string): Record<string, unknown> | null {
   try {
     const part = jwt.split(".")[1];

@@ -1,5 +1,6 @@
-// 模板库：内置通用模板 + 自带模板库（templates/catalog.json）+ 可选的本地 n8n 模板库（templates/n8n-catalog.json）。
-// 安装时随代码复制到 root 所有的目录。
+// Template catalog: built-in generic templates + the bundled catalog (templates/catalog.json)
+// + an optional local n8n catalog (templates/n8n-catalog.json).
+// Copied alongside the code into the root-owned directory at install time.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -16,13 +17,13 @@ function load(file: string): CredentialTemplate[] {
   try {
     return (JSON.parse(fs.readFileSync(path.join(DIR, file), "utf8")) as { templates: CredentialTemplate[] }).templates;
   } catch {
-    return []; // 文件不存在（如没有生成 n8n 模板库）
+    return []; // File doesn't exist (e.g., the n8n catalog wasn't generated)
   }
 }
 
 export function allTemplates(): CredentialTemplate[] {
   if (cache) return cache;
-  // 按优先级合并，id 相同（不区分大小写）时保留优先级高的
+  // Merge by priority; when ids match (case-insensitive), keep the higher-priority one
   const seen = new Set<string>();
   cache = [];
   for (const t of [...BUILTIN_TEMPLATES, ...load("catalog.json"), ...load("n8n-catalog.json")]) {
@@ -39,7 +40,7 @@ export function getTemplate(id: string): CredentialTemplate | undefined {
   return allTemplates().find((t) => t.id.toLowerCase() === lower);
 }
 
-/** 按 id / 名称模糊搜索：完全匹配 > 前缀 > 包含 */
+/** Fuzzy search by id / name: exact match > prefix > contains */
 export function searchTemplates(query: string | undefined, kind: string | undefined, limit: number): CredentialTemplate[] {
   const q = (query ?? "").trim().toLowerCase();
   const scored: Array<[number, CredentialTemplate]> = [];
@@ -74,7 +75,7 @@ export function summarize(tpl: CredentialTemplate) {
   };
 }
 
-/** OAuth 服务商：内置预设优先，其次 n8n 的 OAuth2 模板（按模板 id） */
+/** OAuth providers: built-in presets take priority, then n8n's OAuth2 templates (by template id) */
 export function resolveOAuthProvider(provider: string, tenant?: string): (OAuthPreset & { token_auth_method?: string }) | null {
   const builtin = resolvePreset(provider, tenant);
   if (builtin) return builtin;

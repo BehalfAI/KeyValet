@@ -24,11 +24,7 @@ fail() { printf '\033[31mError:\033[0m %s\n' "$1" >&2; exit 1; }
 [ "$(id -u)" != 0 ] || fail "Run as your normal user (not root); you'll be asked for your password when needed."
 
 if [ "$ACTION" = install ]; then
-  command -v node >/dev/null 2>&1 || fail "Node.js 20+ is required. Install it from https://nodejs.org or with nvm (Homebrew's node is not supported)."
-  NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]')
-  [ "$NODE_MAJOR" -ge 20 ] || fail "Node.js 20+ is required (found $(node -v))."
-  command -v npm >/dev/null 2>&1 || fail "npm is required (it ships with Node.js)."
-  command -v swiftc >/dev/null 2>&1 || fail "Xcode Command Line Tools are required. Run: xcode-select --install"
+  command -v cargo >/dev/null 2>&1 || fail "The Rust toolchain (cargo) is required. Install it from https://rustup.rs"
 fi
 
 # Version: explicit > latest release > main
@@ -53,7 +49,7 @@ curl -fsSL "$URL" | tar -xz -C "$TMP" --strip-components 1 || fail "Download fai
 # Give the installer a real terminal for the sudo password when we have one (curl | sh pipes stdin);
 # without a terminal it falls back to a native macOS password dialog.
 run() {
-  # 不能只看 -r/-w：没有控制终端时（例如由 agent 运行）/dev/tty 存在但打不开
+  # Can't just check -r/-w: without a controlling terminal (e.g. run by an agent), /dev/tty exists but can't be opened
   if (: </dev/tty) 2>/dev/null; then (cd "$TMP" && "$@" </dev/tty); else (cd "$TMP" && "$@"); fi
 }
 
@@ -75,10 +71,10 @@ if [ -z "${KEYVALET_NO_REGISTER:-}" ] && command -v claude >/dev/null 2>&1; then
   if claude mcp get keyvalet >/dev/null 2>&1; then
     say "Claude Code already has the keyvalet MCP server."
   else
-    claude mcp add keyvalet --scope user -- "$INSTALL_DIR/bin/node" "$INSTALL_DIR/app/dist/server/index.js" >/dev/null
+    claude mcp add keyvalet --scope user -- "$INSTALL_DIR/bin/kv-mcp" >/dev/null
     say "Registered KeyValet with Claude Code."
   fi
-  # 插件：/keyvalet:add、/keyvalet:mode、/keyvalet:status、/keyvalet:lock、/keyvalet:audit 以及使用指引
+  # Plugin: /keyvalet:add, /keyvalet:mode, /keyvalet:status, /keyvalet:lock, /keyvalet:audit, plus usage guidance
   if claude plugin marketplace list 2>/dev/null | grep -q keyvalet; then
     claude plugin marketplace update keyvalet >/dev/null 2>&1 || true
   else
@@ -95,8 +91,7 @@ if [ -z "${KEYVALET_NO_REGISTER:-}" ] && command -v claude >/dev/null 2>&1; then
   say "Restart open Claude Code sessions to load KeyValet."
 else
   say "Add KeyValet to your MCP client as a stdio server:"
-  echo "    command: $INSTALL_DIR/bin/node"
-  echo "    args:    $INSTALL_DIR/app/dist/server/index.js"
+  echo "    command: $INSTALL_DIR/bin/kv-mcp"
 fi
 
 echo

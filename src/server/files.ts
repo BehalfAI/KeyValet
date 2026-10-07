@@ -1,4 +1,4 @@
-// 从文件导入秘密（私钥、服务账号 JSON 等），内容直接交给 root helper，不进入 AI 上下文。
+// Import secrets from a file (private keys, service account JSON, etc.); the content goes straight to the root helper and never enters the AI's context.
 
 import fs from "node:fs";
 import os from "node:os";
@@ -8,7 +8,7 @@ import { t } from "../shared/i18n.js";
 
 const MAX_FILE_BYTES = 64 * 1024;
 
-/** 解析路径并检查（不读取内容）：必须是不超过 64KB 的普通文件 */
+/** Resolve the path and check it (without reading the content): must be a regular file no larger than 64KB */
 export function resolveSecretFile(p: string): string {
   const abs = path.resolve(p.startsWith("~/") ? path.join(os.homedir(), p.slice(2)) : p);
   let st: fs.Stats;

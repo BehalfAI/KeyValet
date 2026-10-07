@@ -1,14 +1,17 @@
-// 会话私有文件：写到仅用户可读的位置（~/.keyvalet/run，目录 0700、文件 0600），会话结束（MCP server 退出）时删除。
-// - 网关环境变量文件：令牌写入文件，agent 用 `set -a; . <文件>; set +a; <命令>` 加载——
-//   令牌不出现在命令行参数里（ps 对所有用户可见），也不出现在 agent 的上下文里。
-// - 秘密文件（writeSecretFile）：某些程序必须从本地文件读取秘密本身（如 ssh -i 私钥），
-//   没有网关那样“只转发、真值永不离开 root”的代理方式——写文件这一步就是秘密离开 root helper 的地方；
-//   这里能做到的是不让内容经过 agent 的上下文，只把路径还给 agent。
-// - 已返回值的记录（recordSecrets）：credential_get / credential_totp_code / credential_access_token /
-//   credential_aws_credentials 这类工具，设计上就是把原始秘密交给 agent（没有代理通道可用时别无选择）。
-//   把交出去的值记一笔到 <session>.redact，供 Claude Code 的 PreToolUse hook 在 agent 真的把它
-//   拼进 shell 命令或写进文件之前拦下来——不管这个值长得像不像“API key”，只要是 KeyValet 亲手交出来的，
-//   出现在命令行/文件里就值得警惕。
+// Session-private files: written to a location only the user can read (~/.keyvalet/run, directory 0700, files 0600), deleted when the session (MCP server) exits.
+// - Gateway environment variable file: the token is written to a file, and the agent loads it with
+//   `set -a; . <file>; set +a; <command>` — the token never appears in command-line arguments (ps is visible to all users),
+//   nor does it appear in the agent's context.
+// - Secret file (writeSecretFile): some programs must read the secret itself from a local file (e.g. an ssh -i private key).
+//   There's no proxy-style approach here like the gateway's "only forward, the real value never leaves root" —
+//   writing the file is the point where the secret leaves the root helper; the best we can do here is keep the
+//   content out of the agent's context and hand back only the path.
+// - Record of returned values (recordSecrets): tools like credential_get / credential_totp_code / credential_access_token /
+//   credential_aws_credentials are, by design, meant to hand the raw secret to the agent (there's no choice when no
+//   proxy channel is available). We log each value handed out to <session>.redact, so Claude Code's PreToolUse hook can
+//   intercept it before the agent actually splices it into a shell command or writes it to a file — regardless of
+//   whether the value looks like an "API key," anything KeyValet itself handed out is worth flagging if it shows up
+//   in a command line or file.
 
 import fs from "node:fs";
 import os from "node:os";
@@ -38,8 +41,9 @@ export function writeGatewayEnv(session: string, type: string, name: string, env
 }
 
 /**
- * 把一个秘密的原始内容写入仅用户可读的文件（同一目录，同样 0600），供需要本地文件的程序使用
- * （如 ssh -i、证书）。内容本身不返回给 agent，只返回路径。会话结束时与网关环境变量文件一起删除。
+ * Write a secret's raw content to a file only the user can read (same directory, also 0600), for programs
+ * that need a local file (e.g. ssh -i, certificates). The content itself is never returned to the agent, only
+ * the path is. Deleted along with the gateway environment variable files when the session ends.
  */
 export function writeSecretFile(session: string, type: string, name: string, field: string | undefined, content: string): string {
   const file = path.join(runDir(), `${session}-${type}-${name}${field ? `-${field}` : ""}.key`.replace(/[^A-Za-z0-9_.@:-]/g, "_"));
@@ -49,12 +53,13 @@ export function writeSecretFile(session: string, type: string, name: string, fie
   return file;
 }
 
-const MIN_REDACT_LENGTH = 12; // 太短的值（如 6 位 TOTP 验证码）误伤面大，又本来就该被随手使用，不值得记录
+const MIN_REDACT_LENGTH = 12; // Values this short (e.g. a 6-digit TOTP code) cause too many false positives and are meant to be used freely anyway, so they're not worth recording
 
 /**
- * 记录一次返回给 agent 的秘密值，供 PreToolUse hook 做精确匹配（见上）。
- * 追加写入同一会话专属的文件（而不是像 writeSecretFile 那样整体覆盖），因为一个会话里
- * 可能多次调用 credential_get / credential_access_token 等。会话结束时随其他会话文件一起删除。
+ * Record one secret value returned to the agent, for the PreToolUse hook to match exactly (see above).
+ * Appends to a file dedicated to this session (rather than overwriting it wholesale like writeSecretFile),
+ * since a single session may call credential_get / credential_access_token etc. multiple times. Deleted
+ * along with the other session files when the session ends.
  */
 export function recordSecrets(session: string, values: Iterable<string | undefined>): void {
   const vals = [...new Set([...values].filter((v): v is string => typeof v === "string" && v.trim().length >= MIN_REDACT_LENGTH))];
@@ -65,7 +70,7 @@ export function recordSecrets(session: string, values: Iterable<string | undefin
   fs.chmodSync(file, 0o600);
 }
 
-/** 会话结束时删除本会话写过的环境变量文件 */
+/** Delete the environment variable files this session wrote, when the session ends */
 export function cleanupGatewayEnv(): void {
   for (const f of created) {
     try {

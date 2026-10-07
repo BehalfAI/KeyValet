@@ -1,8 +1,9 @@
-// MCP server（普通用户）与 root helper 之间的 JSON-lines 协议。
-// 通道是 sudo 子进程的 stdin/stdout 管道，其他进程无法接入。
+// JSON-lines protocol between the MCP server (runs as a regular user) and the root helper.
+// The channel is the stdin/stdout pipe of the sudo child process; no other process can connect to it.
 //
-// 握手：server 先发一行 AuthMessage（目的、来源、会话 ID）→ helper 弹 Touch ID →
-// 通过则回 { ready: true }，否则回 { ready: false, error } 并退出。之后才是普通请求。
+// Handshake: the server first sends one line, an AuthMessage (purpose, source, session ID) -> the helper
+// shows a Touch ID prompt -> on success it replies { ready: true }, otherwise { ready: false, error } and exits.
+// Only after that do normal requests begin.
 
 export const PROTOCOL_VERSION = 3;
 
@@ -12,13 +13,13 @@ export const OPS = [
   "deleteType",
   "list",
   "exists",
-  /** 凭证的非敏感信息（含协议凭证的配置和状态），不含值和秘密 */
+  /** Non-sensitive credential info (including protocol-credential config and status); excludes the value and secrets */
   "info",
-  /** static 凭证返回值；协议凭证只返回 info */
+  /** Returns the value for static credentials; protocol credentials only return info */
   "get",
   "set",
   "delete",
-  /** 创建/替换协议凭证（oauth2、google_service_account、github_app、jwt、totp、aws） */
+  /** Create/replace a protocol credential (oauth2, google_service_account, github_app, jwt, totp, aws) */
   "setupProtocol",
   "oauthExchange",
   "oauthDeviceStart",
@@ -26,27 +27,27 @@ export const OPS = [
   "accessToken",
   "totp",
   "aws",
-  /** 查询审计日志 */
+  /** Query the audit log */
   "auditQuery",
-  /** 修改代理调用配置（扩大暴露面时 helper 会弹窗请用户确认） */
+  /** Change the proxy-call configuration (the helper prompts for user confirmation when widening exposure) */
   "httpConfigure",
-  /** 代理调用：注入凭证后发出 HTTP 请求，只返回响应 */
+  /** Proxy call: injects the credential, sends the HTTP request, and returns only the response */
   "httpRequest",
-  /** 用验证请求检查凭证是否可用 */
+  /** Checks whether a credential works, using a verification request */
   "httpTest",
-  /** 按凭证授权：弹 Touch ID 授权本会话使用某个凭证 */
+  /** Per-credential authorization: shows a Touch ID prompt to authorize this session to use a given credential */
   "grant",
-  /** 读取/修改凭证库设置（授权范围模式） */
+  /** Read/modify vault settings (grant-scope mode) */
   "settings",
-  /** 本会话的授权状态 */
+  /** This session's authorization status */
   "sessionInfo",
-  /** 开通本地网关入口（给 SDK / CLI 用，支持流式响应） */
+  /** Opens the local gateway endpoint (for the SDK / CLI, supports streaming responses) */
   "gatewayOpen",
 ] as const;
 
 export type Op = (typeof OPS)[number];
 
-/** 必须说明目的的操作：读取凭证/派生 token、修改凭证 */
+/** Operations that require stating a purpose: reading a credential/deriving a token, modifying a credential */
 export const PURPOSE_REQUIRED_OPS: ReadonlySet<Op> = new Set<Op>([
   "createType",
   "deleteType",
@@ -66,7 +67,7 @@ export const PURPOSE_REQUIRED_OPS: ReadonlySet<Op> = new Set<Op>([
   "gatewayOpen",
 ]);
 
-/** 需要该凭证已获授权的操作（per_credential 模式下） */
+/** Operations that require the credential to already be authorized (in per_credential mode) */
 export const GRANT_REQUIRED_OPS: ReadonlySet<Op> = new Set<Op>([
   "get",
   "accessToken",
@@ -81,10 +82,10 @@ export const GRANT_REQUIRED_OPS: ReadonlySet<Op> = new Set<Op>([
   "gatewayOpen",
 ]);
 
-/** helper 返回的“需要授权”错误前缀，后跟 type/name */
+/** Prefix the helper returns for a "needs authorization" error, followed by type/name */
 export const GRANT_REQUIRED_PREFIX = "[GRANT_REQUIRED] ";
 
-/** helper 返回的“端点/client 已变化，不能沿用旧 client secret”错误标记（与界面语言无关） */
+/** Error marker the helper returns for "endpoint/client has changed, can't keep reusing the old client secret" (independent of UI language) */
 export const SECRET_REBIND_MARK = "[SECRET_REBIND]";
 
 export interface Request {
@@ -100,11 +101,11 @@ export type Response =
 export interface AuthMessage {
   op: "auth";
   purpose: string;
-  /** 客户端请求的授权模式（来自 KEYVALET_GRANT_MODE）：只能比全局设置更严 */
+  /** Authorization mode requested by the client (from KEYVALET_GRANT_MODE): can only be stricter than the global setting */
   requested_mode?: string;
-  /** 界面语言（helper 的提示、弹窗、错误信息与 MCP server 保持一致） */
+  /** UI language (keeps the helper's prompts, dialogs, and error messages consistent with the MCP server) */
   lang?: "en" | "zh";
-  /** 触发解锁的工具要使用的凭证（per_credential 模式下，本次 Touch ID 即授权该凭证） */
+  /** Credential the unlocking tool is about to use (in per_credential mode, this Touch ID also authorizes that credential) */
   credential?: { type?: string; name: string };
   cwd: string;
   ppid: number;
@@ -116,7 +117,7 @@ export type ReadyMessage = { ready: true; protocol: number } | { ready: false; p
 
 export const MAX_LINE_BYTES = 1024 * 1024;
 
-/** 目的文字：去掉控制字符，限制长度 */
+/** Purpose text: strip control characters, cap the length */
 export function cleanPurpose(v: unknown): string | null {
   if (typeof v !== "string") return null;
   const s = v.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();

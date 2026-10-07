@@ -1,4 +1,4 @@
-// TOTP（RFC 6238）两步验证码。agent 只能拿到当前验证码，拿不到种子。
+// TOTP (RFC 6238) two-factor codes. The agent can only get the current code, never the seed.
 
 import crypto from "node:crypto";
 import { t } from "../../shared/i18n.js";
@@ -44,7 +44,7 @@ export function totpAt(key: Buffer, unixSeconds: number, digits: number, period:
   return String(bin).padStart(digits, "0");
 }
 
-/** secret 可以是 Base32 种子，也可以是二维码里的 otpauth://totp/... URI */
+/** secret can be either a Base32 seed or an otpauth://totp/... URI from a QR code */
 export function validateTotpSetup(config: Record<string, unknown>, secrets: Record<string, unknown>) {
   const raw = str(secrets.secret, t("TOTP 密钥", "TOTP secret"), 2000).trim();
   let seed = raw;
@@ -88,7 +88,7 @@ export function totpCode(vault: Vault, p: { type: unknown; name: unknown }) {
   return {
     code: totpAt(key, now, cfg.digits, cfg.period, cfg.algorithm),
     remaining_seconds: remaining,
-    // 剩余时间很短时附上下一个码，方便调用方直接使用
+    // Include the next code when very little time remains, so the caller can use it directly
     next_code: remaining <= 5 ? totpAt(key, now + cfg.period, cfg.digits, cfg.period, cfg.algorithm) : undefined,
     issuer: cfg.issuer ?? null,
     account: cfg.account ?? null,

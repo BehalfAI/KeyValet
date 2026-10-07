@@ -1,8 +1,10 @@
-// Touch ID 关卡：helper 以 root 启动（sudoers 只允许免密运行 helper 本身），
-// 在提供任何服务之前必须通过设备所有者认证。
+// Touch ID gate: the helper starts as root (sudoers only allows running the helper itself without a password),
+// and must pass device-owner authentication before providing any service.
 //
-// root 身份下指纹无法送达认证框，所以降权为发起 sudo 的用户（SUDO_UID）运行 touchid 程序；
-// 该程序 root 所有、强化运行时签名（同用户进程无法注入/调试），结果以退出码直接返回给本进程。
+// Fingerprint prompts can't reach the auth UI while running as root, so we drop privileges to the user
+// who invoked sudo (SUDO_UID) to run the touchid program; that program is owned by root with hardened
+// runtime signing (same-user processes can't inject into or debug it), and the result is returned to
+// this process directly via its exit code.
 
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -12,7 +14,7 @@ import { TOUCHID_BIN } from "../shared/paths.js";
 import { untrustedReason } from "./trust.js";
 
 const AUTH_TIMEOUT_MS = 120_000;
-/** 认证失败后的冷却：记在 root-only 的凭证库目录里，绕过 MCP server 直接启动 helper 也无法反复弹窗 */
+/** Cooldown after a failed authentication: recorded in the root-only vault directory, so even launching the helper directly (bypassing the MCP server) can't trigger repeated prompts */
 const FAILURE_COOLDOWN_MS = 30_000;
 
 export type GateResult = { ok: true } | { ok: false; error: string };
@@ -46,7 +48,7 @@ function clearFailure(vaultDir: string): void {
   }
 }
 
-/** 发起 sudo 的用户（由 sudo 设置，调用方无法伪造） */
+/** The user who invoked sudo (set by sudo itself; the caller cannot forge this) */
 function invokingUser(): { uid: number; gid: number } | null {
   const uid = Number(process.env.SUDO_UID);
   const gid = Number(process.env.SUDO_GID);
@@ -54,7 +56,7 @@ function invokingUser(): { uid: number; gid: number } | null {
   return { uid, gid };
 }
 
-/** 同一时间只允许一个认证弹窗（多个 helper 并发启动时，冷却检查之前就可能各弹一个） */
+/** Only one authentication prompt is allowed at a time (when multiple helpers start concurrently, each could otherwise trigger its own prompt before the cooldown check runs) */
 function acquireAuthLock(vaultDir: string): (() => void) | null {
   const lock = path.join(vaultDir, ".auth-lock");
   try {
@@ -62,7 +64,7 @@ function acquireAuthLock(vaultDir: string): (() => void) | null {
   } catch {
     try {
       if (Date.now() - fs.statSync(lock).mtimeMs < AUTH_TIMEOUT_MS + 10_000) return null;
-      fs.rmSync(lock, { recursive: true, force: true }); // 持锁进程已退出
+      fs.rmSync(lock, { recursive: true, force: true }); // the lock-holding process has exited
       fs.mkdirSync(lock, { mode: 0o700 });
     } catch {
       return null;

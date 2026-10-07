@@ -1,5 +1,7 @@
-// root helper 自己弹出的确认框（降权为发起 sudo 的用户运行系统自带的 osascript）。
-// 用于最敏感的改动（如扩大代理可发往的域名）：即使有人绕过 MCP server 直接驱动 helper，也必须经用户确认。
+// A confirmation dialog raised by the root helper itself (dropping privileges to the user who invoked
+// sudo to run the system's own osascript). Used for the most sensitive changes (such as expanding the
+// domains a proxy is allowed to call): even if someone bypasses the MCP server and drives the helper
+// directly, user confirmation is still required.
 
 import { spawn } from "node:child_process";
 import { t } from "../shared/i18n.js";
@@ -7,7 +9,7 @@ import { t } from "../shared/i18n.js";
 type Confirmer = (message: string, okLabel: string) => Promise<boolean>;
 
 let override: Confirmer | null = null;
-/** 仅供测试：替换确认框 */
+/** Test-only: replace the confirmation dialog */
 export function setUserConfirmForTests(fn: Confirmer | null): void {
   override = fn;
 }

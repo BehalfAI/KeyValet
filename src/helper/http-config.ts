@@ -1,5 +1,6 @@
-// 代理调用配置的校验与渲染（root helper 内）。
-// 配置随凭证加密保存；agent 只能通过 helper 修改，且扩大域名等敏感改动需用户确认。
+// Validation and rendering for proxy call configuration (inside the root helper).
+// The configuration is saved encrypted alongside the credential; the agent can only modify it through
+// the helper, and sensitive changes such as expanding the domain list require user confirmation.
 
 import { PLACEHOLDER_RE, injectStrings, placeholders, type InjectRule, type TestRequest } from "../shared/templates.js";
 import { insecureLoopbackAllowed } from "./protocols/http.js";
@@ -11,7 +12,7 @@ const HEADER_NAME_RE = /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,100}$/;
 const QUERY_NAME_RE = /^[A-Za-z0-9_.\-[\]]{1,100}$/;
 const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"] as const;
 
-/** 允许的域名：只接受域名（不接受 IP、localhost），防止代理被用来访问本机/内网服务 */
+/** Allowed hosts: only domain names are accepted (not IPs or localhost), to prevent the proxy from being used to reach local/internal services */
 export function normalizeHosts(v: unknown): string[] {
   if (!Array.isArray(v) || v.length === 0 || v.length > 20) throw new VaultError(t("allowed_hosts 必须是 1~20 个域名", "allowed_hosts must contain 1-20 domain names"));
   const out = new Set<string>();
@@ -42,7 +43,7 @@ function checkStrRecord(v: unknown, what: string, keyRe: RegExp): Record<string,
   return Object.keys(out).length ? out : undefined;
 }
 
-/** 字段来源：秘密字段 + 非敏感属性 + value */
+/** Field sources: secret fields + non-sensitive attributes + value */
 export interface FieldValues {
   secrets: Record<string, string>;
   attributes: Record<string, string>;
@@ -50,7 +51,7 @@ export interface FieldValues {
 }
 
 export function fieldValues(rec: CredentialRecord): FieldValues {
-  // 协议凭证的长期秘密（client secret、refresh token、私钥……）绝不参与占位符渲染
+  // A protocol credential's long-lived secrets (client secret, refresh token, private key, ...) never participate in placeholder rendering
   if ((rec.kind ?? "static") !== "static") return { secrets: {}, attributes: rec.attributes ?? {}, value: "" };
   return { secrets: rec.secrets ?? {}, attributes: rec.attributes ?? {}, value: rec.value ?? "" };
 }
@@ -74,7 +75,7 @@ export function render(tpl: string, f: FieldValues): string {
   });
 }
 
-/** 名称（头名/参数名）里的占位符只能引用非敏感字段，在设置时展开为固定值 */
+/** Placeholders in names (header names/parameter names) may only reference non-sensitive fields, and are expanded to fixed values at configuration time */
 function expandKeys(rec: Record<string, string> | undefined, f: FieldValues, what: string): Record<string, string> | undefined {
   if (!rec) return undefined;
   const out: Record<string, string> = {};
@@ -116,9 +117,11 @@ export function validateInject(raw: unknown, f: FieldValues): InjectRule | undef
 }
 
 /**
- * 验证请求。allowSecrets=false（credential_configure_http 修改时）禁止引用秘密字段：
- * 否则可以把秘密放进 URL，再借错误信息或上游回显把它带出来。
- * 只有随新秘密一起写入的模板验证请求（如 Trello 的 /tokens/{{apiToken}}）允许引用秘密。
+ * Validates the test request. allowSecrets=false (when modifying via credential_configure_http) forbids
+ * referencing secret fields: otherwise a secret could be placed into the URL and then exfiltrated via an
+ * error message or upstream echo.
+ * Only a template test request written alongside a new secret (e.g. Trello's /tokens/{{apiToken}}) is
+ * allowed to reference secrets.
  */
 export function validateTest(raw: unknown, f: FieldValues, allowSecrets: boolean): TestRequest | undefined {
   if (raw === undefined || raw === null) return undefined;
@@ -140,9 +143,10 @@ export function validateTest(raw: unknown, f: FieldValues, allowSecrets: boolean
 }
 
 /**
- * 校验完整的代理配置。token 类凭证（oauth2 等）默认注入 Authorization: Bearer <token>；
- * 也可以自定义注入规则，用 {{access_token}} 引用当次的短期 token（如 GitHub 的 git 推送要求
- * Basic 认证：{"basic": {"username": "x-access-token", "password": "{{access_token}}"}}）。
+ * Validates the full proxy configuration. Token-based credentials (oauth2, etc.) inject
+ * Authorization: Bearer <token> by default; a custom injection rule can also be defined, using
+ * {{access_token}} to reference the current short-lived token (e.g. GitHub's git push requires Basic
+ * auth: {"basic": {"username": "x-access-token", "password": "{{access_token}}"}}).
  */
 export function validateHttpConfig(
   raw: unknown,
@@ -153,7 +157,7 @@ export function validateHttpConfig(
   const r = raw as Record<string, unknown>;
   const kind = rec.kind ?? "static";
   const base = fieldValues(rec as CredentialRecord);
-  // token 类凭证：只能引用当次的短期 token（长期秘密不参与渲染）和非敏感字段
+  // Token-based credentials: may only reference the current short-lived token (long-lived secrets don't participate in rendering) and non-sensitive fields
   const f = kind === "static" ? base : { ...base, secrets: { access_token: "<access_token>" } };
   const inject = validateInject(r.inject, f);
   if (kind === "static" && !inject) throw new VaultError(t("static 凭证的代理调用需要注入规则（inject）", "Proxied calls with a static credential require an injection rule (inject)"));
@@ -164,7 +168,7 @@ export function validateHttpConfig(
     ...(inject ? { inject } : {}),
     allowed_hosts: normalizeHosts(r.allowed_hosts),
     proxy_only: r.proxy_only === true,
-    // 沿用已有的验证请求（写入时已校验）；新传入的按 allowSecretsInTest 校验
+    // Reuse the existing test request (already validated when it was written); a newly supplied one is validated per allowSecretsInTest
     ...(r.test === opts.prevTest && opts.prevTest ? { test: opts.prevTest } : r.test ? { test: validateTest(r.test, f, opts.allowSecretsInTest) } : {}),
   };
 }

@@ -1,5 +1,5 @@
-// 通用 JWT 签发：如 App Store Connect API（ES256）、各类要求自签 JWT 的服务。
-// 所有声明在设置时固定，agent 只能拿到按该模板签出的短期 JWT，拿不到私钥。
+// Generic JWT signing: e.g. the App Store Connect API (ES256), and other services that require self-signed JWTs.
+// All claims are fixed at setup time; the agent can only get short-lived JWTs signed from this template, never the private key.
 
 import { t } from "../../shared/i18n.js";
 import { Vault, VaultError } from "../vault.js";

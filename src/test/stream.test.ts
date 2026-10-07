@@ -82,7 +82,7 @@ async function setCred(vault: Vault) {
         name: "main",
         secrets: { apiKey: SECRET },
         http: { inject: { headers: { Authorization: "Bearer {{apiKey}}" } }, allowed_hosts: ["127.0.0.1"] },
-        purpose: "测试",
+        purpose: "test",
       },
     },
     {},
@@ -90,35 +90,35 @@ async function setCred(vault: Vault) {
   assert.ok(r.ok, JSON.stringify(r));
 }
 
-describe("SSE 流式响应（MCP 代理调用）", () => {
-  it("拼出大模型增量文本，事件流中回显的秘密被抹掉", async () => {
+describe("SSE streaming response (MCP proxied call)", () => {
+  it("assembles the LLM's incremental text; secrets echoed back in the event stream are redacted", async () => {
     const vault = freshVault();
     await setCred(vault);
-    const r = await dispatch(vault, { id: 2, op: "httpRequest", params: { type: "llm", name: "main", method: "POST", url: `http://127.0.0.1:${port}/sse/openai`, body: { stream: true }, purpose: "测试" } }, {});
+    const r = await dispatch(vault, { id: 2, op: "httpRequest", params: { type: "llm", name: "main", method: "POST", url: `http://127.0.0.1:${port}/sse/openai`, body: { stream: true }, purpose: "test" } }, {});
     assert.ok(r.ok, JSON.stringify(r));
     const res = r.result as { stream: { events: number; text: string }; body: string };
     assert.deepEqual(res.stream, { events: 5, text: "Hello world" });
     assert.equal(JSON.stringify(res).includes(SECRET), false);
   });
 
-  it("[审查] 拆在多个增量里的秘密，拼接后的 stream.text 中也被抹掉", async () => {
+  it("[review] a secret split across multiple deltas is also redacted from the assembled stream.text", async () => {
     const vault = freshVault();
     await setCred(vault);
-    const r = await dispatch(vault, { id: 2, op: "httpRequest", params: { type: "llm", name: "main", method: "POST", url: `http://127.0.0.1:${port}/sse/split`, body: {}, purpose: "测试" } }, {});
+    const r = await dispatch(vault, { id: 2, op: "httpRequest", params: { type: "llm", name: "main", method: "POST", url: `http://127.0.0.1:${port}/sse/split`, body: {}, purpose: "test" } }, {});
     assert.ok(r.ok, JSON.stringify(r));
     assert.equal((r.result as { stream: { text: string } }).stream.text, "[REDACTED]");
   });
 
-  it("[审查] 小写化会改变长度的字符（İ）不能让脱敏错位", () => {
+  it("[review] a character whose lowercase form changes length (İ) must not throw off redaction alignment", () => {
     const list = redactionList([SECRET]);
     for (const n of [1, 6, 40]) {
       const out = redact("İ".repeat(n) + SECRET + "zz", list);
       assert.equal(out, "İ".repeat(n) + "[REDACTED]zz");
     }
-    assert.equal(redact("x(a+b)[c]", ["(a+b)[c]"]), "x[REDACTED]", "正则特殊字符被转义");
+    assert.equal(redact("x(a+b)[c]", ["(a+b)[c]"]), "x[REDACTED]", "regex special characters are escaped");
   });
 
-  it("识别 Anthropic、Gemini、OpenAI Responses 格式；无法识别时 text 为 null", () => {
+  it("recognizes Anthropic, Gemini, and OpenAI Responses formats; text is null when unrecognized", () => {
     const sse = (objs: unknown[]) => objs.map((o) => `event: x\ndata: ${JSON.stringify(o)}\n\n`).join("");
     assert.equal(aggregateSse(sse([{ type: "content_block_delta", delta: { type: "text_delta", text: "Hi " } }, { type: "content_block_delta", delta: { text: "there" } }])).text, "Hi there");
     assert.equal(aggregateSse(sse([{ candidates: [{ content: { parts: [{ text: "Gem" }, { text: "ini" }] } }] }])).text, "Gemini");
@@ -127,8 +127,8 @@ describe("SSE 流式响应（MCP 代理调用）", () => {
   });
 });
 
-describe("流式脱敏", () => {
-  it("秘密被拆在任意两个数据块之间也能抹掉", () => {
+describe("streaming redaction", () => {
+  it("a secret is redacted even when split across any two data chunks", () => {
     const secret = "SECRET-abcdef-123";
     const text = `xx ${secret} yy ${secret.toLowerCase()} zz`;
     for (let cut = 0; cut <= text.length; cut++) {
@@ -139,7 +139,7 @@ describe("流式脱敏", () => {
   });
 });
 
-describe("本地网关", () => {
+describe("local gateway", () => {
   let vault: Vault;
   let gw: Gateway;
   let base = "";
@@ -151,16 +151,16 @@ describe("本地网关", () => {
     await setCred(vault);
     gw = new Gateway(vault, (e) => audits.push(e));
     const auth: SessionAuth = { grantAll: false, grants: new Set(["llm/main"]), authorize: async () => ({ ok: true }), gateway: gw };
-    const r = await dispatch(vault, { id: 3, op: "gatewayOpen", params: { type: "llm", name: "main", purpose: "测试" } }, {}, auth);
+    const r = await dispatch(vault, { id: 3, op: "gatewayOpen", params: { type: "llm", name: "main", purpose: "test" } }, {}, auth);
     assert.ok(r.ok, JSON.stringify(r));
     base = (r.result as { base: string }).base;
     token = (r.result as { token: string }).token;
-    assert.match(base, /^http:\/\/127\.0\.0\.1:\d+$/, "URL 中不含令牌");
+    assert.match(base, /^http:\/\/127\.0\.0\.1:\d+$/, "the URL does not contain the token");
     assert.match(token, /^kv_[A-Za-z0-9_-]{43}$/);
   });
   after(() => gw.close());
 
-  it("替换程序发来的假 key、注入真实凭证，转发请求体；响应（含响应头）脱敏", async () => {
+  it("replaces the fake key sent by the program, injects the real credential, forwards the request body; response (including headers) is redacted", async () => {
     const res = await fetch(`${base}/127.0.0.1:${port}/v1/chat?x=1`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "x-api-key": "fake", Referer: `${base}/x`, "Content-Type": "application/json" },
@@ -169,8 +169,8 @@ describe("本地网关", () => {
     const text = await res.text();
     const last = seen.at(-1)!;
     assert.equal(last.headers.authorization, `Bearer ${SECRET}`);
-    assert.equal(last.headers["x-api-key"], undefined, "程序自带的认证头被去掉");
-    assert.equal(last.headers.referer, undefined, "Referer 不转发（可能含令牌）");
+    assert.equal(last.headers["x-api-key"], undefined, "the program's own auth header is stripped");
+    assert.equal(last.headers.referer, undefined, "Referer is not forwarded (may contain the token)");
     assert.equal(last.url, "/v1/chat?x=1");
     assert.equal(last.body, '{"hello":"world"}');
     assert.equal(text.includes(SECRET), false);
@@ -178,7 +178,7 @@ describe("本地网关", () => {
     assert.equal(res.headers.get("x-echo"), "[REDACTED]");
   });
 
-  it("边收边转发：第一块数据在上游结束前就到达", async () => {
+  it("forwards while receiving: the first chunk arrives before upstream finishes", async () => {
     const t0 = Date.now();
     const res = await fetch(`${base}/127.0.0.1:${port}/slow`, { headers: { "x-api-key": token } });
     const reader = res.body!.getReader();
@@ -187,7 +187,7 @@ describe("本地网关", () => {
       const { value } = await reader.read();
       first += Buffer.from(value!).toString();
     }
-    assert.ok(Date.now() - t0 < 350, `首块到达用时 ${Date.now() - t0}ms，应早于上游结束（400ms）`);
+    assert.ok(Date.now() - t0 < 350, `first chunk took ${Date.now() - t0}ms to arrive, should be earlier than upstream finishing (400ms)`);
     let rest = "";
     for (;;) {
       const { done, value } = await reader.read();
@@ -197,12 +197,12 @@ describe("本地网关", () => {
     assert.match(first + rest, /second/);
   });
 
-  it("跨数据块的秘密在网关输出中被抹掉", async () => {
+  it("a secret spanning multiple data chunks is redacted in the gateway output", async () => {
     const text = await (await fetch(`${base}/127.0.0.1:${port}/split`, { headers: { Authorization: `Bearer ${token}` } })).text();
     assert.equal(text, "before [REDACTED] after");
   });
 
-  it("缺少/错误令牌 401；Host 头不对 421；浏览器请求 403；不在白名单的域名 403", async () => {
+  it("missing/wrong token -> 401; wrong Host header -> 421; browser request -> 403; non-whitelisted host -> 403", async () => {
     const u = new URL(base);
     assert.equal((await fetch(`${base}/127.0.0.1:${port}/x`)).status, 401);
     assert.equal((await fetch(`${base}/127.0.0.1:${port}/x`, { headers: { Authorization: "Bearer kv_wrong" } })).status, 401);
@@ -218,24 +218,24 @@ describe("本地网关", () => {
     assert.equal((await fetch(`${base}/evil.example.com/steal`, { headers: { Authorization: `Bearer ${token}` } })).status, 403);
   });
 
-  it("每次请求（含被拒绝的）写入审计，不含查询参数和令牌", () => {
+  it("every request (including rejected ones) is written to the audit log, without query params or the token", () => {
     const g = audits.filter((a) => a.op === "gateway");
     assert.ok(g.some((a) => a.target === `POST 127.0.0.1:${port}/v1/chat` && a.ok === true));
     assert.ok(g.some((a) => a.reason === "token" && a.status === 401));
     assert.ok(g.some((a) => a.reason === "browser"));
-    assert.equal(JSON.stringify(audits).includes(token), false, "审计中不出现令牌");
+    assert.equal(JSON.stringify(audits).includes(token), false, "the token never appears in the audit log");
     assert.equal(JSON.stringify(audits).includes("x=1"), false);
   });
 
-  it("未授权的凭证不能开通网关", async () => {
+  it("an unauthorized credential cannot open a gateway", async () => {
     const auth: SessionAuth = { grantAll: false, grants: new Set(), authorize: async () => ({ ok: true }), gateway: gw };
-    const r = await dispatch(vault, { id: 4, op: "gatewayOpen", params: { type: "llm", name: "main", purpose: "测试" } }, {}, auth);
+    const r = await dispatch(vault, { id: 4, op: "gatewayOpen", params: { type: "llm", name: "main", purpose: "test" } }, {}, auth);
     assert.equal(r.ok, false);
     assert.match(!r.ok ? r.error : "", /GRANT_REQUIRED/);
   });
 });
 
-describe("网关：只接受会话用户的进程（真实 lsof 检查）", () => {
+describe("gateway: only accepts processes belonging to the session user (real lsof check)", () => {
   const curl = (url: string, token: string) =>
     new Promise<{ code: number | null; out: string }>((resolve) => {
       execFile("/usr/bin/curl", ["-s", "-o", "-", "-w", "\n%{http_code}", "-H", `Authorization: Bearer ${token}`, url], (err, stdout) =>
@@ -243,7 +243,7 @@ describe("网关：只接受会话用户的进程（真实 lsof 检查）", () =
       );
     });
 
-  for (const [label, uidOf] of [["本人的进程可以连接", () => process.getuid!()], ["其他用户的进程被断开", () => 4242]] as const) {
+  for (const [label, uidOf] of [["the user's own process can connect", () => process.getuid!()], ["another user's process is disconnected", () => 4242]] as const) {
     it(label, async () => {
       const vault = freshVault();
       await setCred(vault);
@@ -252,7 +252,7 @@ describe("网关：只接受会话用户的进程（真实 lsof 检查）", () =
         const { base, token } = await gw.open("llm", "main");
         const r = await curl(`${base}/127.0.0.1:${port}/echo`, token);
         if (uidOf() === process.getuid!()) assert.match(r.out, /\n200$/);
-        else assert.ok(!/\n200$/.test(r.out), `应被拒绝：${r.out}`);
+        else assert.ok(!/\n200$/.test(r.out), `should have been rejected: ${r.out}`);
       } finally {
         gw.close();
       }
@@ -260,8 +260,8 @@ describe("网关：只接受会话用户的进程（真实 lsof 检查）", () =
   }
 });
 
-describe("网关环境变量文件", () => {
-  it("只有用户可读（0600，目录 0700），会话结束删除", () => {
+describe("gateway environment variable file", () => {
+  it("only readable by the user (0600, directory 0700), deleted when the session ends", () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "kv-home-"));
     const prev = process.env.HOME;
     process.env.HOME = home;
@@ -278,15 +278,15 @@ describe("网关环境变量文件", () => {
   });
 });
 
-describe("秘密文件（credential_export_file 用）", () => {
-  it("只有用户可读（0600），内容原样写入，不做 shell 转义；会话结束删除", () => {
+describe("secret file (for credential_export_file)", () => {
+  it("only readable by the user (0600), content written verbatim without shell escaping; deleted when the session ends", () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "kv-home-"));
     const prev = process.env.HOME;
     process.env.HOME = home;
     try {
       const key = "-----BEGIN OPENSSH PRIVATE KEY-----\nabc'\"$(whoami)\ndef\n-----END OPENSSH PRIVATE KEY-----\n";
-      const f = writeSecretFile("sess1", "ssh_key", "simvito", undefined, key);
-      assert.match(f, /sess1-ssh_key-simvito\.key$/);
+      const f = writeSecretFile("sess1", "ssh_key", "example-host", undefined, key);
+      assert.match(f, /sess1-ssh_key-example-host\.key$/);
       assert.equal(fs.statSync(f).mode & 0o777, 0o600);
       assert.equal(fs.readFileSync(f, "utf8"), key);
       const f2 = writeSecretFile("sess1", "password", "db", "secret_access_key", "s3cr3t");
@@ -300,8 +300,8 @@ describe("秘密文件（credential_export_file 用）", () => {
   });
 });
 
-describe("已返回值记录（recordSecrets，供 PreToolUse hook 精确匹配）", () => {
-  it("只记录达到最短长度的值，去重后逐行追加，会话结束删除", () => {
+describe("record of returned values (recordSecrets, for exact matching by the PreToolUse hook)", () => {
+  it("only records values that reach the minimum length, appended line by line after deduplication, deleted when the session ends", () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "kv-home-"));
     const prev = process.env.HOME;
     process.env.HOME = home;

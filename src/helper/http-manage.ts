@@ -1,5 +1,7 @@
-// 修改已有凭证的代理配置。扩大暴露面的改动（新增域名、修改注入规则、关闭「只能代理调用」、删除配置）
-// 由 helper 自己以用户身份弹窗确认——不依赖 MCP server 的确认，绕过 server 直接驱动 helper 也无效。
+// Modifies the proxy configuration of an existing credential. Changes that expand the exposure surface
+// (adding domains, changing injection rules, turning off "proxy only", deleting the configuration) are
+// confirmed by the helper itself via a dialog as the user — independent of the MCP server's confirmation,
+// so bypassing the server to drive the helper directly has no effect.
 
 import { cleanPurpose } from "../shared/protocol.js";
 import { validateHttpConfig } from "./http-config.js";

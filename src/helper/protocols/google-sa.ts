@@ -1,4 +1,4 @@
-// Google 服务账号：用私钥签 JWT 换 access token（RFC 7523 JWT bearer grant）。
+// Google service account: sign a JWT with the private key and exchange it for an access token (RFC 7523 JWT bearer grant).
 
 import { t } from "../../shared/i18n.js";
 import { Vault, VaultError, type CredentialRecord } from "../vault.js";
@@ -11,7 +11,7 @@ interface SAConfig {
   project_id?: string;
   token_uri: string;
   scopes: string[];
-  /** 域范围授权时模拟的用户；只能在设置时指定，agent 取 token 时不能更改 */
+  /** The user impersonated for domain-wide delegation; can only be set during setup, not changed when the agent fetches a token */
   subject?: string;
 }
 
@@ -23,7 +23,7 @@ interface CachedToken {
 const DEFAULT_SCOPES = ["https://www.googleapis.com/auth/cloud-platform"];
 const MAX_CACHE = 20;
 
-/** 解析并校验服务账号 JSON 密钥文件 */
+/** Parse and validate the service account JSON key file */
 export function validateServiceAccountSetup(config: Record<string, unknown>, secrets: Record<string, unknown>) {
   let key: Record<string, unknown>;
   try {
@@ -52,7 +52,7 @@ export async function serviceAccountToken(vault: Vault, p: { type: unknown; name
   if (record.kind !== "google_service_account") throw new VaultError(t(`"${ty}/${n}" 不是 Google 服务账号凭证`, `"${ty}/${n}" is not a Google service account credential`));
   const cfg = record.config as unknown as SAConfig;
   const requested = strList(p.scopes, "scopes");
-  // 只允许请求设置时配置的 scope 的子集（配合域范围授权时尤其重要）
+  // Only allow requesting a subset of the scopes configured at setup time (especially important with domain-wide delegation)
   const extra = requested.filter((s) => !cfg.scopes.includes(s));
   if (extra.length) throw new VaultError(
       t(

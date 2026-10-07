@@ -275,7 +275,7 @@ export function registerBasicTools(server: McpServer, session: HelperSession): v
       if (!a.type) return fail(t("缺少 type（或改用 template）。", "Missing type (or use template instead)."));
       const type = a.type;
       if (value && value_file) return fail(t("value 和 value_file 只能二选一。", "Pass either value or value_file, not both."));
-      // 先解锁并检查是否已存在：避免用户输完值才发现不能写
+      // Unlock and check existence first, so the user doesn't type the value only to find out it can't be saved
       const exists = await guardOverwrite(s, type, name, overwrite);
       const label = `${norm(type)}/${norm(name)}`;
       let secret = value;
@@ -335,7 +335,7 @@ export function registerBasicTools(server: McpServer, session: HelperSession): v
       const exists = await s.request<boolean>("exists", { type, name });
       const label = `${norm(type)}/${norm(name)}`;
       if (!exists) return fail(t(`凭证 "${label}" 不存在。`, `Credential "${label}" not found.`));
-      await s.request("delete", { type, name }); // 由 root helper 弹窗确认
+      await s.request("delete", { type, name }); // Confirmation dialog is handled by the root helper
       return ok(t(`已删除凭证 "${label}"。`, `Deleted credential "${label}".`));
     }),
   );

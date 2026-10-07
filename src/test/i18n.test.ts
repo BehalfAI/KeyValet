@@ -8,16 +8,16 @@ import { dispatch } from "../helper/dispatch.js";
 import { Vault } from "../helper/vault.js";
 import { setLang, t } from "../shared/i18n.js";
 
-// 每个测试文件在独立进程中运行，这里切到英文不影响其他测试
+// Each test file runs in its own process, so switching to English here doesn't affect other tests
 describe("i18n", () => {
-  it("t() 按当前语言取文案", () => {
+  it("t() picks the text for the current language", () => {
     setLang("zh");
     assert.equal(t("中", "en"), "中");
     setLang("en");
     assert.equal(t("中", "en"), "en");
   });
 
-  it("英文模式下 helper 的错误信息是英文", async () => {
+  it("in English mode, helper error messages are in English", async () => {
     setLang("en");
     const vault = new Vault(path.join(fs.mkdtempSync(path.join(os.tmpdir(), "kv-i18n-")), "vault"));
     vault.init();
@@ -25,10 +25,10 @@ describe("i18n", () => {
     assert.equal(r.ok, false);
     assert.doesNotMatch(!r.ok ? r.error : "", /[一-龥]/);
     const r2 = await dispatch(vault, { id: 2, op: "get", params: { type: "nope", name: "x" } }, {});
-    assert.doesNotMatch(!r2.ok ? r2.error : "", /[一-龥]/, "缺少 purpose 的提示也是英文");
+    assert.doesNotMatch(!r2.ok ? r2.error : "", /[一-龥]/, "the error for a missing purpose is in English too");
   });
 
-  it("英文模式下 MCP 工具说明和服务说明不含中文", () => {
+  it("in English mode, MCP tool descriptions and server instructions contain no Chinese", () => {
     const input = [
       { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } } },
       { jsonrpc: "2.0", method: "notifications/initialized" },

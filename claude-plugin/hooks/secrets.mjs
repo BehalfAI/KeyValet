@@ -48,7 +48,7 @@ export const PATTERNS = [
   { id: "bearer", label: "JWT / bearer token", re: /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g },
 ];
 
-/** "api_key = …", "password: …", "密码是 …" in prose (prompts only — too noisy for code). */
+/** "api_key = …", "password: …" in prose, including their Chinese equivalents (prompts only — too noisy for code). */
 const GENERIC =
   /(?:api[_ -]?key|secret|token|password|passwd|pwd|密钥|密码|口令|令牌)["'\s]*(?:[:=：]|is|是|为)\s*["'`]?([^\s"'`,，;；]{12,})/gi;
 

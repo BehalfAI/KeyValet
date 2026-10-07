@@ -1,5 +1,5 @@
-// root helper 发出的 HTTP 请求：只允许 https、禁止重定向（防止秘密被转发到别处）、
-// 有超时和响应大小上限。
+// HTTP requests made by the root helper: only https is allowed, redirects are forbidden (to prevent secrets
+// from being forwarded elsewhere), and there is a timeout and a response size cap.
 
 import { VaultError } from "../vault.js";
 import { t } from "../../shared/i18n.js";
@@ -9,7 +9,7 @@ const MAX_RESPONSE_BYTES = 1024 * 1024;
 const USER_AGENT = "keyvalet/0.1";
 
 let allowInsecureLoopback = false;
-/** 仅供测试：允许 http://127.0.0.1 端点（生产代码中从不调用） */
+/** Test-only: allow http://127.0.0.1 endpoints (never called from production code) */
 export function allowInsecureLoopbackForTests(v: boolean): void {
   allowInsecureLoopback = v;
 }
@@ -35,11 +35,11 @@ export function assertHttpsUrl(raw: unknown, what: string): string {
 export interface HttpResult {
   status: number;
   text: string;
-  /** 解析后的 JSON（可能是对象或数组）；非 JSON 时为 null */
+  /** Parsed JSON (may be an object or array); null when the response isn't JSON */
   json: unknown;
 }
 
-/** 取 JSON 对象（不是对象时返回空对象），便于读取字段 */
+/** Get the JSON object (returns an empty object when it isn't one), for convenient field access */
 export function obj(r: HttpResult): Record<string, unknown> {
   return r.json && typeof r.json === "object" && !Array.isArray(r.json) ? (r.json as Record<string, unknown>) : {};
 }
@@ -53,7 +53,7 @@ export async function httpRequest(
   try {
     res = await fetch(url, {
       method: init.method,
-      // identity：不接受压缩，避免小响应解压成超大数据
+      // identity: refuse compression so a small response can't decompress into an oversized payload
       headers: { "User-Agent": USER_AGENT, Accept: "application/json", "Accept-Encoding": "identity", ...init.headers },
       body: init.body,
       redirect: "error",
@@ -67,12 +67,12 @@ export async function httpRequest(
   try {
     json = JSON.parse(text);
   } catch {
-    /* 非 JSON 响应 */
+    /* not a JSON response */
   }
   return { status: res.status, text, json };
 }
 
-/** 边读边计数，超过上限立即中止（而不是先整个读进内存） */
+/** Count bytes while reading and abort as soon as the limit is exceeded (instead of reading everything into memory first) */
 export async function readLimited(res: Response, limit: number, host: string): Promise<Buffer> {
   if (!res.body) return Buffer.alloc(0);
   const reader = res.body.getReader();
@@ -99,7 +99,7 @@ export function postForm(url: string, form: Record<string, string>, headers: Rec
   });
 }
 
-/** 远端错误信息里可能回显部分请求内容，截断后再返回给 agent */
+/** The remote error message may echo back part of the request content, so truncate it before returning it to the agent */
 export function remoteError(host: string, r: HttpResult): VaultError {
   const o = obj(r);
   const err = o.error;

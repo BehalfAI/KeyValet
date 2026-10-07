@@ -1,11 +1,11 @@
-// Touch ID / 设备所有者认证（LocalAuthentication）。
-// 由 root helper 降权为当前用户后调用（root 身份下指纹无法送达认证框）。
-// 用法：touchid <原因文字> [取消按钮文字]；退出码：0 通过，1 未通过/取消，2 本机不支持。
-// 没有指纹时系统认证框会改为要求输入登录密码——密码由系统校验，本程序拿不到。
+// Touch ID / device owner authentication (LocalAuthentication).
+// Invoked by the root helper after dropping privileges to the current user (fingerprints can't reach the auth sheet as root).
+// Usage: touchid <reason text> [cancel button text]; exit codes: 0 approved, 1 not approved/cancelled, 2 unsupported on this machine.
+// Without a fingerprint enrolled, the system auth sheet falls back to the login password — the system verifies it, this program never sees it.
 import Foundation
 import LocalAuthentication
 
-let reason = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "解锁凭证库"
+let reason = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "Unlock the vault"
 let ctx = LAContext()
 ctx.localizedCancelTitle = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "Cancel"
 var err: NSError?

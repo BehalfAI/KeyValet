@@ -17,13 +17,13 @@ beforeEach(() => {
 });
 
 describe("Vault", () => {
-  it("创建目录和主密钥，权限为仅属主可访问", () => {
+  it("creates the directory and master key, permissions restricted to the owner only", () => {
     assert.equal(fs.statSync(dir).mode & 0o777, 0o700);
     assert.equal(fs.statSync(vault.keyPath).mode & 0o777, 0o600);
     assert.equal(fs.readFileSync(vault.keyPath).length, 32);
   });
 
-  it("写入时类型不存在则先创建类型，再写值", () => {
+  it("creates the type first when writing if it doesn't exist yet, then writes the value", () => {
     assert.equal(vault.typeExists("api_key"), false);
     const r1 = vault.set({ type: "api_key", name: "openai", value: "sk-1", typeDescription: "API Key" });
     assert.deepEqual(r1, { type: "api_key", name: "openai", typeCreated: true, replaced: false });
@@ -35,7 +35,7 @@ describe("Vault", () => {
     assert.equal(vault.listTypes()[0]!.count, 2);
   });
 
-  it("已存在的凭证必须显式 overwrite 才能覆盖", () => {
+  it("an existing credential can only be overwritten with explicit overwrite", () => {
     vault.set({ type: "password", name: "db", value: "a" });
     assert.throws(() => vault.set({ type: "password", name: "db", value: "b" }), VaultError);
     assert.equal(vault.get("password", "db").value, "a");
@@ -44,13 +44,13 @@ describe("Vault", () => {
     assert.equal(vault.get("password", "db").value, "b");
   });
 
-  it("类型和名称不区分大小写", () => {
+  it("type and name are case-insensitive", () => {
     vault.set({ type: "API_Key", name: "OpenAI", value: "sk" });
     assert.equal(vault.get("api_key", "openai").value, "sk");
     assert.equal(vault.listTypes().length, 1);
   });
 
-  it("list 不返回凭证值，attributes 保留", () => {
+  it("list does not return credential values, attributes are preserved", () => {
     vault.set({ type: "password", name: "github", value: "secret!", attributes: { username: "me" } });
     const items = vault.list();
     assert.equal(items.length, 1);
@@ -58,14 +58,14 @@ describe("Vault", () => {
     assert.deepEqual(items[0]!.attributes, { username: "me" });
   });
 
-  it("磁盘上是密文", () => {
+  it("stored on disk as ciphertext", () => {
     vault.set({ type: "api_key", name: "x", value: "PLAINTEXT-MARKER-12345" });
     const raw = fs.readFileSync(vault.dataPath, "utf8");
     assert.equal(raw.includes("PLAINTEXT-MARKER"), false);
     assert.equal(raw.includes("api_key"), false);
   });
 
-  it("密文被篡改时拒绝读取", () => {
+  it("refuses to read when the ciphertext has been tampered with", () => {
     vault.set({ type: "api_key", name: "x", value: "v" });
     const file = JSON.parse(fs.readFileSync(vault.dataPath, "utf8"));
     const ct = Buffer.from(file.ct, "base64");
@@ -75,7 +75,7 @@ describe("Vault", () => {
     assert.throws(() => vault.get("api_key", "x"), /解密失败/);
   });
 
-  it("权限过宽时拒绝工作", () => {
+  it("refuses to operate when permissions are too broad", () => {
     fs.chmodSync(vault.keyPath, 0o644);
     assert.throws(() => new Vault(dir).init(), /权限过宽/);
     fs.chmodSync(vault.keyPath, 0o600);
@@ -83,7 +83,7 @@ describe("Vault", () => {
     assert.throws(() => new Vault(dir).init(), /权限过宽/);
   });
 
-  it("符号链接的密钥文件被拒绝", () => {
+  it("a symlinked key file is rejected", () => {
     const real = path.join(path.dirname(dir), "evil.key");
     fs.writeFileSync(real, Buffer.alloc(32), { mode: 0o600 });
     fs.rmSync(vault.keyPath);
@@ -91,21 +91,21 @@ describe("Vault", () => {
     assert.throws(() => new Vault(dir).init(), /符号链接/);
   });
 
-  it("原型链上的名字不会被当成已存在", () => {
+  it("names on the prototype chain are not treated as already existing", () => {
     assert.equal(vault.typeExists("constructor"), false);
     vault.set({ type: "constructor", name: "tostring", value: "v" });
     assert.equal(vault.get("constructor", "tostring").value, "v");
     assert.throws(() => vault.get("api_key", "constructor"), /不存在/);
   });
 
-  it("拒绝非法名称", () => {
+  it("rejects invalid names", () => {
     for (const bad of ["", "../x", "__proto__", "a b", "x/y", "a".repeat(65)]) {
       assert.throws(() => vault.set({ type: bad, name: "n", value: "v" }), VaultError, bad);
     }
     assert.throws(() => vault.set({ type: "t", name: "n", value: "" }), VaultError);
   });
 
-  it("非空类型不能删除", () => {
+  it("a non-empty type cannot be deleted", () => {
     vault.set({ type: "token", name: "a", value: "v" });
     assert.throws(() => vault.deleteType("token"), /还有 1 个凭证/);
     vault.delete("token", "a");
@@ -113,7 +113,7 @@ describe("Vault", () => {
     assert.equal(vault.listTypes().length, 0);
   });
 
-  it("兼容改名前（credential-mcp）加密的数据，下次写入升级为新标识", () => {
+  it("is compatible with data encrypted before the rename (credential-mcp); the next write upgrades it to the new identifier", () => {
     const key = fs.readFileSync(vault.keyPath);
     const data = { version: 1, types: { api_key: { description: "", createdAt: "t", updatedAt: "t" } }, credentials: { api_key: { old: { value: "legacy-secret", description: "", attributes: {}, createdAt: "t", updatedAt: "t" } } } };
     const iv = crypto.randomBytes(12);
@@ -132,10 +132,10 @@ describe("Vault", () => {
     d.setAAD(Buffer.from("keyvalet/vault/v1"));
     d.setAuthTag(Buffer.from(file.tag, "base64"));
     const plain = JSON.parse(Buffer.concat([d.update(Buffer.from(file.ct, "base64")), d.final()]).toString());
-    assert.equal(plain.credentials.api_key.old.value, "legacy-secret", "旧数据保留并以新标识重新加密");
+    assert.equal(plain.credentials.api_key.old.value, "legacy-secret", "old data is preserved and re-encrypted under the new identifier");
   });
 
-  it("多个实例（多个 session）读写同一个库", () => {
+  it("multiple instances (multiple sessions) read and write the same vault", () => {
     const other = new Vault(dir);
     other.init();
     vault.set({ type: "api_key", name: "a", value: "1" });
@@ -147,20 +147,20 @@ describe("Vault", () => {
 describe("dispatch", () => {
   const ctx = { session: "sess-1", cwd: "/tmp/p", client: "test" };
 
-  it("返回结果，审计日志含目的和会话、不含凭证值", async () => {
-    const set = await dispatch(vault, { id: 2, op: "set", params: { type: "api_key", name: "openai", value: "SECRET-VALUE-999", purpose: "保存测试密钥" } }, ctx);
+  it("returns a result; the audit log includes purpose and session, but not the credential value", async () => {
+    const set = await dispatch(vault, { id: 2, op: "set", params: { type: "api_key", name: "openai", value: "SECRET-VALUE-999", purpose: "Save a test secret" } }, ctx);
     assert.deepEqual(set, { id: 2, ok: true, result: { type: "api_key", name: "openai", typeCreated: true, replaced: false } });
-    const get = await dispatch(vault, { id: 3, op: "get", params: { type: "api_key", name: "openai", purpose: "调用 OpenAI 接口" } }, ctx);
+    const get = await dispatch(vault, { id: 3, op: "get", params: { type: "api_key", name: "openai", purpose: "Call the OpenAI API" } }, ctx);
     assert.equal(get.ok && (get.result as { value: string }).value, "SECRET-VALUE-999");
 
     const log = fs.readFileSync(vault.auditPath, "utf8");
     assert.equal(log.includes("SECRET-VALUE-999"), false);
     assert.match(log, /"op":"get","type":"api_key","name":"openai"/);
-    assert.match(log, /"purpose":"调用 OpenAI 接口"/);
+    assert.match(log, /"purpose":"Call the OpenAI API"/);
     assert.match(log, /"session":"sess-1"/);
   });
 
-  it("读取/修改凭证必须说明目的", async () => {
+  it("reading/modifying a credential must state a purpose", async () => {
     vault.set({ type: "api_key", name: "x", value: "v" });
     for (const [op, params] of [
       ["get", { type: "api_key", name: "x" }],
@@ -172,15 +172,15 @@ describe("dispatch", () => {
       assert.equal(r.ok, false, op);
       assert.match(!r.ok ? r.error : "", /目的/);
     }
-    // 列表等元数据操作不需要
+    // metadata operations like list don't need one
     assert.equal((await dispatch(vault, { id: 1, op: "list", params: {} }, ctx)).ok, true);
   });
 
-  it("审计日志查询：按会话/凭证/操作过滤，最新在前", async () => {
-    await dispatch(vault, { id: 1, op: "set", params: { type: "api_key", name: "a", value: "v", purpose: "存 a" } }, ctx);
-    await dispatch(vault, { id: 2, op: "get", params: { type: "api_key", name: "a", purpose: "读 a" } }, ctx);
-    await dispatch(vault, { id: 3, op: "get", params: { type: "api_key", name: "a", purpose: "另一会话读 a" } }, { session: "sess-2" });
-    await dispatch(vault, { id: 4, op: "get", params: { type: "api_key", name: "missing", purpose: "读不存在的" } }, ctx);
+  it("audit log query: filters by session/credential/op, newest first", async () => {
+    await dispatch(vault, { id: 1, op: "set", params: { type: "api_key", name: "a", value: "v", purpose: "store a" } }, ctx);
+    await dispatch(vault, { id: 2, op: "get", params: { type: "api_key", name: "a", purpose: "read a" } }, ctx);
+    await dispatch(vault, { id: 3, op: "get", params: { type: "api_key", name: "a", purpose: "read a (other session)" } }, { session: "sess-2" });
+    await dispatch(vault, { id: 4, op: "get", params: { type: "api_key", name: "missing", purpose: "read a nonexistent one" } }, ctx);
 
     const q = async (params: Record<string, unknown>) => {
       const r = await dispatch(vault, { id: 9, op: "auditQuery", params }, ctx);
@@ -189,18 +189,18 @@ describe("dispatch", () => {
     };
     const all = await q({});
     assert.equal(all.current_session, "sess-1");
-    assert.deepEqual(all.entries.map((e) => e.purpose), ["读不存在的", "另一会话读 a", "读 a", "存 a"]);
+    assert.deepEqual(all.entries.map((e) => e.purpose), ["read a nonexistent one", "read a (other session)", "read a", "store a"]);
     assert.equal(all.entries[0]!.ok, false);
     assert.match(String(all.entries[0]!.error), /不存在/);
 
-    assert.deepEqual((await q({ this_session: true })).entries.map((e) => e.purpose), ["读不存在的", "读 a", "存 a"]);
+    assert.deepEqual((await q({ this_session: true })).entries.map((e) => e.purpose), ["read a nonexistent one", "read a", "store a"]);
     assert.deepEqual((await q({ name: "a", op: "get" })).entries.map((e) => e.session), ["sess-2", "sess-1"]);
     assert.equal((await q({ limit: 1 })).entries.length, 1);
     assert.equal(JSON.stringify(all).includes('"value"'), false);
   });
 
-  it("错误以 ok:false 返回，未知操作被拒绝", async () => {
-    const r = await dispatch(vault, { id: 1, op: "get", params: { type: "nope", name: "x", purpose: "测试" } }, ctx);
+  it("errors return as ok:false; unknown operations are rejected", async () => {
+    const r = await dispatch(vault, { id: 1, op: "get", params: { type: "nope", name: "x", purpose: "test" } }, ctx);
     assert.deepEqual(r, { id: 1, ok: false, error: '凭证类型 "nope" 不存在' });
     const u = await dispatch(vault, { id: 2, op: "rm -rf" } as never, ctx);
     assert.equal(u.ok, false);

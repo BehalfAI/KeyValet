@@ -1,5 +1,5 @@
-// 常见 OAuth 2.0 服务商预设。解析后的端点会完整写进凭证配置，
-// 之后刷新 token 不再依赖这里（预设变化不会影响已保存的凭证）。
+// Common OAuth 2.0 provider presets. The resolved endpoints are written in full into the credential
+// config, so refreshing the token later no longer depends on this file (changes to a preset don't affect already-saved credentials).
 
 import { t } from "./i18n.js";
 
@@ -8,12 +8,12 @@ export interface OAuthPreset {
   authorization_url: string;
   token_url: string;
   device_authorization_url?: string;
-  /** 授权请求附加参数（如 Google 需要 access_type=offline 才会给 refresh token） */
+  /** Extra authorization request parameters (e.g. Google only returns a refresh token if access_type=offline is set) */
   extra_auth_params?: Record<string, string>;
   default_scopes: string[];
-  /** 始终追加的 scope（如 Microsoft 需要 offline_access 才会给 refresh token） */
+  /** Scope(s) that are always appended (e.g. Microsoft only returns a refresh token if offline_access is requested) */
   required_scopes?: string[];
-  /** 未指定 redirect_uri 时的回调主机（Microsoft 要求 localhost） */
+  /** Callback host used when redirect_uri isn't specified (Microsoft requires localhost) */
   redirect_host?: "127.0.0.1" | "localhost";
   notes: string;
 }
@@ -69,7 +69,7 @@ export const OAUTH_PRESETS: Record<string, OAuthPresetData> = {
     authorization_url: "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize",
     token_url: "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
     device_authorization_url: "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/devicecode",
-    // openid email：从 id_token 拿到邮箱地址，用作 XOAUTH2 的用户名
+    // openid email: gets the email address from the id_token, used as the XOAUTH2 username
     default_scopes: ["openid", "email", "https://outlook.office.com/IMAP.AccessAsUser.All"],
     required_scopes: ["offline_access"],
     redirect_host: "localhost",

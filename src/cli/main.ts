@@ -1,5 +1,5 @@
-// 终端管理工具，供用户本人使用：keyvalet <command>
-// 由 /usr/local/bin/keyvalet 通过 `sudo -k` 启动，直接以 root 读写凭证库。
+// Terminal management tool, for the user's own use: keyvalet <command>
+// Launched by /usr/local/bin/keyvalet via `sudo -k`, reads and writes the credential vault directly as root.
 
 import fs from "node:fs";
 import { setLang, t } from "../shared/i18n.js";
@@ -82,7 +82,7 @@ async function readValue(label: string): Promise<string> {
     if (a !== b) fatal(t("两次输入不一致", "The two entries do not match"));
     return a;
   }
-  // 管道输入：如 `pbpaste | keyvalet set api_key openai`
+  // Piped input: e.g. `pbpaste | keyvalet set api_key openai`
   const chunks: Buffer[] = [];
   for await (const c of process.stdin) chunks.push(c as Buffer);
   return Buffer.concat(chunks).toString("utf8").replace(/\r?\n$/, "");
@@ -114,7 +114,7 @@ async function main(): Promise<void> {
   process.umask(0o077);
   verifyRootEnvironment("keyvalet", import.meta.url, CLI_JS);
   let argv = process.argv.slice(2);
-  // 包装脚本以用户身份检测语言后通过 --lang 传入（root 读不到用户的语言偏好）
+  // The wrapper script detects the language as the user and passes it in via --lang (root can't read the user's language preference)
   if (argv[0] === "--lang") {
     setLang(argv[1]);
     argv = argv.slice(2);
@@ -163,7 +163,7 @@ async function main(): Promise<void> {
       if ((record.kind ?? "static") === "static") {
         process.stdout.write(record.value + (process.stdout.isTTY ? "\n" : ""));
       } else {
-        // 协议凭证：输出完整配置和秘密（仅限终端中以 root 身份执行，供备份/迁移）
+        // Protocol credentials: print the full config and secrets (terminal-only, running as root, for backup/migration)
         console.log(JSON.stringify({ kind: record.kind, config: record.config, secrets: record.secrets }, null, 2));
       }
       break;
@@ -214,7 +214,7 @@ async function main(): Promise<void> {
       if (!mode) fatal(t("用法：grant-mode [per-use|per-credential|per-session|remember [小时，0=永久]|forget]", "Usage: grant-mode [per-use|per-credential|per-session|remember [hours, 0=forever]|forget]"));
       const hours = h === undefined ? cur.remember_hours : Number(h);
       if (!Number.isFinite(hours) || hours < 0 || hours > 8760) fatal(t("小时数必须在 0~8760 之间", "Hours must be between 0 and 8760"));
-      // 你本人在终端以 root 执行（已输入密码），无需再确认；记住窗口从下一次 Touch ID 开始
+      // You're running this yourself in the terminal as root (password already entered), no further confirmation needed; the remember window starts from the next Touch ID
       writeSettings(VAULT_DIR, { grant_mode: mode, remember_hours: hours });
       vault.audit({ op: "settings", grant_mode: mode, remember_hours: hours, ok: true, client });
       console.log(t(`授权模式已设为 ${mode}（新会话生效）`, `Grant mode set to ${mode} (new sessions)`));

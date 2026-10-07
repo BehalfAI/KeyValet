@@ -1,14 +1,22 @@
-// 本地网关：给不能走 MCP 的程序（SDK、CLI、脚本）用的代理入口，支持流式响应。
+// Local gateway: a proxy entry point for programs that can't go through MCP (SDKs, CLIs, scripts),
+// supporting streaming responses.
 //
-//   http://127.0.0.1:<port>/<上游域名>/<路径>  →  https://<上游域名>/<路径>
-//   认证：程序把网关令牌（kv_…）当作 API key 发送——Authorization: Bearer、x-api-key、api-key 或 x-goog-api-key
+//   http://127.0.0.1:<port>/<upstream host>/<path>  ->  https://<upstream host>/<path>
+//   Authentication: the program sends the gateway token (kv_...) as an API key -- Authorization: Bearer,
+//   x-api-key, api-key, or x-goog-api-key
 //
-// - 令牌不放在 URL 里：命令行参数对本机所有用户可见（ps），而 SDK 本来就会把 API key 放进请求头
-// - 只监听 127.0.0.1；只接受发起会话的用户（SUDO_UID）的进程的连接——令牌即使泄露给其他用户也无效
-// - 令牌 32 字节随机、每个凭证一个，只在本会话（helper 进程）内有效
-// - 校验 Host 头（防 DNS 重绑定），拒绝浏览器发起的请求（Origin / Sec-Fetch-*）
-// - 去掉客户端自带的认证头和可能泄露令牌的头，注入真实凭证；只能发往该凭证允许的域名；不跟随重定向
-// - 响应边转发边脱敏（只扣留可能是秘密开头的尾部），按客户端读取速度转发（背压），防止耗尽 root 进程内存
+// - The token is never placed in the URL: command-line arguments are visible to all local users (ps),
+//   whereas an SDK already puts the API key in a request header
+// - Listens only on 127.0.0.1; only accepts connections from processes of the user who started the
+//   session (SUDO_UID) -- the token is useless even if leaked to another user
+// - The token is 32 random bytes, one per credential, valid only within this session (the helper process)
+// - Validates the Host header (prevents DNS rebinding), and rejects browser-originated requests
+//   (Origin / Sec-Fetch-*)
+// - Strips the client's own auth headers and any headers that might leak the token, then injects the
+//   real credential; can only reach hosts allowed for that credential; does not follow redirects
+// - Redacts the response while streaming it through (holding back only a tail that might be the start of
+//   a secret), forwarding at the client's read speed (backpressure), to avoid exhausting the root
+//   process's memory
 
 import { execFile } from "node:child_process";
 import crypto from "node:crypto";
@@ -28,13 +36,13 @@ const MAX_REQUEST_BODY = 20 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 50 * 1024 * 1024;
 const TIMEOUT_MS = 10 * 60_000;
 const TOKEN_PREFIX = "kv_";
-/** 客户端发来的、可能携带令牌或凭证的请求头：一律去掉，由网关注入真实凭证 */
+/** Request headers from the client that might carry a token or credential: always stripped, with the gateway injecting the real credential instead */
 const CLIENT_AUTH_HEADERS = new Set(["authorization", "x-api-key", "api-key", "x-goog-api-key", "cookie", "proxy-authorization"]);
-/** 其他不转发的请求头：可能泄露令牌（referer）、来自浏览器（origin、sec-*）、或会导致上游请求失败（expect） */
+/** Other request headers that aren't forwarded: might leak the token (referer), come from a browser (origin, sec-*), or cause the upstream request to fail (expect) */
 const DROP_REQUEST_HEADERS = /^(referer|origin|expect|forwarded|via|keep-alive|accept-encoding|x-forwarded-.*|sec-.*|proxy-.*)$/i;
 const DROP_RESPONSE_HEADERS = /^(content-length|content-encoding|transfer-encoding|connection|keep-alive|set-cookie|alt-svc|access-control-.*)$/i;
 
-/** 流式脱敏：在 latin1 字节视图上匹配（保持字节不变），只扣留可能是秘密开头的尾部 */
+/** Streaming redaction: matches on a latin1 byte view (keeping bytes unchanged), holding back only a tail that might be the start of a secret */
 export class StreamRedactor {
   private carry = "";
   private readonly list: string[];
@@ -55,8 +63,9 @@ export class StreamRedactor {
   }
 
   /**
-   * 只扣留“可能是某个秘密开头”的最长尾部（不区分大小写）。
-   * 大模型的流式事件通常很短，若固定扣留最长秘密长度，会把它们全部延迟到流结束。
+   * Holds back only the longest tail that "might be the start of some secret" (case-insensitive).
+   * LLM streaming events are often short, so always holding back the longest-secret length would delay
+   * all of them until the end of the stream.
    */
   private holdLength(s: string): number {
     const lower = s.toLowerCase();
@@ -74,7 +83,7 @@ export class StreamRedactor {
   }
 }
 
-/** 以 root 查询本机 TCP 连接对端进程的 uid（lsof），排除网关自身 */
+/** Queries, as root, the uid of the process on the other end of a local TCP connection (lsof), excluding the gateway itself */
 export function peerUid(remotePort: number): Promise<number | null> {
   return new Promise((resolve) => {
     execFile(
@@ -96,16 +105,16 @@ export function peerUid(remotePort: number): Promise<number | null> {
 interface Route {
   type: string;
   name: string;
-  /** 开通网关时说明的目的：写入之后每次网关请求的审计记录 */
+  /** The purpose stated when the gateway was opened: written into the audit record of every subsequent gateway request */
   purpose?: string;
 }
 
 export type GatewayAudit = (entry: Record<string, unknown>) => void;
 
 export interface GatewayOptions {
-  /** 只接受该 uid 的进程的连接（生产中为发起 sudo 的用户）；省略则不检查（仅测试） */
+  /** Only accepts connections from processes with this uid (in production, the user who invoked sudo); omit to skip the check (tests only) */
   allowedUid?: number;
-  /** 测试可替换对端 uid 的查询 */
+  /** Lets tests replace the peer-uid lookup */
   peerUid?: (remotePort: number) => Promise<number | null>;
 }
 
@@ -123,9 +132,9 @@ export class Gateway {
     private readonly opts: GatewayOptions = {},
   ) {}
 
-  /** 为凭证开通网关入口（同一凭证重复开通返回同一个令牌） */
+  /** Opens a gateway entry point for a credential (opening the same credential again returns the same token) */
   async open(type: string, name: string, purpose?: string): Promise<{ base: string; token: string; port: number }> {
-    if (!this.starting) this.starting = this.start(); // 并发开通只启动一次
+    if (!this.starting) this.starting = this.start(); // concurrent opens only start the server once
     await this.starting;
     let token = [...this.routes.entries()].find(([, r]) => r.type === type && r.name === name)?.[0];
     if (!token) {
@@ -156,7 +165,7 @@ export class Gateway {
         const check = lookup(socket.remotePort ?? 0).then((uid) => uid === this.opts.allowedUid);
         this.peerChecks.set(socket, check);
         void check.then((ok) => {
-          if (!ok) socket.destroy(); // 其他用户的进程：直接断开
+          if (!ok) socket.destroy(); // process belongs to another user: disconnect immediately
         });
       });
       srv.once("error", reject);
@@ -182,7 +191,7 @@ export class Gateway {
     try {
       this.audit({ op: "gateway", ...entry });
     } catch {
-      /* 审计失败不影响响应 */
+      /* an audit failure must not affect the response */
     }
   }
 
@@ -206,14 +215,15 @@ export class Gateway {
       this.fail(res, status, message);
     };
 
-    // 对端进程必须属于会话用户
+    // The peer process must belong to the session user
     const peerOk = this.peerChecks.get(req.socket);
     if (peerOk && !(await peerOk)) return deny(403, "peer_uid", "Forbidden");
-    // DNS 重绑定防护：只接受直接访问 127.0.0.1 / localhost 的请求
+    // DNS rebinding protection: only accept requests that directly target 127.0.0.1 / localhost
     const hostHeader = (req.headers.host ?? "").toLowerCase();
     if (hostHeader !== `127.0.0.1:${this.port}` && hostHeader !== `localhost:${this.port}`) return deny(421, "host_header", "Misdirected request");
-    // 浏览器发起的请求（网页）一律拒绝：浏览器总会带 Sec-Fetch-Site，跨域请求还带 Origin。
-    // 注意不能按 sec-fetch-mode 判断——Node 自带的 fetch（OpenAI 等 SDK）也会发送它。
+    // Always reject browser-originated requests (web pages): a browser always sends Sec-Fetch-Site, and
+    // cross-origin requests also send Origin.
+    // Note this can't be judged by sec-fetch-mode -- Node's built-in fetch (used by SDKs like OpenAI's) sends that too.
     const site = req.headers["sec-fetch-site"];
     if (req.headers.origin !== undefined || (site !== undefined && site !== "none")) {
       return deny(403, "browser", t("网关不接受浏览器发起的请求", "The gateway does not accept requests from browsers"));
@@ -224,7 +234,7 @@ export class Gateway {
       return deny(401, "token", t("缺少或无效的网关令牌（请把 KeyValet 网关令牌作为 API key 发送）", "Missing or invalid gateway token (send the KeyValet gateway token as the API key)"));
     }
     if (this.inFlight >= MAX_IN_FLIGHT) return deny(429, "busy", t("网关请求过多，请稍后再试", "Too many gateway requests; retry later"), route);
-    this.inFlight++; // 先计数再 await：避免并发请求都通过上限检查
+    this.inFlight++; // increment the count before awaiting: prevents concurrent requests from all passing the limit check
 
     let status = 0;
     let redactions: string[] = [];
@@ -232,7 +242,7 @@ export class Gateway {
       const { type, name, record } = this.vault.getRecord(route.type, route.name);
       redactions = redactionList([...Object.values(record.secrets ?? {}), record.value ?? ""]);
       if (!record.http) return deny(403, "no_proxy", t("该凭证没有配置代理调用", "This credential has no proxy configuration"), route);
-      const testLoopback = insecureLoopbackAllowed() && /^127\.0\.0\.1:\d+$/.test(upstreamHost); // 仅测试
+      const testLoopback = insecureLoopbackAllowed() && /^127\.0\.0\.1:\d+$/.test(upstreamHost); // test only
       if (!testLoopback && (!/^[a-z0-9.-]+$/.test(hostname) || !hostAllowed(hostname, record.http.allowed_hosts))) {
         return deny(403, "host", t(`域名 ${hostname} 不在该凭证允许的范围内`, `Host ${hostname} is not allowed for this credential`), route);
       }
@@ -260,7 +270,7 @@ export class Gateway {
         },
       });
       const abort = new AbortController();
-      res.on("close", () => abort.abort()); // 客户端断开 → 取消上游请求
+      res.on("close", () => abort.abort()); // client disconnected -> cancel the upstream request
       const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(TIMEOUT_MS)]);
       const hasBody = !["GET", "HEAD"].includes(method);
 
@@ -270,7 +280,7 @@ export class Gateway {
         body: hasBody ? (Readable.toWeb(req.pipe(limiter)) as unknown as BodyInit) : undefined,
         redirect: "manual",
         signal,
-        // @ts-expect-error Node 的 fetch 发送流式请求体需要 duplex: "half"
+        // @ts-expect-error Node's fetch requires duplex: "half" to send a streaming request body
         duplex: "half",
       });
       status = upstream.status;
@@ -291,11 +301,11 @@ export class Gateway {
           total += value.byteLength;
           if (total > MAX_RESPONSE_BYTES) {
             await reader.cancel().catch(() => {});
-            res.destroy(); // 超限：断开连接，而不是让客户端以为响应已完整
+            res.destroy(); // over the limit: disconnect instead of letting the client think the response is complete
             return;
           }
           const out = redactor.push(Buffer.from(value));
-          // 背压：客户端读得慢时等待，不在 root 进程里堆积数据
+          // Backpressure: wait when the client reads slowly, instead of letting data pile up in the root process
           if (out.length && !res.write(out) && !res.destroyed) await Promise.race([once(res, "drain"), once(res, "close")]);
           if (res.destroyed) {
             await reader.cancel().catch(() => {});

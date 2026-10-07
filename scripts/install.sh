@@ -1,18 +1,20 @@
 #!/bin/sh
-# 安装 KeyValet。以普通用户运行，需要特权的步骤会通过 sudo 执行（会提示输入密码）。
+# Installs KeyValet. Runs as a regular user; steps that need privileges go through sudo (prompts for a password).
 #
-# 安装后的布局（全部 root:wheel，不可被普通用户/AI agent 修改）：
-#   /usr/local/lib/keyvalet/bin/node       node 副本（root helper 用它运行）
-#   /usr/local/lib/keyvalet/bin/touchid    Touch ID 认证程序（强化运行时签名）
-#   /usr/local/lib/keyvalet/app/           编译后的代码 + 模板库 + 生产依赖
-#   /usr/local/bin/keyvalet                终端管理 CLI
-#   /var/db/keyvalet/                      加密凭证库（0700）
-#   /etc/sudoers.d/keyvalet                只允许当前用户免密运行 helper（helper 启动后必须先通过 Touch ID）
+# Layout after install (all root:wheel, not writable by a regular user / AI agent):
+#   /usr/local/lib/keyvalet/bin/kv-helper   root helper (Touch ID gated), launched via sudo -n
+#   /usr/local/lib/keyvalet/bin/kv-touchid  Touch ID authentication helper (hardened runtime signature)
+#   /usr/local/lib/keyvalet/bin/kv-mcp      MCP server (runs unprivileged, one process per AI session)
+#   /usr/local/lib/keyvalet/bin/kv-cli      terminal management CLI (runs as root via sudo)
+#   /usr/local/lib/keyvalet/templates/      bundled credential template catalog
+#   /usr/local/bin/keyvalet                 wrapper script that execs kv-cli via sudo
+#   /var/db/keyvalet/                       the encrypted credential vault (0700)
+#   /etc/sudoers.d/keyvalet                 lets only the current user run the helper passwordlessly (it still requires Touch ID once started)
 #
-# 从改名前的 credential-mcp 升级：自动把 /var/db/credential-mcp 迁移为 /var/db/keyvalet，并删除旧的安装。
+# Upgrading from the pre-rename credential-mcp: automatically migrates /var/db/credential-mcp to /var/db/keyvalet and removes the old install.
 set -eu
 
-# 界面语言：KEYVALET_LANG=en|zh 优先，否则看 macOS 界面语言
+# UI language: KEYVALET_LANG=en|zh takes priority, otherwise fall back to the macOS UI language
 KV_LANG=${KEYVALET_LANG:-}
 case "$KV_LANG" in zh*) KV_LANG=zh ;; en*) KV_LANG=en ;; *) KV_LANG= ;; esac
 if [ -z "$KV_LANG" ]; then
@@ -31,58 +33,45 @@ if [ "$(id -u)" = 0 ]; then
   exit 1
 fi
 
-NODE_SRC=$(command -v node || true)
-[ -n "$NODE_SRC" ] || { say "找不到 node" "node not found" >&2; exit 1; }
-NODE_SRC=$(cd "$(dirname "$NODE_SRC")" && pwd -P)/$(basename "$NODE_SRC")
-NODE_MAJOR=$("$NODE_SRC" -p 'process.versions.node.split(".")[0]')
-[ "$NODE_MAJOR" -ge 20 ] || { say "需要 node >= 20（当前 $("$NODE_SRC" -v)）" "node >= 20 is required (current: $("$NODE_SRC" -v))" >&2; exit 1; }
+CARGO_BIN=$(command -v cargo || true)
+[ -n "$CARGO_BIN" ] || { say "找不到 cargo，请先安装 Rust 工具链（https://rustup.rs）" "cargo not found; install the Rust toolchain first (https://rustup.rs)" >&2; exit 1; }
 
-# root helper 会用这个 node 运行；如果它依赖用户可写的动态库（如 Homebrew 版 node），
-# 任何用户态进程都能通过替换动态库获得 root —— 拒绝安装。
-if otool -L "$NODE_SRC" | tail -n +2 | awk '{print $1}' | grep -Ev '^(/usr/lib/|/System/Library/)' >/dev/null; then
-  say "node ($NODE_SRC) 链接了系统目录以外的动态库，不能安全地以 root 运行。" "node ($NODE_SRC) links dynamic libraries outside system directories and cannot safely run as root." >&2
-  say "请改用 nvm 或 nodejs.org 官方安装包提供的 node。" "Please use node from nvm or the official nodejs.org installer instead." >&2
-  exit 1
-fi
+say "==> 构建（cargo build --release）" "==> Building (cargo build --release)"
+cd "$SRC_DIR/rust"
+cargo build --release --locked
+BIN_DIR="$SRC_DIR/rust/target/release"
+for b in kv-helper kv-touchid kv-mcp kv-cli; do
+  [ -x "$BIN_DIR/$b" ] || { say "构建产物缺失：$b" "Build artifact missing: $b" >&2; exit 1; }
+done
 
-SWIFTC=$(command -v swiftc || true)
-[ -n "$SWIFTC" ] || { say "需要 Swift 编译器：请先运行 xcode-select --install" "The Swift compiler is required: run xcode-select --install first" >&2; exit 1; }
+STAGE=$(mktemp -d)
+trap 'rm -rf "$STAGE"' EXIT
+mkdir -p "$STAGE/bin" "$STAGE/templates"
+cp "$BIN_DIR/kv-helper" "$BIN_DIR/kv-touchid" "$BIN_DIR/kv-mcp" "$BIN_DIR/kv-cli" "$STAGE/bin/"
+cp -R "$SRC_DIR/templates/." "$STAGE/templates/" 2>/dev/null || true
+# Hardened runtime: processes owned by the same user (including an AI agent) cannot debug or inject into this binary
+codesign -s - -o runtime -f "$STAGE/bin/kv-touchid" >/dev/null
 
 USER_NAME=$(id -un)
 case "$USER_NAME" in
   *[!A-Za-z0-9_.-]*|"") say "用户名 $USER_NAME 含有不支持的字符" "User name $USER_NAME contains unsupported characters" >&2; exit 1 ;;
 esac
 
-say "==> 构建" "==> Building"
-cd "$SRC_DIR"
-npm ci --silent
-npm run --silent build
-
-STAGE=$(mktemp -d)
-trap 'rm -rf "$STAGE"' EXIT
-mkdir -p "$STAGE/app" "$STAGE/bin"
-cp -R dist templates package.json package-lock.json "$STAGE/app/"
-rm -rf "$STAGE/app/dist/test"
-(cd "$STAGE/app" && npm ci --omit=dev --silent --ignore-scripts)
-cp "$NODE_SRC" "$STAGE/bin/node"
-"$SWIFTC" -O -o "$STAGE/bin/touchid" src/native/touchid.swift
-# 强化运行时：同用户的进程（包括 AI agent）无法调试或注入该程序
-codesign -s - -o runtime -f "$STAGE/bin/touchid" >/dev/null
 cat > "$STAGE/sudoers" <<SUDOERS
 # KeyValet: only $USER_NAME may run the vault helper without a password (arguments must match exactly).
 # After starting, the helper requires Touch ID (device owner authentication) before providing any service.
-$USER_NAME ALL=(root) NOPASSWD: $INSTALL_DIR/bin/node $INSTALL_DIR/app/dist/helper/main.js
+$USER_NAME ALL=(root) NOPASSWD: $INSTALL_DIR/bin/kv-helper
 SUDOERS
 /usr/sbin/visudo -cqf "$STAGE/sudoers" || { say "生成的 sudoers 规则校验失败" "Validation of the generated sudoers rule failed" >&2; exit 1; }
 cat > "$STAGE/keyvalet" <<EOF
 #!/bin/sh
-# 以用户身份检测界面语言（root 读不到用户的语言偏好），通过 --lang 传给 CLI
+# Detect the UI language as the user (root can't read the user's language preference), pass it to the CLI via --lang
 KV_LANG=\${KEYVALET_LANG:-}
 if [ -z "\$KV_LANG" ]; then
-  # AppleLanguages 的第一项（输出第 2 行）是当前界面语言
+  # The first entry of AppleLanguages (line 2 of the output) is the current UI language
   if /usr/bin/defaults read -g AppleLanguages 2>/dev/null | /usr/bin/sed -n 2p | /usr/bin/grep -q zh; then KV_LANG=zh; else KV_LANG=en; fi
 fi
-exec /usr/bin/sudo -k -- $INSTALL_DIR/bin/node $INSTALL_DIR/app/dist/cli/main.js --lang "\$KV_LANG" "\$@"
+exec /usr/bin/sudo -k -- $INSTALL_DIR/bin/kv-cli --lang "\$KV_LANG" "\$@"
 EOF
 
 say "==> 安装到 ${INSTALL_DIR}（需要 sudo）" "==> Installing to ${INSTALL_DIR} (requires sudo)"
@@ -90,8 +79,8 @@ sudo -k
 if [ -t 0 ]; then
   SUDO="sudo"
 else
-  # 没有终端（例如由 AI agent 代为运行）：用 macOS 原生密码框向用户要密码
-  # 对话框文案按界面语言选择（固定文案，不含单引号），以单引号写入生成的脚本
+  # No terminal (e.g. run on the user's behalf by an AI agent): ask for the password with a native macOS dialog
+  # Dialog text is chosen by UI language (fixed strings, no single quotes), written into the generated script single-quoted
   ASKPASS_MSG=$(say "安装 KeyValet 需要管理员权限。请输入 macOS 登录密码（sudo）：" "Installing KeyValet requires administrator privileges. Enter your macOS login password (sudo):")
   ASKPASS_TITLE=$(say "KeyValet · 安装" "KeyValet · Install")
   ASKPASS_CANCEL=$(say "取消" "Cancel")
@@ -117,11 +106,11 @@ $SUDO /bin/sh -eu -c '
   say() { if [ "$KV_LANG" = zh ]; then printf "%s\n" "$1"; else printf "%s\n" "$2"; fi; }
   rm -rf "$INSTALL_DIR.new"
   mkdir -p "$INSTALL_DIR.new"
-  cp -R "$STAGE/app" "$STAGE/bin" "$INSTALL_DIR.new/"
+  cp -R "$STAGE/bin" "$STAGE/templates" "$INSTALL_DIR.new/"
   xattr -cr "$INSTALL_DIR.new" 2>/dev/null || true
   chown -R root:wheel "$INSTALL_DIR.new"
   chmod -R u=rwX,go=rX "$INSTALL_DIR.new"
-  chmod 0755 "$INSTALL_DIR.new/bin/node" "$INSTALL_DIR.new/bin/touchid"
+  chmod 0755 "$INSTALL_DIR.new"/bin/*
   rm -rf "$INSTALL_DIR.old"
   if [ -e "$INSTALL_DIR" ]; then mv "$INSTALL_DIR" "$INSTALL_DIR.old"; fi
   mv "$INSTALL_DIR.new" "$INSTALL_DIR"
@@ -130,7 +119,7 @@ $SUDO /bin/sh -eu -c '
   mkdir -p "$(dirname "$CLI_LINK")"
   install -o root -g wheel -m 0755 "$STAGE/keyvalet" "$CLI_LINK"
 
-  # 从 credential-mcp（改名前）迁移：凭证库整体搬迁（主密钥、凭证、审计日志、设置），再删除旧安装
+  # Migrate from credential-mcp (the pre-rename name): move the whole vault (master key, credentials, audit log, settings), then remove the old install
   if [ -d /var/db/credential-mcp ] && [ ! -e "$VAULT_DIR" ]; then
     mv /var/db/credential-mcp "$VAULT_DIR"
     say "已迁移凭证库：/var/db/credential-mcp -> $VAULT_DIR" "Migrated vault: /var/db/credential-mcp -> $VAULT_DIR"
@@ -146,8 +135,8 @@ $SUDO /bin/sh -eu -c '
 ' sh "$INSTALL_DIR" "$VAULT_DIR" "$CLI_LINK" "$STAGE" "$SUDOERS_FILE" "$KV_LANG"
 sudo -k
 
-# 验证免密规则生效：helper 启动后读到 EOF 会立即退出（不会弹 Touch ID）
-if ! /usr/bin/sudo -n -- "$INSTALL_DIR/bin/node" "$INSTALL_DIR/app/dist/helper/main.js" </dev/null >/dev/null 2>&1; then
+# Verify the passwordless rule took effect: the helper exits immediately on reading EOF (no Touch ID prompt)
+if ! /usr/bin/sudo -n -- "$INSTALL_DIR/bin/kv-helper" </dev/null >/dev/null 2>&1; then
   say "⚠️  免密规则未生效：请确认 /etc/sudoers 包含 #includedir /private/etc/sudoers.d" "⚠️  The passwordless sudo rule is not in effect: make sure /etc/sudoers contains #includedir /private/etc/sudoers.d" >&2
   exit 1
 fi
@@ -156,7 +145,7 @@ echo
 say "安装完成。" "Installation complete."
 echo
 say "在 Claude Code 中注册（用户级，所有项目可用）：" "Register it in Claude Code (user scope, available in all projects):"
-echo "  claude mcp add keyvalet --scope user -- $INSTALL_DIR/bin/node $INSTALL_DIR/app/dist/server/index.js"
+echo "  claude mcp add keyvalet --scope user -- $INSTALL_DIR/bin/kv-mcp"
 say "（如之前注册过旧名字：claude mcp remove credential --scope user）" "(If you registered it under the old name before: claude mcp remove credential --scope user)"
 echo
 say "在终端中管理凭证：" "Manage credentials from the terminal:"

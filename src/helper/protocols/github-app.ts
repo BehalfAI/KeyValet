@@ -1,4 +1,4 @@
-// GitHub App：用 App 私钥签 JWT，换取 1 小时有效的 installation access token。
+// GitHub App: sign a JWT with the App's private key and exchange it for an installation access token valid for 1 hour.
 
 import { t } from "../../shared/i18n.js";
 import { Vault, VaultError, type CredentialRecord } from "../vault.js";
@@ -53,11 +53,11 @@ export async function gitHubAppToken(
   }
   const narrowed = repositories.length > 0 || permissions !== undefined;
 
-  // 只缓存未收窄权限的 token
+  // Only cache tokens that haven't had their scope narrowed
   const cached = (record.state ?? {}).token as CachedToken | undefined;
   if (!narrowed && cached && p.force !== true && cached.expires_at - 5 * 60_000 > Date.now()) return out(cached, cfg);
 
-  const iat = nowSec() - 60; // 容忍时钟偏差
+  const iat = nowSec() - 60; // tolerate clock skew
   const jwt = signJwt("RS256", record.secrets!.private_key!, { iat, exp: iat + 600, iss: cfg.app_id });
 
   let installationId = cfg.installation_id;

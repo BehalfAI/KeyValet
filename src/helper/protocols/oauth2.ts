@@ -1,5 +1,5 @@
-// OAuth 2.0：授权码 + PKCE（RFC 6749/7636）、设备码（RFC 8628）、客户端凭证。
-// client secret 和 refresh token 只存在于 root helper 中；agent 只能拿到短期 access token。
+// OAuth 2.0: authorization code + PKCE (RFC 6749/7636), device code (RFC 8628), client credentials.
+// The client secret and refresh token exist only in the root helper; the agent can only get a short-lived access token.
 
 import { t } from "../../shared/i18n.js";
 import { Vault, VaultError, type CredentialRecord } from "../vault.js";
@@ -21,7 +21,7 @@ export interface OAuth2Config {
   scopes: string[];
   extra_auth_params: Record<string, string>;
   token_auth_method: (typeof AUTH_METHODS)[number];
-  /** 固定的回调地址（某些服务商要求精确匹配端口）；未设置时使用随机端口的 http://127.0.0.1:<port>/callback */
+  /** A fixed redirect URI (some providers require an exact port match); if unset, a random-port http://127.0.0.1:<port>/callback is used */
   redirect_uri?: string;
 }
 
@@ -65,7 +65,7 @@ export function validateOAuth2Setup(config: Record<string, unknown>, secrets: Re
   }
   if (flow === "device_code") cfg.device_authorization_url = assertHttpsUrl(config.device_authorization_url, "device_authorization_url");
   if (flow === "client_credentials" && !clientSecret) throw new VaultError(t("client_credentials 流程需要 client_secret", "The client_credentials flow requires client_secret"));
-  // 这些参数由本程序控制，不允许通过 extra_auth_params 覆盖
+  // These parameters are controlled by this program and must not be overridden via extra_auth_params
   for (const k of ["client_id", "redirect_uri", "state", "code_challenge", "code_challenge_method", "response_type", "scope"]) {
     if (Object.hasOwn(cfg.extra_auth_params, k)) throw new VaultError(t(`extra_auth_params 不能包含 ${k}`, `extra_auth_params must not contain ${k}`));
   }
@@ -79,7 +79,7 @@ function load(vault: Vault, type: unknown, name: unknown) {
   return { ty, n, record, cfg: record.config as unknown as OAuth2Config, secrets: record.secrets ?? {}, state: (record.state ?? {}) as OAuth2State };
 }
 
-/** 客户端认证：放进表单或 Basic 头 */
+/** Client authentication: put it in the form body or the Basic header */
 function clientAuth(cfg: OAuth2Config, secrets: Record<string, string>): { form: Record<string, string>; headers: Record<string, string> } {
   if (cfg.token_auth_method === "client_secret_basic") {
     const enc = (s: string) => encodeURIComponent(s);
@@ -98,8 +98,8 @@ async function tokenRequest(cfg: OAuth2Config, secrets: Record<string, string>, 
 }
 
 /**
- * 把 token 响应写进凭证：access token 进 state，refresh token 进 secrets。
- * fresh=true 表示新的一次授权：丢弃旧的 refresh token 和状态（可能属于别的账号）。
+ * Write the token response into the credential: access token goes into state, refresh token goes into secrets.
+ * fresh=true means a brand-new authorization: discard the old refresh token and state (which may belong to a different account).
  */
 function saveTokens(vault: Vault, ty: string, n: string, gen: string | undefined, r: HttpResult, fresh = false): OAuth2State {
   const j = obj(r);
@@ -129,7 +129,7 @@ function saveTokens(vault: Vault, ty: string, n: string, gen: string | undefined
       authorized_at: prev.authorized_at ?? new Date().toISOString(),
     };
     if (typeof j.refresh_token === "string" && j.refresh_token) {
-      rec.secrets = { ...rec.secrets, refresh_token: j.refresh_token }; // 支持 refresh token 轮换
+      rec.secrets = { ...rec.secrets, refresh_token: j.refresh_token }; // supports refresh token rotation
     }
   });
   return { ...next, account: typeof account === "string" ? account : undefined };
@@ -139,7 +139,7 @@ function isTokenResponse(r: HttpResult): boolean {
   return r.status >= 200 && r.status < 300 && typeof obj(r).access_token === "string";
 }
 
-/** 授权码换 token（浏览器流程的最后一步） */
+/** Exchange the authorization code for a token (the last step of the browser flow) */
 export async function exchangeCode(vault: Vault, p: { type: unknown; name: unknown; code: unknown; code_verifier: unknown; redirect_uri: unknown }) {
   const { ty, n, record, cfg, secrets } = load(vault, p.type, p.name);
   if (cfg.flow !== "authorization_code") throw new VaultError(t(`"${ty}/${n}" 不是授权码流程`, `"${ty}/${n}" does not use the authorization code flow`));
@@ -154,7 +154,7 @@ export async function exchangeCode(vault: Vault, p: { type: unknown; name: unkno
   return summary(s, !!obj(r).refresh_token);
 }
 
-/** 设备码流程第一步：向服务商申请 user_code */
+/** Device code flow step one: request a user_code from the provider */
 export async function deviceStart(vault: Vault, p: { type: unknown; name: unknown }) {
   const { ty, n, cfg } = load(vault, p.type, p.name);
   if (cfg.flow !== "device_code" || !cfg.device_authorization_url) throw new VaultError(t(`"${ty}/${n}" 不是设备码流程`, `"${ty}/${n}" does not use the device code flow`));
@@ -165,7 +165,7 @@ export async function deviceStart(vault: Vault, p: { type: unknown; name: unknow
   if (r.status >= 300 || typeof j.device_code !== "string" || typeof j.user_code !== "string") {
     throw remoteError(new URL(cfg.device_authorization_url).host, r);
   }
-  const verification = j.verification_uri ?? j.verification_url; // Google 用 verification_url
+  const verification = j.verification_uri ?? j.verification_url; // Google uses verification_url
   return {
     device_code: j.device_code,
     user_code: j.user_code,
@@ -177,7 +177,7 @@ export async function deviceStart(vault: Vault, p: { type: unknown; name: unknow
   };
 }
 
-/** 设备码流程第二步：轮询一次 */
+/** Device code flow step two: poll once */
 export async function devicePoll(vault: Vault, p: { type: unknown; name: unknown; device_code: unknown }) {
   const { ty, n, record, cfg, secrets } = load(vault, p.type, p.name);
   if (cfg.flow !== "device_code") throw new VaultError(t(`"${ty}/${n}" 不是设备码流程`, `"${ty}/${n}" does not use the device code flow`));
@@ -197,7 +197,7 @@ export async function devicePoll(vault: Vault, p: { type: unknown; name: unknown
   throw remoteError(new URL(cfg.token_url).host, r);
 }
 
-/** 取一个有效的 access token：缓存有效则直接返回，否则刷新 */
+/** Get a valid access token: return the cached one directly if still valid, otherwise refresh */
 export async function accessToken(vault: Vault, p: { type: unknown; name: unknown; force?: unknown }) {
   const { ty, n, record, cfg, secrets, state } = load(vault, p.type, p.name);
   const gen = record.generation;
@@ -215,7 +215,7 @@ export async function accessToken(vault: Vault, p: { type: unknown; name: unknow
 
   if (secrets.refresh_token) {
     const form: Record<string, string> = { grant_type: "refresh_token", refresh_token: secrets.refresh_token };
-    // Microsoft v2 端点要求刷新时带 scope；其他服务商省略（RFC 6749 中为可选）
+    // Microsoft v2 endpoints require scope on refresh; other providers omit it (optional per RFC 6749)
     if (/^https:\/\/login\.microsoftonline\.com\//.test(cfg.token_url) && cfg.scopes.length) form.scope = cfg.scopes.join(" ");
     const r = await tokenRequest(cfg, secrets, form);
     if (isTokenResponse(r)) return tokenOut({ ...saveTokens(vault, ty, n, gen, r), account: state.account });
@@ -233,7 +233,7 @@ export async function accessToken(vault: Vault, p: { type: unknown; name: unknow
     throw remoteError(new URL(cfg.token_url).host, r);
   }
 
-  // 不过期的 token（如 GitHub OAuth App 的经典 token）
+  // Tokens that never expire (e.g. GitHub OAuth App classic tokens)
   if (state.access_token && state.expires_at == null) return tokenOut(state);
   throw new VaultError(t(`"${ty}/${n}" 尚未授权或授权已过期，请调用 credential_oauth_login 授权。`, `"${ty}/${n}" is not authorized or its authorization has expired; call credential_oauth_login to authorize.`));
 }

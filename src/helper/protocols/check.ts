@@ -1,4 +1,4 @@
-// 协议配置的字段校验。输入来自 MCP server（间接来自 agent），一律当作不可信。
+// Field validation for protocol config. Input comes from the MCP server (indirectly from the agent), so it is always treated as untrusted.
 
 import { VaultError } from "../vault.js";
 import { t } from "../../shared/i18n.js";

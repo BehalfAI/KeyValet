@@ -1,8 +1,8 @@
 #!/bin/sh
-# 卸载 KeyValet。默认保留凭证库；加 --purge 同时删除凭证库（不可恢复）。
+# Uninstalls KeyValet. Keeps the vault by default; add --purge to also delete the vault (cannot be undone).
 set -eu
 
-# 界面语言：KEYVALET_LANG=en|zh 优先，否则看 macOS 界面语言
+# UI language: KEYVALET_LANG=en|zh takes priority, otherwise fall back to the macOS UI language
 KV_LANG=${KEYVALET_LANG:-}
 case "$KV_LANG" in zh*) KV_LANG=zh ;; en*) KV_LANG=en ;; *) KV_LANG= ;; esac
 if [ -z "$KV_LANG" ]; then

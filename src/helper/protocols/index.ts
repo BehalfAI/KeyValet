@@ -28,7 +28,7 @@ function asRecord(v: unknown, what: string): Record<string, unknown> {
   return v as Record<string, unknown>;
 }
 
-/** 创建/替换协议凭证。凭证类型不存在时会先创建类型（与 static 凭证一致）。 */
+/** Create/replace a protocol credential. If the credential type doesn't exist yet, it's created first (consistent with static credentials). */
 export function setupProtocol(vault: Vault, p: Record<string, unknown>) {
   const kind = p.kind as Kind;
   if (typeof kind !== "string" || kind === "static" || !Object.hasOwn(VALIDATORS, kind)) {
@@ -37,8 +37,8 @@ export function setupProtocol(vault: Vault, p: Record<string, unknown>) {
   const inSecrets = { ...asRecord(p.secrets, "secrets") };
   let previous: CredentialRecord | undefined;
   if (p.reuseClientSecret === true) {
-    // 只改 scope 等时沿用旧 client secret；但端点或 client 一旦变化就必须重新输入，
-    // 防止把已保存的 secret 发往新的（可能是恶意的）地址。
+    // Reuse the old client secret when only the scope etc. changes; but as soon as the endpoint or client
+    // changes, it must be re-entered, to prevent sending the saved secret to a new (possibly malicious) address.
     if (kind !== "oauth2") throw new VaultError(t("只有 oauth2 凭证可以沿用 client secret", "Only oauth2 credentials can reuse the client secret"));
     previous = vault.getRecord(p.type, p.name).record;
     if (previous.kind !== "oauth2") throw new VaultError(t("已有凭证不是 oauth2，不能沿用 client secret", "The existing credential is not oauth2; cannot reuse the client secret"));
@@ -75,7 +75,7 @@ export function setupProtocol(vault: Vault, p: Record<string, unknown>) {
   });
 }
 
-/** 给 agent 看的视图：配置和状态，不含任何秘密和缓存的 token */
+/** The view shown to the agent: config and status, without any secrets or cached tokens */
 export function publicView(type: string, name: string, rec: CredentialRecord) {
   const kind = rec.kind ?? "static";
   const base = { type, name, kind, description: rec.description, updatedAt: rec.updatedAt };
@@ -96,7 +96,7 @@ export function publicView(type: string, name: string, rec: CredentialRecord) {
   }
 }
 
-// 同一凭证的并发 token 请求合并为一次（避免重复刷新、以及 refresh token 轮换时互相作废）
+// Concurrent token requests for the same credential are merged into one (avoids redundant refreshes, and refresh tokens invalidating each other during rotation)
 const inflight = new Map<string, Promise<unknown>>();
 function singleFlight<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const existing = inflight.get(key);
@@ -106,10 +106,10 @@ function singleFlight<T>(key: string, fn: () => Promise<T>): Promise<T> {
   return p;
 }
 
-/** 统一的“取短期 token”入口：oauth2 / google_service_account / github_app / jwt */
+/** Unified "get a short-lived token" entry point: oauth2 / google_service_account / github_app / jwt */
 export async function accessToken(vault: Vault, p: Record<string, unknown>): Promise<unknown> {
   const { type, name, record } = vault.getRecord(p.type, p.name);
-  // 只能代理调用的凭证：token 只在代理内部使用，不返回给调用方（p.viaProxy 只能由 helper 内部设置，见 dispatch）
+  // Proxy-only credential: the token is only used internally by the proxy and is never returned to the caller (p.viaProxy can only be set internally by the helper, see dispatch)
   if (record.http?.proxy_only && p.viaProxy !== true) {
     throw new VaultError(
       t(

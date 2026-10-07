@@ -57,17 +57,17 @@ before(async () => {
 after(() => server.close());
 
 describe("XOAUTH2 / IMAP", () => {
-  it("XOAUTH2 字符串格式", () => {
+  it("XOAUTH2 string format", () => {
     assert.equal(Buffer.from(xoauth2("a@b.c", "tok"), "base64").toString(), "user=a@b.c\x01auth=Bearer tok\x01\x01");
   });
 
-  it("登录成功：只读打开收件箱并返回邮件数", async () => {
+  it("successful login: opens the inbox read-only and returns the message count", async () => {
     const r = await imapXoauth2Test({ host: "localhost", port, username: "me@example.com", accessToken: "good-token", ca: cert });
     assert.deepEqual(r, { authenticated: true, host: "localhost", username: "me@example.com", inbox_messages: 7 });
-    assert.ok(received.includes("A2 EXAMINE INBOX"), "使用只读的 EXAMINE 而不是 SELECT");
+    assert.ok(received.includes("A2 EXAMINE INBOX"), "uses the read-only EXAMINE instead of SELECT");
   });
 
-  it("登录失败：解码服务器返回的错误详情", async () => {
+  it("failed login: decodes the error detail returned by the server", async () => {
     const r = await imapXoauth2Test({ host: "localhost", port, username: "me@example.com", accessToken: "bad-token", ca: cert });
     assert.equal(r.authenticated, false);
     assert.match(r.server_error!, /AUTHENTICATE failed/);
@@ -75,7 +75,7 @@ describe("XOAUTH2 / IMAP", () => {
   });
 });
 
-describe("Microsoft Graph 邮件", () => {
+describe("Microsoft Graph mail", () => {
   let graph: http.Server;
   let base = "";
   const paths: string[] = [];
@@ -89,9 +89,9 @@ describe("Microsoft Graph 邮件", () => {
       }
       const u = new URL(req.url!, "http://x");
       if (u.pathname === "/me/mailFolders/inbox") {
-        res.end(JSON.stringify({ displayName: "收件箱", totalItemCount: 60, unreadItemCount: 41 }));
+        res.end(JSON.stringify({ displayName: "Inbox", totalItemCount: 60, unreadItemCount: 41 }));
       } else if (u.pathname === "/me/mailFolders/inbox/messages") {
-        res.end(JSON.stringify({ value: [{ subject: "订单 #6", receivedDateTime: "2026-10-06T09:00:00Z", from: { emailAddress: { address: "shop@example.com" } } }] }));
+        res.end(JSON.stringify({ value: [{ subject: "Order #6", receivedDateTime: "2026-10-06T09:00:00Z", from: { emailAddress: { address: "shop@example.com" } } }] }));
       } else {
         res.writeHead(404).end("{}");
       }
@@ -101,17 +101,17 @@ describe("Microsoft Graph 邮件", () => {
   });
   after(() => graph.close());
 
-  it("只读查看收件箱：数量 + 最近邮件", async () => {
+  it("read-only view of the inbox: counts + recent messages", async () => {
     const r = await graphMailTest({ accessToken: "good", baseUrl: base, top: 3 });
     assert.deepEqual(r, {
-      ok: true, folder: "收件箱", total: 60, unread: 41,
-      recent: [{ received: "2026-10-06T09:00:00Z", from: "shop@example.com", subject: "订单 #6" }],
+      ok: true, folder: "Inbox", total: 60, unread: 41,
+      recent: [{ received: "2026-10-06T09:00:00Z", from: "shop@example.com", subject: "Order #6" }],
     });
     assert.ok(paths.some((p) => p.includes("$top=3") && p.includes("$orderby=receivedDateTime desc")));
-    assert.ok(paths.every((p) => !/\/(move|send|delete)/i.test(p)), "只有只读请求");
+    assert.ok(paths.every((p) => !/\/(move|send|delete)/i.test(p)), "only read-only requests");
   });
 
-  it("token 被拒绝时返回错误详情", async () => {
+  it("returns error details when the token is rejected", async () => {
     const r = await graphMailTest({ accessToken: "bad", baseUrl: base });
     assert.deepEqual(r, { ok: false, http_status: 401, error: "InvalidAuthenticationToken: token expired" });
   });

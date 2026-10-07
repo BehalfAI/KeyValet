@@ -20,3 +20,21 @@ jobs:
           git diff --exit-code templates/catalog.json
       - name: Touch ID helper compiles
         run: swiftc -O -o /tmp/touchid src/native/touchid.swift
+
+  rust:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo build --workspace --locked
+      - run: cargo test --workspace --locked

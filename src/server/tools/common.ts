@@ -27,7 +27,7 @@ export function wrap<A>(fn: (args: A) => Promise<ToolResult>): (args: A) => Prom
 
 export const norm = (s: string) => s.trim().toLowerCase();
 
-/** 必填的目的说明：显示在 Touch ID 弹窗中（需要解锁时），并写入审计日志 */
+/** Required purpose string: shown in the Touch ID prompt (when unlocking is needed) and recorded in the audit log */
 export const purposeField = z
   .string()
   .min(2)
@@ -43,7 +43,7 @@ export const optionalPurposeField = purposeField.optional().describe(t("本次�
 
 export const CLIENT_ID_RE = /^[A-Za-z0-9._@:/-]{1,200}$/;
 
-/** 会出现在原生弹窗里的值：必须匹配严格格式，杜绝 agent 写入诱导性文字 */
+/** A value that will appear in a native dialog: must match a strict format, to prevent an agent from injecting misleading text */
 export function safeDisplay(v: unknown, re: RegExp, what: string): string {
   if (typeof v !== "string" || !re.test(v)) throw new Error(t(`${what} 格式不对`, `${what} has an invalid format`));
   return v;
@@ -60,13 +60,14 @@ export function httpsHost(url: unknown, what: string): string {
 }
 
 /**
- * 从文件导入秘密前请用户确认：防止 agent 借本工具读取用户的任意文件
- * （如 ~/.ssh/id_ed25519）并存成可读回的凭证，绕过客户端对 agent 的文件访问限制。
+ * Ask the user to confirm before importing a secret from a file: this prevents an agent from using
+ * this tool to read an arbitrary user file (e.g. ~/.ssh/id_ed25519) and store it as a readable
+ * credential, bypassing the client's file-access restrictions on the agent.
  */
 export async function importFile(p: string, label: string): Promise<{ content: string; path: string }> {
   const abs = resolveSecretFile(p);
   if (/[\u0000-\u001f\u007f]/.test(abs) || abs.length > 500) throw new Error(t("文件路径包含非法字符", "File path contains invalid characters"));
-  // 先确认，后读取
+  // Confirm first, then read
   if (
     !(await confirm(
       t(`AI agent 请求从以下文件导入秘密：\n\n${abs}\n\n保存为凭证：${label}`, `An AI agent wants to import a secret from this file:\n\n${abs}\n\nSave as credential: ${label}`),
@@ -79,7 +80,8 @@ export async function importFile(p: string, label: string): Promise<{ content: s
 }
 
 /**
- * 导入后删除原文件前再次确认（独立于导入确认）：删除不可恢复，必须让用户看清具体路径再点头。
+ * Ask for confirmation again before deleting the original file after import (separate from the
+ * import confirmation): deletion is irreversible, so the user must see the exact path before agreeing.
  */
 export async function confirmDeleteSourceFile(abs: string): Promise<boolean> {
   if (
@@ -111,8 +113,8 @@ export async function tryInfo(session: Requester, type: string, name: string): P
 }
 
 /**
- * 只给了 name 时，在指定种类的凭证中按名字查找类型。
- * 找到唯一一个则返回，否则报错让调用方指定 type。
+ * When only name is given, look up the type by name among credentials of the given kinds.
+ * Returns it if exactly one match is found; otherwise throws, asking the caller to specify type.
  */
 export async function resolveType(session: Requester, name: string, type: string | undefined, kinds: string[]): Promise<string> {
   if (type) return type;
@@ -129,8 +131,8 @@ export async function resolveType(session: Requester, name: string, type: string
 }
 
 /**
- * 已存在时：没有 overwrite 则报错。返回是否已存在。
- * 覆盖确认由 root helper 在写入时弹出（server 端不再重复弹窗）。
+ * If it already exists: throws unless overwrite is set. Returns whether it already existed.
+ * The overwrite confirmation dialog is shown by the root helper at write time (the server does not show it again).
  */
 export async function guardOverwrite(session: Requester, type: string, name: string, overwrite: boolean | undefined): Promise<boolean> {
   const exists = await session.request<boolean>("exists", { type, name });

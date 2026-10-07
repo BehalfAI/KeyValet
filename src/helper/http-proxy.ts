@@ -1,7 +1,9 @@
-// 代理调用：在 root helper 内把凭证注入 HTTP 请求并发出，agent 只拿到响应，看不到秘密。
-// - 只允许 https、默认端口、且目标域名在该凭证的 allowed_hosts 内
-// - 不跟随重定向（3xx 原样返回，agent 需要时自行再请求，同样受域名限制）
-// - 响应中出现的秘密（含 base64 / URL 编码形式）替换为 [REDACTED]
+// Proxied calls: inject the credential into the HTTP request and send it from inside the root helper;
+// the agent only receives the response and never sees the secret.
+// - Only https is allowed, on the default port, with the target host in that credential's allowed_hosts
+// - Redirects are not followed (3xx is returned as-is; the agent can issue a further request itself if
+//   needed, still subject to the same host restriction)
+// - Secrets appearing in the response (including base64 / URL-encoded forms) are replaced with [REDACTED]
 
 import { insecureLoopbackAllowed, readLimited } from "./protocols/http.js";
 import { accessToken } from "./protocols/index.js";
@@ -9,7 +11,7 @@ import { fieldValues, hostAllowed, render } from "./http-config.js";
 import { Vault, VaultError, type CredentialRecord } from "./vault.js";
 import { t } from "../shared/i18n.js";
 
-const TIMEOUT_MS = 180_000; // 大模型的流式响应可能持续数分钟
+const TIMEOUT_MS = 180_000; // LLM streaming responses can last several minutes
 const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
 const MAX_RETURN_CHARS = 256 * 1024;
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -20,9 +22,10 @@ const TEXTUAL = /^(text\/|application\/(json|xml|javascript|x-www-form-urlencode
 const TOKEN_KINDS = ["oauth2", "google_service_account", "github_app", "jwt"];
 
 /**
- * 解析 SSE（text/event-stream）响应，并从常见大模型流式格式中提取增量文本：
- * OpenAI Chat Completions（choices[].delta.content）、OpenAI Responses（response.output_text.delta）、
- * Anthropic（content_block_delta.delta.text）、Gemini（candidates[].content.parts[].text）。
+ * Parses an SSE (text/event-stream) response and extracts incremental text from common LLM streaming
+ * formats: OpenAI Chat Completions (choices[].delta.content), OpenAI Responses
+ * (response.output_text.delta), Anthropic (content_block_delta.delta.text), Gemini
+ * (candidates[].content.parts[].text).
  */
 export function aggregateSse(raw: string): { events: number; text: string | null } {
   let events = 0;
@@ -74,11 +77,11 @@ export interface ProxyResult {
   body: string;
   body_encoding: "text" | "base64";
   truncated: boolean;
-  /** SSE 流式响应：事件数，以及从大模型增量中拼出的完整文本（已脱敏） */
+  /** SSE streaming response: the event count, and the full text assembled from LLM deltas (already redacted) */
   stream?: { events: number; text: string | null };
 }
 
-/** 代理请求的目标（用于审计：只记 方法 + 域名 + 路径，不记查询参数） */
+/** The target of a proxied request (for auditing: records only method + host + path, not query parameters) */
 export function describeTarget(p: ProxyInput): string | undefined {
   try {
     const u = new URL(String(p.url));
@@ -94,9 +97,9 @@ function checkUrl(raw: unknown, allowed: string[]): URL {
   try {
     u = new URL(raw);
   } catch {
-    throw new VaultError(t("url 不合法", "Invalid url")); // 不回显 URL：它可能由秘密渲染而来
+    throw new VaultError(t("url 不合法", "Invalid url")); // don't echo back the URL: it may have been rendered from a secret
   }
-  const testLoopback = insecureLoopbackAllowed() && u.protocol === "http:" && u.hostname === "127.0.0.1"; // 仅测试
+  const testLoopback = insecureLoopbackAllowed() && u.protocol === "http:" && u.hostname === "127.0.0.1"; // test only
   if (u.protocol !== "https:" && !testLoopback) throw new VaultError(t("代理调用只允许 https", "Proxied calls only allow https"));
   if (u.username || u.password) throw new VaultError(t("url 不能包含用户名或密码", "url must not contain a username or password"));
   if (u.port && u.port !== "443" && !testLoopback) throw new VaultError(t("代理调用只允许默认端口 443", "Proxied calls only allow the default port 443"));
@@ -124,7 +127,7 @@ function strRecord(v: unknown, what: string): Record<string, string> {
   return out;
 }
 
-/** 生成需要从响应中抹掉的字符串（各秘密及其常见编码形式），长的优先；匹配时不区分大小写 */
+/** Builds the list of strings to strip from the response (each secret plus its common encoded forms), longest first; matching is case-insensitive */
 export function redactionList(values: string[]): string[] {
   const set = new Set<string>();
   for (const v of values) {
@@ -132,9 +135,9 @@ export function redactionList(values: string[]): string[] {
     const forms = [
       v,
       encodeURIComponent(v),
-      encodeURIComponent(v).replace(/%20/g, "+"), // 表单编码
-      JSON.stringify(v).slice(1, -1), // JSON 字符串转义
-      JSON.stringify(v).slice(1, -1).replace(/\//g, "\\/"), // 部分 JSON 编码器转义 /
+      encodeURIComponent(v).replace(/%20/g, "+"), // form encoding
+      JSON.stringify(v).slice(1, -1), // JSON string escaping
+      JSON.stringify(v).slice(1, -1).replace(/\//g, "\\/"), // some JSON encoders escape /
       Buffer.from(v).toString("base64"),
       Buffer.from(v).toString("base64").replace(/=+$/, ""),
       Buffer.from(v).toString("base64url"),
@@ -146,9 +149,10 @@ export function redactionList(values: string[]): string[] {
 }
 
 /**
- * 不区分大小写地替换（URL 编码的 %xx 大小写、域名小写化等都能覆盖）。
- * 用正则的 i 标志在原字符串上匹配：不能先 toLowerCase() 再按下标切片——
- * 某些字符（如 "İ"）小写后长度会变，下标随之错位，秘密就会漏出来。
+ * Replaces case-insensitively (covers URL-encoded %xx casing, lowercased hostnames, etc.).
+ * Matches on the original string using the regex's i flag: we can't toLowerCase() first and then slice
+ * by index -- some characters (e.g. "İ") change length when lowercased, which would shift indices and
+ * let secrets leak through.
  */
 export function redact(s: string, list: string[]): string {
   let out = s;
@@ -164,13 +168,13 @@ function containsSecret(buf: Buffer, list: string[]): boolean {
   return list.some((x) => lower.includes(Buffer.from(x).toString("latin1").toLowerCase()));
 }
 
-/** 计算要注入的头和查询参数，以及需要抹掉的秘密 */
+/** Computes the headers and query parameters to inject, along with the secrets that need to be stripped */
 export async function buildInjection(vault: Vault, type: string, name: string, rec: CredentialRecord) {
   const headers: Record<string, string> = {};
   const query: Record<string, string> = {};
   const secrets: string[] = [];
   const kind = rec.kind ?? "static";
-  // 所有长期秘密都加入脱敏列表（上游万一回显也不会泄露）
+  // All long-lived secrets are added to the redaction list (so they won't leak even if upstream echoes them back)
   secrets.push(...Object.values(rec.secrets ?? {}), rec.value ?? "");
   if (TOKEN_KINDS.includes(kind)) {
     const tok = (await accessToken(vault, { type, name, viaProxy: true })) as { access_token: string };
@@ -179,7 +183,7 @@ export async function buildInjection(vault: Vault, type: string, name: string, r
     if (!rule) {
       headers.Authorization = `Bearer ${tok.access_token}`;
     } else {
-      // 自定义注入规则：{{access_token}} 引用当次 token
+      // Custom injection rule: {{access_token}} references the current token
       const f = { secrets: { access_token: tok.access_token }, attributes: rec.attributes ?? {}, value: "" };
       for (const [k, v] of Object.entries(rule.headers ?? {})) headers[k] = render(v, f);
       for (const [k, v] of Object.entries(rule.query ?? {})) query[k] = render(v, f);
@@ -213,7 +217,7 @@ export async function proxyRequest(vault: Vault, p: ProxyInput & { type: unknown
   try {
     return await proxyRequestInner(vault, p);
   } catch (e) {
-    // 任何错误信息都先脱敏再返回（也会写入审计日志）
+    // Any error message is redacted before being returned (and before being written to the audit log)
     const msg = e instanceof Error ? e.message : String(e);
     throw new VaultError(redact(msg, baseline));
   }
@@ -269,20 +273,20 @@ async function proxyRequestInner(vault: Vault, p: ProxyInput & { type: unknown; 
   let text: string;
   let stream: ProxyResult["stream"];
   if (textual) {
-    text = redact(buf.toString("utf8"), inj.redactions); // 先脱敏再截断，避免秘密跨越截断点
+    text = redact(buf.toString("utf8"), inj.redactions); // redact before truncating, to avoid splitting a secret across the truncation point
     if (/^text\/event-stream/i.test(ctype)) {
       stream = aggregateSse(text);
-      // 拼接后再脱敏一次：秘密可能被拆在多个增量里，或以 JSON \uXXXX 转义出现
+      // Redact once more after assembling: a secret may have been split across multiple deltas, or appear as a JSON \uXXXX escape
       if (stream.text !== null) stream.text = redact(stream.text, inj.redactions);
     }
   } else {
-    // 二进制无法可靠脱敏：只要原始字节中出现秘密（任一编码形式）就拒绝返回
+    // Binary data can't be reliably redacted: refuse to return it if the raw bytes contain a secret in any encoded form
     if (containsSecret(buf, inj.redactions)) throw new VaultError(t("响应中包含凭证秘密，已拒绝返回该二进制响应", "The response contains a credential secret; refusing to return this binary response"));
     text = buf.toString("base64");
   }
   const truncated = text.length > MAX_RETURN_CHARS;
   if (truncated) text = text.slice(0, MAX_RETURN_CHARS);
-  // 流式响应已拼出完整文本时，原始事件流只保留开头一段（agent 通常只需要文本）
+  // When a streaming response has already been assembled into full text, keep only the leading portion of the raw event stream (the agent usually just needs the text)
   if (stream?.text !== null && stream && text.length > 4000) text = text.slice(0, 4000);
   return {
     status: res.status,
@@ -294,7 +298,7 @@ async function proxyRequestInner(vault: Vault, p: ProxyInput & { type: unknown; 
   };
 }
 
-/** 用凭证的验证请求检查其是否可用 */
+/** Checks whether a credential is usable via its test request */
 export async function testCredential(vault: Vault, p: { type: unknown; name: unknown }) {
   const { type, name, record } = vault.getRecord(p.type, p.name);
   const test = record.http?.test;

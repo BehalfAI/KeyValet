@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// 从本地 n8n 源码提取凭证模板，生成 templates/n8n-catalog.json。
-// 只提取事实性数据（字段、哪些是秘密、注入方式、验证请求、OAuth 端点），不复制 n8n 代码。
-// n8n 采用 Sustainable Use License：生成的模板库仅供个人/内部使用。
+// Extracts credential templates from a local n8n checkout and generates templates/n8n-catalog.json.
+// Only extracts factual data (fields, which are secret, injection method, test requests, OAuth endpoints); does not copy n8n code.
+// n8n is under the Sustainable Use License: the generated catalog is for personal/internal use only.
 //
-// 用法：node scripts/import-n8n-templates.mjs /path/to/n8n
+// Usage: node scripts/import-n8n-templates.mjs /path/to/n8n
 
 import { createRequire } from "node:module";
 import fs from "node:fs";
@@ -19,12 +19,12 @@ const Module = require("node:module");
 const n8nRoot = path.resolve(process.argv[2] ?? "");
 const DIRS = ["packages/nodes-base/credentials", "packages/@n8n/nodes-langchain/credentials"].map((d) => path.join(n8nRoot, d));
 if (!process.argv[2] || !fs.existsSync(DIRS[0])) {
-  console.error("用法：node scripts/import-n8n-templates.mjs /path/to/n8n");
+  console.error("Usage: node scripts/import-n8n-templates.mjs /path/to/n8n");
   process.exit(1);
 }
 const OUT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "templates", "n8n-catalog.json");
 
-// ---------- 1. 转译并加载凭证类（n8n 的依赖一律用空壳代替） ----------
+// ---------- 1. Transpile and load the credential classes (n8n's dependencies are all replaced with an empty stub) ----------
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "n8n-cred-"));
 const stub = path.join(tmp, "__stub.cjs");
 fs.writeFileSync(stub, "module.exports = new Proxy({}, { get: (t, k) => (k === '__esModule' ? false : function () {}) });");
@@ -62,9 +62,9 @@ for (const dir of DIRS.filter((d) => fs.existsSync(d))) {
 Module._resolveFilename = origResolve;
 fs.rmSync(tmp, { recursive: true, force: true });
 
-// ---------- 2. 转换 ----------
+// ---------- 2. Convert ----------
 
-// n8n 中以代码实现注入（无法自动提取）的常用服务：按各服务官方 API 文档手工补充注入规则
+// Common services where n8n implements injection in code (can't be auto-extracted): injection rules added by hand from each service's official API docs
 const CURATED_INJECT = {
   openAiApi: { headers: { Authorization: "Bearer {{apiKey}}" } },
   anthropicApi: { headers: { "x-api-key": "{{apiKey}}", "anthropic-version": "2023-06-01" } },
@@ -86,11 +86,11 @@ const OAUTH_BASE_FIELDS = new Set([
   "grantType", "authUrl", "accessTokenUrl", "clientId", "clientSecret", "scope", "authQueryParameters",
   "authentication", "useDynamicClientRegistration", "serverUrl", "sendAdditionalBodyProperties", "additionalBodyProperties",
   "ignoreSSLIssues", "customScopes", "customScopesNotice", "enabledScopes",
-  // n8n 内部用的 OAuth 扩展字段
+  // OAuth extension fields used internally by n8n
   "tokenExpiredStatusCode", "jweEnabled", "jwksUri", "inlineJwks", "clientCredentialType", "privateKey", "certificate",
 ]);
 
-/** 合并继承链上的属性（子类覆盖父类） */
+/** Merge properties along the inheritance chain (subclass overrides parent) */
 function resolvedProps(c) {
   const chain = [];
   for (let x = c, guard = 0; x && guard < 10; x = defs.get((x.extends ?? [])[0]), guard++) chain.unshift(x);
@@ -105,7 +105,7 @@ function chainNames(c) {
   return out;
 }
 
-/** n8n 表达式 → 我们的占位符；只支持字面量 + {{$credentials.字段}}，否则返回 null */
+/** n8n expression → our placeholder syntax; only supports literals + {{$credentials.field}}, otherwise returns null */
 function conv(v) {
   if (v === undefined || v === null) return undefined;
   if (typeof v === "number" || typeof v === "boolean") return String(v);
@@ -121,7 +121,7 @@ function convRecord(rec) {
   if (!rec) return undefined;
   const out = {};
   for (const [k0, v] of Object.entries(rec)) {
-    // 名称本身也可能是表达式（如 Header Auth 的 ={{$credentials.name}}）
+    // The name itself can also be an expression (e.g. Header Auth's ={{$credentials.name}})
     const k = k0.startsWith("=") ? conv(k0) : k0;
     if (k === null || k === undefined || k === "") return null;
     const c = conv(v);
@@ -150,7 +150,8 @@ function convField(p) {
 }
 
 function hostOf(urlTemplate, fields) {
-  // 占位符换成字段默认值；没有默认值的换成标记。只要域名部分不含标记就能确定域名（路径里的占位符不影响）
+  // Replace placeholders with the field's default value; fields without a default become a marker. The host can be
+  // determined as long as its part contains no marker (placeholders in the path don't matter)
   const MARK = "zzplaceholderzz";
   const rendered = urlTemplate.replace(/\{\{([A-Za-z0-9_]+)\}\}/g, (m, n) => {
     const f = fields.find((x) => x.name === n);
@@ -179,7 +180,7 @@ function convTest(test, fields) {
   if (headers === null || query === null) return undefined;
   const method = String(r.method ?? "GET").toUpperCase();
   if (!["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"].includes(method)) return undefined;
-  if (r.body) return undefined; // 带请求体的验证请求不导入
+  if (r.body) return undefined; // Test requests with a request body are not imported
   const t = { method, url: full };
   if (headers) t.headers = headers;
   if (query) t.query = query;
@@ -189,7 +190,7 @@ function convTest(test, fields) {
 function convInject(auth) {
   if (!auth || typeof auth !== "object" || auth.type !== "generic") return undefined;
   const p = auth.properties ?? {};
-  if (p.body) return undefined; // 注入请求体的不支持
+  if (p.body) return undefined; // Injecting a request body is not supported
   const headers = convRecord(p.headers);
   const query = convRecord(p.qs);
   if (headers === null || query === null) return undefined;
@@ -211,7 +212,7 @@ function scopeDefault(p) {
   const v = p?.default;
   if (typeof v !== "string") return [];
   if (!v.startsWith("=")) return v.split(/[\s,]+/).filter(Boolean);
-  // 常见写法：={{$self["customScopes"] ? $self["enabledScopes"] : "a b c"}}
+  // Common pattern: ={{$self["customScopes"] ? $self["enabledScopes"] : "a b c"}}
   const m = /:\s*"([^"]*)"\s*\}\}\s*$/.exec(v);
   return m ? m[1].split(/\s+/).filter(Boolean) : [];
 }
@@ -256,7 +257,7 @@ for (const c of defs.values()) {
       extra_auth_params: extra,
       token_auth_method: props.get("authentication")?.default === "header" ? "client_secret_basic" : "client_secret_post",
     };
-    // 只保留该模板自身定义的字段（继承来的都是 OAuth 通用配置）
+    // Keep only fields the template defines itself (inherited ones are all generic OAuth config)
     t.fields = (c.properties ?? []).filter((p) => !OAUTH_BASE_FIELDS.has(p.name)).map(convField).filter(Boolean);
   } else {
     t.fields = [...props.values()].map(convField).filter(Boolean);
@@ -268,7 +269,7 @@ for (const c of defs.values()) {
       t.inject = inject;
       if (curated) t.inject_source = "curated";
     } else if (curated) {
-      console.warn(`⚠️ 手工注入规则引用了不存在的字段：${c.name}`);
+      console.warn(`⚠️ Curated injection rule references a field that doesn't exist: ${c.name}`);
     }
     const test = convTest(c.test, t.fields);
     if (test && refs(test).every((n) => names.has(n))) t.test = test;
@@ -287,11 +288,11 @@ let commit = "";
 try {
   commit = execFileSync("git", ["-C", n8nRoot, "rev-parse", "--short", "HEAD"]).toString().trim();
 } catch {
-  /* 非 git 目录 */
+  /* not a git directory */
 }
 const catalog = {
   source: "n8n",
-  license_note: "提取自 n8n（Sustainable Use License），仅供个人/内部使用",
+  license_note: "Extracted from n8n (Sustainable Use License); for personal/internal use only",
   n8n_commit: commit,
   generated_at: new Date().toISOString(),
   templates,
@@ -300,14 +301,14 @@ fs.mkdirSync(path.dirname(OUT), { recursive: true });
 fs.writeFileSync(OUT, JSON.stringify(catalog, null, 1) + "\n");
 
 const s = {
-  加载: defs.size,
-  加载失败: failed,
-  模板: templates.length,
+  loaded: defs.size,
+  load_failed: failed,
+  templates: templates.length,
   "  static": templates.filter((t) => t.kind === "static").length,
-  "    可代理（有注入规则）": templates.filter((t) => t.inject).length,
-  "    可验证（有验证请求）": templates.filter((t) => t.test).length,
+  "    proxyable (has an injection rule)": templates.filter((t) => t.inject).length,
+  "    testable (has a test request)": templates.filter((t) => t.test).length,
   "  oauth2": templates.filter((t) => t.kind === "oauth2").length,
-  跳过: skipped,
+  skipped,
 };
 console.log(JSON.stringify(s, null, 1));
-console.log(`已写入 ${OUT}（${(fs.statSync(OUT).size / 1024).toFixed(0)} KB）`);
+console.log(`Wrote ${OUT} (${(fs.statSync(OUT).size / 1024).toFixed(0)} KB)`);

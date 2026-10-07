@@ -1,6 +1,7 @@
-// 浏览器端的 OAuth 交互（以普通用户运行）：
-// 本地回环回调 + PKCE + state 拿到授权码；授权码换 token 由 root helper 完成，
-// client secret 和 refresh token 从不经过这里。
+// Browser-side OAuth interaction (runs as a regular user):
+// Obtains the authorization code via a local loopback callback + PKCE + state; exchanging the
+// code for a token is done by the root helper — the client secret and refresh token never pass
+// through here.
 
 import crypto from "node:crypto";
 import { execFile } from "node:child_process";
@@ -35,8 +36,10 @@ export interface BrowserFlowResult {
 }
 
 /**
- * 授权码 + PKCE。redirectUri 未指定时监听 127.0.0.1 的随机端口。
- * redirectHost 为 localhost 时同时监听 IPv4/IPv6，因为浏览器可能把 localhost 解析成 ::1。
+ * Authorization code + PKCE. When redirectUri isn't specified, listens on a random port on
+ * 127.0.0.1.
+ * When redirectHost is localhost, listens on both IPv4 and IPv6, since the browser may resolve
+ * localhost to ::1.
  */
 export async function runBrowserFlow(opts: {
   authorizationUrl: string;
@@ -68,7 +71,7 @@ export async function runBrowserFlow(opts: {
     }
     if (u.searchParams.get("state") !== state) {
       res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" }).end(PAGE(t("授权失败", "Authorization failed"), t("state 不匹配，请回到 AI 会话重新发起授权。", "State mismatch. Please return to the AI session and start the authorization again.")));
-      return; // 不结束流程：可能是伪造请求，继续等真正的回调
+      return; // Don't end the flow: this may be a forged request; keep waiting for the real callback
     }
     const err = u.searchParams.get("error");
     if (err) {
@@ -97,10 +100,10 @@ export async function runBrowserFlow(opts: {
       });
     } catch (e) {
       if (servers.length === 0) throw new Error(t(`无法监听 ${addr}:${port}：${(e as Error).message}`, `Cannot listen on ${addr}:${port}: ${(e as Error).message}`));
-      continue; // IPv6 不可用时只用 IPv4
+      continue; // If IPv6 isn't available, use IPv4 only
     }
     servers.push(srv);
-    port = (srv.address() as { port: number }).port; // 第二个地址用同一端口
+    port = (srv.address() as { port: number }).port; // The second address reuses the same port
   }
   const redirectUri = fixed ? fixed.toString() : `http://${host}:${port}${path}`;
 
@@ -125,7 +128,7 @@ export async function runBrowserFlow(opts: {
   }
 }
 
-/** OIDC 自动发现：从 issuer 取授权/token/设备码端点 */
+/** OIDC auto-discovery: fetches the authorization/token/device-code endpoints from the issuer */
 export async function discoverOidc(issuer: string): Promise<{
   authorization_url?: string;
   token_url: string;

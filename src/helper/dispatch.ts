@@ -11,19 +11,19 @@ import { describeTarget, proxyRequest, testCredential } from "./http-proxy.js";
 import { Vault, VaultError, normalizeName, normalizeType, type HttpConfig } from "./vault.js";
 import { t } from "../shared/i18n.js";
 
-/** 会话的授权状态（不写入审计日志） */
+/** The session's authorization state (never written to the audit log) */
 export interface SessionAuth {
-  /** 本会话的本地网关（仅 helper 主程序提供） */
+  /** This session's local gateway (only provided by the main helper program) */
   gateway?: Gateway;
   grantAll: boolean;
   grants: Set<string>;
-  /** 本会话生效的授权模式（全局设置与客户端请求中更严格的那个）；省略视为 per_credential */
+  /** The grant mode in effect for this session (the stricter of the global setting and the client request); omitted means per_credential */
   mode?: GrantMode;
-  /** 客户端请求的模式（只能收严），设置变化后用于重新计算 */
+  /** The mode requested by the client (can only tighten it); used to recompute after a settings change */
   requested?: GrantMode | null;
-  /** per_use 模式：已认证、尚未使用的单次授权 */
+  /** per_use mode: a single-use grant that has been authenticated but not yet used */
   oneShot?: Set<string>;
-  /** 弹出 Touch ID（由 main 注入；测试中可替换） */
+  /** Raises Touch ID (injected by main; replaceable in tests) */
   authorize: (reason: string) => Promise<GateResult>;
 }
 
@@ -31,7 +31,7 @@ export function credKey(type: unknown, name: unknown): string {
   return `${normalizeType(type)}/${normalizeName(name)}`;
 }
 
-/** 握手时的凭证提示 → 凭证键（只认已存在的凭证；只给 name 时按名字唯一匹配） */
+/** Handshake credential hint -> credential key (only recognizes existing credentials; when only name is given, matches uniquely by name) */
 export function resolveHint(vault: Vault, hint: unknown): string | null {
   if (!hint || typeof hint !== "object") return null;
   const h = hint as { type?: unknown; name?: unknown };
@@ -63,7 +63,7 @@ async function grantCredential(vault: Vault, p: Record<string, unknown>, ctx: Cl
   return { granted: key, already: false, single_use: perUse };
 }
 
-/** 按设置更新当前会话的授权状态（设置修改后立即生效） */
+/** Updates the current session's authorization state per settings (takes effect immediately after a settings change) */
 export function applyMode(auth: SessionAuth, s: Settings): void {
   auth.mode = stricter(s.grant_mode, auth.requested ?? null);
   if (auth.mode === "per_use") {
@@ -73,7 +73,7 @@ export function applyMode(auth: SessionAuth, s: Settings): void {
   } else if (auth.mode === "per_credential") {
     auth.grantAll = false;
   } else {
-    auth.grantAll = true; // per_session / remember：本会话可使用全部凭证
+    auth.grantAll = true; // per_session / remember: all credentials can be used this session
   }
 }
 
@@ -103,8 +103,10 @@ function describeSettings(s: Settings): string {
 }
 
 /**
- * 查看/修改授权设置。放宽（更宽松的模式、更长的记住时长）必须由用户按 Touch ID——
- * 指纹无法用脚本伪造，而确认框在终端有“辅助功能”权限时可能被脚本点击。收紧立即生效、无需认证。
+ * Views/modifies authorization settings. Loosening (a looser mode, a longer remember duration) must be
+ * confirmed by the user via Touch ID -- a fingerprint can't be forged by a script, whereas a confirmation
+ * dialog could be clicked by a script if the terminal has "Accessibility" permission. Tightening takes
+ * effect immediately without authentication.
  */
 async function settingsOp(vault: Vault, p: Record<string, unknown>, auth?: SessionAuth) {
   const current = readSettings(vault.dir);
@@ -134,9 +136,9 @@ async function settingsOp(vault: Vault, p: Record<string, unknown>, auth?: Sessi
     );
     const approved = auth ? (await auth.authorize(msg)).ok : await confirmAsUser(msg, t("允许修改", "Allow Change"));
     if (!approved) throw new VaultError(t("用户拒绝了该修改", "The user denied this change"));
-    if (mode === "remember") next.remember_until = rememberUntil(hours); // 本次 Touch ID 即开始记住
+    if (mode === "remember") next.remember_until = rememberUntil(hours); // this Touch ID starts the remember period
   } else if (next.remember_until !== undefined) {
-    next.remember_until = Math.min(next.remember_until, rememberUntil(hours)); // 缩短时长：同时缩短当前窗口
+    next.remember_until = Math.min(next.remember_until, rememberUntil(hours)); // shortening the duration also shortens the current window
   }
   writeSettings(vault.dir, next);
   if (auth) applyMode(auth, next);
@@ -145,7 +147,7 @@ async function settingsOp(vault: Vault, p: Record<string, unknown>, auth?: Sessi
 
 const FIELD_KEY_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 
-/** 模板凭证的多个秘密字段 */
+/** The multiple secret fields of a template credential */
 function checkSecrets(v: unknown): Record<string, string> | undefined {
   if (v === undefined || v === null) return undefined;
   if (typeof v !== "object" || Array.isArray(v)) throw new VaultError(t("secrets 必须是对象", "secrets must be an object"));
@@ -160,15 +162,15 @@ function checkSecrets(v: unknown): Record<string, string> | undefined {
   return Object.keys(out).length ? out : undefined;
 }
 
-/** 写入 static 凭证：带模板时同时写入多个秘密字段和代理配置（新凭证的秘密刚由用户输入，无需再确认域名） */
+/** Writes a static credential: when a template is given, also writes multiple secret fields and the proxy configuration (the secrets of a new credential were just entered by the user, so the domains need no further confirmation) */
 function setStatic(vault: Vault, p: Record<string, unknown>) {
   const secrets = checkSecrets(p.secrets);
   let http: HttpConfig | undefined;
   if (p.http !== undefined && p.http !== null) {
-    // 与 vault.set 一致：未提供 attributes 时沿用已有凭证的
+    // Consistent with vault.set: when attributes isn't provided, reuse the existing credential's
     const given = (p.attributes ?? {}) as Record<string, string>;
     const attributes = Object.keys(given).length || !vault.exists(p.type, p.name) ? given : vault.getRecord(p.type, p.name).record.attributes;
-    // 新写入的秘密：模板验证请求允许引用秘密字段（如 Trello 把 token 放在路径里）
+    // Newly written secrets: the template's test request is allowed to reference secret fields (e.g. Trello puts the token in the path)
     http = validateHttpConfig(p.http, { kind: "static", secrets, attributes, value: typeof p.value === "string" ? p.value : "" }, { allowSecretsInTest: true });
   }
   const template = typeof p.template === "string" && /^[A-Za-z0-9_.-]{1,100}$/.test(p.template) ? p.template : undefined;
@@ -179,7 +181,7 @@ export interface ClientContext {
   cwd?: string;
   ppid?: number;
   client?: string;
-  /** MCP server 进程（即一次 agent 会话）的随机 ID */
+  /** Random ID of the MCP server process (i.e. one agent session) */
   session?: string;
 }
 
@@ -218,8 +220,9 @@ function info(vault: Vault, p: Record<string, unknown>) {
 }
 
 /**
- * 覆盖/删除已有凭证前由 helper 自己弹窗确认（不依赖 MCP server），
- * 防止绕过 server 直接驱动 helper 时悄悄替换或删除用户的凭证。
+ * Before overwriting/deleting an existing credential, the helper itself raises a confirmation dialog
+ * (independent of the MCP server), preventing a user's credential from being silently replaced or
+ * deleted when the server is bypassed and the helper is driven directly.
  */
 async function confirmDestructive(vault: Vault, p: Record<string, unknown>, action: "覆盖" | "删除"): Promise<void> {
   if (!vault.exists(p.type, p.name)) return;
@@ -305,7 +308,7 @@ async function run(vault: Vault, req: Request, ctx: ClientContext, auth: Session
         type,
         name,
         base: g.base,
-        // 令牌交给 MCP server 写入仅用户可读的环境变量文件，不放进 URL、不返回给 agent
+        // The token is handed to the MCP server to write into a user-readable-only env file; it is never put in the URL or returned to the agent
         token: g.token,
         template: record.template ?? null,
         allowed_hosts: record.http.allowed_hosts,
@@ -317,7 +320,7 @@ async function run(vault: Vault, req: Request, ctx: ClientContext, auth: Session
   }
 }
 
-/** 审计日志查询：最新的在前；不含任何凭证值（日志里本来就没有） */
+/** Audit log query: newest first; never contains any credential value (the log never has one to begin with) */
 function auditQuery(vault: Vault, p: Record<string, unknown>, ctx: ClientContext) {
   const limit = Math.min(Math.max(Number(p.limit ?? 50) || 50, 1), 500);
   const want = (k: string) => (typeof p[k] === "string" && p[k] ? String(p[k]).trim().toLowerCase() : undefined);
@@ -360,13 +363,14 @@ function auditQuery(vault: Vault, p: Record<string, unknown>, ctx: ClientContext
   return { current_session: ctx.session ?? null, count: out.length, entries: out };
 }
 
-/** 处理一条请求。审计日志只记录操作和对象，绝不记录凭证值或秘密。 */
+/** Handles one request. The audit log records only the operation and its target, never a credential value or secret. */
 /**
- * auth 省略时视为拥有全部授权（仅用于测试和 root CLI）；helper 主程序总是传入会话的授权状态。
+ * When auth is omitted, full authorization is assumed (used only for tests and the root CLI); the main
+ * helper program always passes in the session's authorization state.
  */
 export async function dispatch(vault: Vault, req: Request, ctx: ClientContext, auth?: SessionAuth): Promise<Response> {
   const p = { ...((req.params && typeof req.params === "object" ? req.params : {}) as Record<string, unknown>) };
-  delete p.viaProxy; // 仅限 helper 内部使用的标记，外部请求不得携带
+  delete p.viaProxy; // a flag for the helper's internal use only; external requests must not carry it
   const isTypeOp = req.op === "createType" || req.op === "deleteType";
   const purpose = cleanPurpose(p.purpose);
   const auditBase = {
@@ -379,7 +383,7 @@ export async function dispatch(vault: Vault, req: Request, ctx: ClientContext, a
     session: ctx.session,
     client: ctx,
   };
-  // 只读的元数据查询不记日志，避免刷屏
+  // Read-only metadata queries aren't logged, to avoid flooding the log
   const quiet =
     ["exists", "info", "oauthDevicePoll", "auditQuery", "sessionInfo"].includes(req.op) ||
     (req.op === "settings" && p.grant_mode == null && p.remember_hours == null && p.forget !== true);
@@ -388,12 +392,12 @@ export async function dispatch(vault: Vault, req: Request, ctx: ClientContext, a
     if (PURPOSE_REQUIRED_OPS.has(req.op) && !purpose) throw new VaultError(t("必须说明本次操作的目的（purpose）", "A purpose is required for this operation"));
     if (auth && GRANT_REQUIRED_OPS.has(req.op)) {
       const key = credKey(p.type, p.name);
-      // per_use：每次 Touch ID 只换来一次使用
+      // per_use: each Touch ID buys exactly one use
       const allowed = auth.mode === "per_use" ? auth.oneShot?.delete(key) === true : auth.grantAll || auth.grants.has(key);
       if (!allowed) throw new VaultError(`${GRANT_REQUIRED_PREFIX}${key}`);
     }
     const result = await run(vault, { ...req, params: p }, ctx, auth);
-    // 本会话新建/覆盖（已确认）的凭证：秘密刚由用户提供，自动授权
+    // A credential newly created/overwritten (and confirmed) this session: the secret was just supplied by the user, so grant it automatically
     if (auth && auth.mode !== "per_use" && (req.op === "set" || req.op === "setupProtocol")) {
       const r = result as { type: string; name: string };
       auth.grants.add(`${r.type}/${r.name}`);
@@ -401,7 +405,7 @@ export async function dispatch(vault: Vault, req: Request, ctx: ClientContext, a
     try {
       if (!quiet) vault.audit({ ...auditBase, ok: true });
     } catch {
-      /* 同上 */
+      /* same as above */
     }
     return { id: req.id, ok: true, result };
   } catch (e) {
@@ -409,7 +413,7 @@ export async function dispatch(vault: Vault, req: Request, ctx: ClientContext, a
     try {
       vault.audit({ ...auditBase, ok: false, error: message.slice(0, 500) });
     } catch {
-      /* 审计写入失败（如磁盘满）不能让 helper 崩溃 */
+      /* a failure to write the audit log (e.g. disk full) must not crash the helper */
     }
     return { id: req.id, ok: false, error: message };
   }

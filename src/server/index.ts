@@ -59,15 +59,15 @@ registerProtocolTools(server, session);
 registerMailTools(server, session);
 registerHttpTools(server, session);
 
-// session 结束（客户端关闭 stdin 或发信号）时立即锁定并退出。
-// 否则 sudo 子进程的管道会让本进程一直存活，已解锁的 root helper 也随之残留。
+// Lock and exit immediately when the session ends (the client closes stdin or sends a signal).
+// Otherwise the sudo child process's pipe keeps this process alive, leaving the unlocked root helper lingering too.
 let shuttingDown = false;
 const shutdown = () => {
   if (shuttingDown) return;
   shuttingDown = true;
-  session.lock(); // 立即结束 root helper（安全相关，不等待）
-  cleanupGatewayEnv(); // 删除本会话的网关环境变量文件
-  // 稍等片刻处理完已收到的请求，并在 stdout 写完后再退出，避免截断最后的响应
+  session.lock(); // End the root helper immediately (security-sensitive, don't wait)
+  cleanupGatewayEnv(); // Delete this session's gateway environment variable file
+  // Wait a moment to finish handling already-received requests, and exit only after stdout finishes writing, to avoid truncating the final response
   setTimeout(() => process.stdout.write("", () => process.exit(0)), 200).unref();
   setTimeout(() => process.exit(0), 2000).unref();
 };

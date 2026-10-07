@@ -1,7 +1,10 @@
-// 一个 MCP server 进程 = 一个 agent session。
-// 首次需要访问凭证时通过 `sudo -n` 启动 root helper（sudoers 只允许免密运行 helper 本身），
-// 先发送握手消息（目的、来源目录、会话 ID），helper 弹出 Touch ID（显示目的）认证通过后才提供服务。
-// 认证后本 session 内后续请求无需再认证；本进程退出（session 结束）→ 管道关闭 → helper 退出。
+// One MCP server process = one agent session.
+// The first time a credential needs to be accessed, a root helper is launched via `sudo -n`
+// (sudoers only allows the helper itself to run passwordlessly); a handshake message (purpose,
+// source directory, session ID) is sent first, and the helper only starts serving requests
+// after Touch ID (showing the purpose) succeeds.
+// Once authenticated, no further authentication is needed for the rest of this session; when
+// this process exits (session ends) -> the pipe closes -> the helper exits.
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import crypto from "node:crypto";
@@ -11,11 +14,11 @@ import { HELPER_JS, INSTALL_DIR, NODE_BIN, SUDO_BIN, SUDOERS_FILE, TOUCHID_BIN }
 import { GRANT_REQUIRED_PREFIX, PROTOCOL_VERSION, cleanPurpose, type AuthMessage, type Op, type Request, type Response } from "../shared/protocol.js";
 
 const UNLOCK_TIMEOUT_MS = 3 * 60_000;
-const REQUEST_TIMEOUT_MS = 60_000; // AWS MFA 可能需要等下一个 TOTP 周期
-const FAILURE_COOLDOWN_MS = 30_000; // 认证失败/取消后的冷却，防止 agent 反复弹窗轰炸
-const GRANT_TIMEOUT_MS = 150_000; // 按凭证授权需要等待用户按 Touch ID
+const REQUEST_TIMEOUT_MS = 60_000; // AWS MFA may need to wait for the next TOTP cycle
+const FAILURE_COOLDOWN_MS = 30_000; // Cooldown after auth failure/cancellation, to stop an agent from spamming prompts
+const GRANT_TIMEOUT_MS = 150_000; // Per-credential grants need to wait for the user to press Touch ID
 
-/** 工具要使用的凭证（用于 per_credential 模式的授权） */
+/** The credential a tool intends to use (for authorization in per_credential mode) */
 export interface CredentialTarget {
   type?: string;
   name?: string;
@@ -23,7 +26,7 @@ export interface CredentialTarget {
 
 export class SessionError extends Error {}
 
-/** 带目的的请求接口：工具处理函数通过 session.scoped(purpose) 获得 */
+/** A request interface carrying a purpose: tool handlers obtain it via session.scoped(purpose) */
 export interface Requester {
   request<T>(op: Op, params: Record<string, unknown>): Promise<T>;
 }
@@ -31,7 +34,7 @@ export interface Requester {
 type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: NodeJS.Timeout };
 
 export class HelperSession {
-  /** 本次会话的随机 ID，写入每条审计记录 */
+  /** Random ID for this session, written to every audit record */
   readonly sessionId = crypto.randomBytes(6).toString("hex");
   private child: ChildProcessWithoutNullStreams | null = null;
   private ready = false;
@@ -61,8 +64,10 @@ export class HelperSession {
   }
 
   /**
-   * 返回一个请求接口：每个请求都带上 purpose；如需解锁，Touch ID 弹窗中显示该目的。
-   * target 为工具要使用的凭证：per_credential 模式下解锁时即授权它。
+   * Returns a request interface: every request carries the purpose; if unlocking is needed,
+   * the Touch ID prompt shows that purpose.
+   * target is the credential the tool intends to use: in per_credential mode, unlocking also
+   * authorizes it.
    */
   scoped(purpose: string, target?: CredentialTarget): Requester {
     return {
@@ -94,19 +99,19 @@ export class HelperSession {
     }
     this.pending.clear();
     if (child) {
-      child.stdin.end(); // helper 读到 EOF 后自行退出
+      child.stdin.end(); // The helper exits on its own once it reads EOF
       child.kill("SIGTERM");
     }
   }
 
   async request<T>(op: Op, params: Record<string, unknown>, unlockPurpose = t("查看凭证库", "View the credential vault"), target?: CredentialTarget): Promise<T> {
     await this.unlock(unlockPurpose, target);
-    // 代理调用可能是持续数分钟的流式响应（helper 端上限 180 秒）
+    // Proxied calls may be streaming responses lasting several minutes (helper-side cap is 180s)
     const timeout = op === "httpRequest" || op === "httpTest" ? 200_000 : undefined;
     try {
       return await this.send<T>(op, params, timeout);
     } catch (e) {
-      // per_credential 模式：该凭证尚未授权 → 弹 Touch ID 授权后重试一次
+      // per_credential mode: this credential isn't authorized yet -> show Touch ID to authorize, then retry once
       const msg = (e as Error).message;
       if (!msg.startsWith(GRANT_REQUIRED_PREFIX)) throw e;
       const key = msg.slice(GRANT_REQUIRED_PREFIX.length).trim();
@@ -116,7 +121,7 @@ export class HelperSession {
     }
   }
 
-  /** 授权本会话使用某个凭证（同一凭证的并发授权合并为一次弹窗） */
+  /** Authorizes this session to use a credential (concurrent grants for the same credential are coalesced into a single prompt) */
   grant(type: string, name: string, purpose: string): Promise<unknown> {
     const key = `${type}/${name}`;
     let p = this.granting.get(key);
@@ -153,7 +158,7 @@ export class HelperSession {
     const problem = installProblem();
     if (problem) throw new SessionError(problem);
 
-    // -n：从不询问密码；sudoers 规则只允许免密运行 helper，认证由 helper 内的 Touch ID 完成
+    // -n: never prompt for a password; the sudoers rule only allows the helper to run passwordlessly, and authentication is done via Touch ID inside the helper
     const child = spawn(SUDO_BIN, ["-n", "--", NODE_BIN, HELPER_JS], {
       stdio: ["pipe", "pipe", "pipe"],
       detached: true,
@@ -181,7 +186,7 @@ export class HelperSession {
       session: this.sessionId,
       client: "keyvalet",
       lang: lang(),
-      // 客户端级别的收严（如给 Codex 配置 KEYVALET_GRANT_MODE=per_use）；不能放宽全局设置
+      // Client-level tightening (e.g. configuring KEYVALET_GRANT_MODE=per_use for Codex); cannot loosen the global setting
       ...(process.env.KEYVALET_GRANT_MODE ? { requested_mode: process.env.KEYVALET_GRANT_MODE } : {}),
       ...(target?.name ? { credential: { type: target.type, name: target.name } } : {}),
     };
@@ -255,7 +260,7 @@ function describeSudoFailure(stderr: string): string {
   return t(`解锁失败${tail ? `：${tail}` : ""}`, `Unlock failed${tail ? `: ${tail}` : ""}`);
 }
 
-/** 检查安装：要以 root 运行的文件必须存在、属于 root、不可被他人写 */
+/** Verifies the installation: files meant to run as root must exist, be owned by root, and not be writable by others */
 function installProblem(): string | null {
   for (const p of [INSTALL_DIR, NODE_BIN, HELPER_JS, TOUCHID_BIN, SUDOERS_FILE]) {
     let st: fs.Stats;

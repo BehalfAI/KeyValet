@@ -1,5 +1,7 @@
-// 邮件协议的 OAuth 认证：XOAUTH2（Gmail、Outlook/Microsoft 365 的 IMAP/SMTP 都使用它）。
-// IMAP 测试在 MCP 进程（普通用户）中进行，只用到短期 access token。
+// OAuth authentication for mail protocols: XOAUTH2 (used by IMAP/SMTP for both Gmail and
+// Outlook/Microsoft 365).
+// The IMAP test runs in the MCP process (as a regular user) and only ever uses a short-lived
+// access token.
 
 import tls from "node:tls";
 
@@ -12,7 +14,7 @@ export const IMAP_HOSTS: Record<string, string> = {
   google: "imap.gmail.com",
 };
 
-/** SASL XOAUTH2 初始响应：base64("user=<u>^Aauth=Bearer <token>^A^A") */
+/** SASL XOAUTH2 initial response: base64("user=<u>^Aauth=Bearer <token>^A^A") */
 export function xoauth2(username: string, accessToken: string): string {
   return Buffer.from(`user=${username}\x01auth=Bearer ${accessToken}\x01\x01`).toString("base64");
 }
@@ -21,14 +23,15 @@ export interface ImapTestResult {
   authenticated: boolean;
   host: string;
   username: string;
-  /** 收件箱邮件数（只读 EXAMINE，不改变任何邮件状态） */
+  /** Inbox message count (read-only EXAMINE, doesn't change any message state) */
   inbox_messages?: number;
   server_error?: string;
 }
 
 /**
- * 用 XOAUTH2 登录 IMAP，只读打开收件箱后退出。
- * 认证失败时服务器会先发一个 "+ <base64 JSON>" 的错误详情，解码后返回。
+ * Logs into IMAP using XOAUTH2, opens the inbox read-only, then logs out.
+ * On auth failure, the server first sends a "+ <base64 JSON>" error detail, which is decoded
+ * and returned.
  */
 export function imapXoauth2Test(opts: {
   host: string;
@@ -36,7 +39,7 @@ export function imapXoauth2Test(opts: {
   username: string;
   accessToken: string;
   timeoutMs?: number;
-  /** 仅测试用：信任自签名证书 */
+  /** Test-only: trust self-signed certificates */
   ca?: string;
 }): Promise<ImapTestResult> {
   const { host, username } = opts;
@@ -74,7 +77,7 @@ export function imapXoauth2Test(opts: {
           socket.write(`A1 AUTHENTICATE XOAUTH2 ${xoauth2(username, opts.accessToken)}\r\n`);
         } else if (stage === "auth") {
           if (line.startsWith("+")) {
-            // 错误详情（base64 JSON），回一个空行让服务器给出最终的 NO
+            // Error detail (base64 JSON); reply with an empty line to get the server's final NO
             const detail = line.slice(1).trim();
             try {
               serverError = Buffer.from(detail, "base64").toString("utf8") || detail;
@@ -112,12 +115,12 @@ export interface GraphMailResult {
   error?: string;
 }
 
-/** 通过 Microsoft Graph 只读查看一个邮件夹：邮件数 + 最近几封的发件人/标题（不改变任何邮件状态） */
+/** Reads a mail folder read-only via Microsoft Graph: message counts + sender/subject of the most recent messages (doesn't change any message state) */
 export async function graphMailTest(opts: {
   accessToken: string;
   folder?: string;
   top?: number;
-  /** 仅测试用 */
+  /** Test-only */
   baseUrl?: string;
 }): Promise<GraphMailResult> {
   const base = opts.baseUrl ?? "https://graph.microsoft.com/v1.0";
@@ -134,7 +137,7 @@ export async function graphMailTest(opts: {
     try {
       body = JSON.parse(text) as Record<string, unknown>;
     } catch {
-      /* 非 JSON */
+      /* not JSON */
     }
     return { status: res.status, body };
   };

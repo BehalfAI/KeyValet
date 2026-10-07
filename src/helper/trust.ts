@@ -9,7 +9,7 @@ export function fatal(prefix: string, msg: string): never {
   process.exit(1);
 }
 
-/** 文件及其所有上级目录都必须 root 所有、不可被 group/other 写、且不是符号链接 */
+/** The file and every parent directory must be owned by root, not writable by group/other, and not a symbolic link */
 export function untrustedReason(p: string): string | null {
   let cur = p;
   for (;;) {
@@ -24,8 +24,8 @@ export function untrustedReason(p: string): string | null {
 }
 
 /**
- * 以 root 运行前的自检：必须是 root、必须从安装目录运行、
- * 所有会被加载的代码和 node 本身都不能被普通用户（包括 AI agent）篡改。
+ * Self-check before running as root: must be root, must run from the install directory,
+ * and all code that will be loaded, along with node itself, must not be tamperable by a regular user (including an AI agent).
  */
 export function verifyRootEnvironment(prefix: string, moduleUrl: string, expectedPath: string): void {
   if (process.getuid!() !== 0) fatal(prefix, t("必须以 root 运行（通过 sudo）", "must run as root (via sudo)"));

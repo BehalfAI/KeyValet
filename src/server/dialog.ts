@@ -1,6 +1,7 @@
-// macOS 原生对话框。所有文案都通过 argv 传给 AppleScript，避免脚本注入；
-// 对话框里只出现经过校验的 type/name 和固定文案，不展示 agent 可随意控制的长文本，
-// 防止 agent 用伪造提示诱导用户输入 sudo 密码等内容。
+// Native macOS dialogs. All text is passed to AppleScript via argv to avoid script injection;
+// only validated type/name values and fixed strings ever appear in the dialog — no long text
+// that an agent could freely control is ever shown, preventing an agent from using a forged
+// prompt to trick the user into entering their sudo password or similar.
 
 import { execFile } from "node:child_process";
 import { OSASCRIPT_BIN } from "../shared/paths.js";
@@ -20,8 +21,10 @@ function runAppleScript(script: string, args: string[], timeoutMs: number): Prom
 }
 
 /**
- * 弹出隐藏输入框，让用户直接输入凭证值（不经过 AI 上下文）。取消或超时返回 null。
- * 刻意与 sudo 密码框区分（不同标题、图标、固定警示），避免用户误把登录密码输进来。
+ * Shows a hidden-input dialog so the user can type a credential value directly (never passing
+ * through the AI context). Returns null on cancel or timeout.
+ * Deliberately distinguished from the sudo password prompt (different title, icon, fixed
+ * warning) so users don't accidentally type their login password here.
  */
 export async function promptSecret(message: string): Promise<string | null> {
   const script = `on run argv
@@ -43,7 +46,7 @@ end run`;
   return value.length > 0 ? value : null;
 }
 
-/** 确认框，默认按钮为“取消”。 */
+/** Confirmation dialog; the default button is “Cancel”. */
 export async function confirm(message: string, okLabel: string): Promise<boolean> {
   const script = `on run argv
   set r to display dialog (item 1 of argv) with title (item 2 of argv) buttons {(item 4 of argv), (item 3 of argv)} default button (item 4 of argv) cancel button (item 4 of argv) with icon caution giving up after 120
@@ -54,7 +57,7 @@ end run`;
   return ok && stdout.trim() === okLabel;
 }
 
-/** 询问框：默认按钮为执行操作（回车即执行），“取消”为取消按钮。返回是否点了执行。 */
+/** Prompt dialog: the default button performs the action (Enter triggers it), “Cancel” is the cancel button. Returns whether the action button was clicked. */
 export async function ask(message: string, okLabel: string): Promise<boolean> {
   const script = `on run argv
   set r to display dialog (item 1 of argv) with title (item 2 of argv) buttons {(item 4 of argv), (item 3 of argv)} default button 2 cancel button 1 with icon note giving up after 600
@@ -65,7 +68,7 @@ end run`;
   return ok && stdout.trim() === okLabel;
 }
 
-/** 非阻塞的提示框（如显示设备码），没有默认按钮（回车不会误关），返回关闭函数 */
+/** Non-blocking notice dialog (e.g., for showing a device code); has no default button (so Enter won't dismiss it accidentally); returns a close function */
 export function showNotice(message: string, timeoutSec = 900): () => void {
   const script = `on run argv
   display dialog (item 1 of argv) with title (item 2 of argv) buttons {(item 3 of argv)} giving up after ${Math.floor(timeoutSec)}

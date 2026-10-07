@@ -15,14 +15,14 @@ import { Vault } from "../helper/vault.js";
 import { runBrowserFlow } from "../server/oauth-flow.js";
 import type { Op } from "../shared/protocol.js";
 
-// ---------- 模拟服务端 ----------
+// ---------- Mock server ----------
 const sa = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
 const ghApp = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
 const pem = (k: crypto.KeyObject) => k.export({ type: "pkcs8", format: "pem" }).toString();
 
 function verifyJwt(jwt: string, pub: crypto.KeyObject): Record<string, unknown> {
   const [h, p, s] = jwt.split(".");
-  assert.ok(crypto.verify("sha256", Buffer.from(`${h}.${p}`), pub, Buffer.from(s!, "base64url")), "JWT 签名无效");
+  assert.ok(crypto.verify("sha256", Buffer.from(`${h}.${p}`), pub, Buffer.from(s!, "base64url")), "invalid JWT signature");
   return JSON.parse(Buffer.from(p!, "base64url").toString());
 }
 
@@ -85,7 +85,7 @@ function route(method: string, p: string, body: string, headers: http.IncomingHt
 
 before(async () => {
   allowInsecureLoopbackForTests(true);
-  setUserConfirmForTests(async () => true); // helper 端的覆盖确认：测试中默认同意
+  setUserConfirmForTests(async () => true); // the helper-side overwrite confirmation: default to approving within tests
   server = http.createServer((req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
@@ -116,7 +116,7 @@ beforeEach(() => {
 });
 
 async function call<T = Record<string, unknown>>(op: Op, params: Record<string, unknown>): Promise<T> {
-  const r = await dispatch(vault, { id: nextId++, op, params: { purpose: "自动化测试", ...params } }, { session: "test" });
+  const r = await dispatch(vault, { id: nextId++, op, params: { purpose: "automated test", ...params } }, { session: "test" });
   if (!r.ok) throw new Error(r.error);
   return r.result as T;
 }
@@ -133,10 +133,10 @@ function oauthConfig(extra: Record<string, unknown> = {}) {
   };
 }
 
-// ---------- 测试 ----------
+// ---------- Tests ----------
 
-describe("标准测试向量", () => {
-  it("TOTP：RFC 6238 附录 B", () => {
+describe("standard test vectors", () => {
+  it("TOTP: RFC 6238 Appendix B", () => {
     const k1 = Buffer.from("12345678901234567890");
     assert.equal(totpAt(k1, 59, 8, 30, "SHA1"), "94287082");
     assert.equal(totpAt(k1, 1111111109, 8, 30, "SHA1"), "07081804");
@@ -145,7 +145,7 @@ describe("标准测试向量", () => {
     assert.deepEqual(base32Decode("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"), k1);
   });
 
-  it("AWS SigV4：官方测试套件 get-vanilla", () => {
+  it("AWS SigV4: official test suite get-vanilla", () => {
     const auth = sigv4({
       method: "GET",
       path: "/",
@@ -164,7 +164,7 @@ describe("标准测试向量", () => {
     );
   });
 
-  it("JWT：各算法签名可被公钥验证", () => {
+  it("JWT: signatures for each algorithm can be verified with the public key", () => {
     const cases: Array<[Parameters<typeof signJwt>[0], crypto.KeyPairKeyObjectResult | null]> = [
       ["RS256", crypto.generateKeyPairSync("rsa", { modulusLength: 2048 })],
       ["PS256", crypto.generateKeyPairSync("rsa", { modulusLength: 2048 })],
@@ -191,21 +191,21 @@ describe("标准测试向量", () => {
 });
 
 describe("OAuth 2.0", () => {
-  it("授权码换 token、缓存、刷新（含 refresh token 轮换）", async () => {
+  it("exchange an authorization code for a token, cache it, refresh it (including refresh token rotation)", async () => {
     const r = await call("setupProtocol", { kind: "oauth2", type: "oauth2", name: "svc", config: oauthConfig(), secrets: { client_secret: "s3cret" } });
-    assert.equal(r.typeCreated, true, "类型不存在时先创建类型");
+    assert.equal(r.typeCreated, true, "creates the type first when it doesn't exist");
 
     const ex = await call("oauthExchange", { type: "oauth2", name: "svc", code: "good-code", code_verifier: "v".repeat(43), redirect_uri: "http://127.0.0.1:5555/callback" });
     assert.deepEqual({ account: ex.account, refresh_token: ex.refresh_token }, { account: "me@example.com", refresh_token: true });
 
-    assert.equal((await call("accessToken", { type: "oauth2", name: "svc" })).access_token, "at-1", "缓存有效时直接返回");
+    assert.equal((await call("accessToken", { type: "oauth2", name: "svc" })).access_token, "at-1", "returns directly when the cache is valid");
     assert.equal((await call("accessToken", { type: "oauth2", name: "svc", force: true })).access_token, "at-2");
-    assert.equal(vault.getRecord("oauth2", "svc").record.secrets!.refresh_token, "rt-2", "轮换后的 refresh token 被保存");
+    assert.equal(vault.getRecord("oauth2", "svc").record.secrets!.refresh_token, "rt-2", "the rotated refresh token is saved");
     assert.equal((await call("accessToken", { type: "oauth2", name: "svc", force: true })).access_token, "at-3");
-    assert.equal(vault.getRecord("oauth2", "svc").record.secrets!.refresh_token, "rt-2", "未返回新 refresh token 时保留旧的");
+    assert.equal(vault.getRecord("oauth2", "svc").record.secrets!.refresh_token, "rt-2", "keeps the old one when no new refresh token is returned");
   });
 
-  it("refresh token 失效时标记需要重新授权", async () => {
+  it("marks reauthorization as needed when the refresh token is invalid", async () => {
     await call("setupProtocol", { kind: "oauth2", type: "oauth2", name: "svc", config: oauthConfig(), secrets: { client_secret: "s3cret" } });
     vault.patchRecord("oauth2", "svc", "oauth2", vault.getRecord("oauth2", "svc").record.generation, (rec) => {
       rec.secrets = { ...rec.secrets, refresh_token: "revoked" };
@@ -215,7 +215,7 @@ describe("OAuth 2.0", () => {
     assert.equal(info.status.needs_reauth, true);
   });
 
-  it("设备码流程：pending 后成功", async () => {
+  it("device code flow: succeeds after being pending", async () => {
     await call("setupProtocol", { kind: "oauth2", type: "oauth2", name: "dev", config: oauthConfig({ flow: "device_code" }), secrets: {} });
     const d = await call("oauthDeviceStart", { type: "oauth2", name: "dev" });
     assert.equal(d.user_code, "ABCD-EFGH");
@@ -223,15 +223,15 @@ describe("OAuth 2.0", () => {
     assert.equal((await call("oauthDevicePoll", { type: "oauth2", name: "dev", device_code: d.device_code })).status, "done");
     assert.equal((await call("accessToken", { type: "oauth2", name: "dev" })).access_token, "dev-at");
     const tokenCall = seen.filter((s) => s.path === "/token").at(-1)!;
-    assert.equal(tokenCall.form.get("client_secret"), null, "公共客户端不发送 secret");
+    assert.equal(tokenCall.form.get("client_secret"), null, "a public client does not send secret");
   });
 
-  it("客户端凭证流程", async () => {
+  it("client credentials flow", async () => {
     await call("setupProtocol", { kind: "oauth2", type: "oauth2", name: "m2m", config: oauthConfig({ flow: "client_credentials", scopes: ["api"] }), secrets: { client_secret: "s3cret" } });
     assert.equal((await call("accessToken", { type: "oauth2", name: "m2m" })).access_token, "cc-api");
   });
 
-  it("client_secret_basic 放在 Authorization 头里", async () => {
+  it("client_secret_basic goes in the Authorization header", async () => {
     await call("setupProtocol", {
       kind: "oauth2", type: "oauth2", name: "basic",
       config: oauthConfig({ flow: "client_credentials", token_auth_method: "client_secret_basic" }), secrets: { client_secret: "s3cret" },
@@ -242,7 +242,7 @@ describe("OAuth 2.0", () => {
     assert.equal(last.form.get("client_secret"), null);
   });
 
-  it("安全：拒绝非 https 端点、非回环回调、覆盖保留参数", async () => {
+  it("security: rejects non-https endpoints, non-loopback callbacks, and overriding reserved params", async () => {
     allowInsecureLoopbackForTests(false);
     try {
       await assert.rejects(call("setupProtocol", { kind: "oauth2", type: "o", name: "x", config: oauthConfig(), secrets: { client_secret: "s" } }), /https/);
@@ -259,26 +259,26 @@ describe("OAuth 2.0", () => {
     );
   });
 
-  it("安全：端点变化时不能沿用旧 client secret", async () => {
+  it("security: cannot reuse the old client secret when the endpoint changes", async () => {
     await call("setupProtocol", { kind: "oauth2", type: "oauth2", name: "svc", config: oauthConfig(), secrets: { client_secret: "s3cret" } });
-    // 只改 scope：可以沿用
+    // only changing scope: can be reused
     await call("setupProtocol", { kind: "oauth2", type: "oauth2", name: "svc", config: oauthConfig({ scopes: ["c"] }), secrets: {}, reuseClientSecret: true, overwrite: true });
     assert.equal(vault.getRecord("oauth2", "svc").record.secrets!.client_secret, "s3cret");
-    // 改 token_url：拒绝
+    // changing token_url: rejected
     await assert.rejects(
       call("setupProtocol", { kind: "oauth2", type: "oauth2", name: "svc", config: oauthConfig({ token_url: `${base}/evil` }), secrets: {}, reuseClientSecret: true, overwrite: true }),
       /token_url 已变化/,
     );
   });
 
-  it("安全：刷新期间配置被替换时，新 refresh token 不会写进新配置（竞态攻击回归测试）", async () => {
+  it("security: when the config is replaced during a refresh, the new refresh token is not written into the new config (race-condition attack regression test)", async () => {
     const cfg = oauthConfig({ token_auth_method: "none" });
     await call("setupProtocol", { kind: "oauth2", type: "oauth2", name: "pub", config: cfg, secrets: {} });
     const g1 = vault.getRecord("oauth2", "pub").record.generation;
     vault.patchRecord("oauth2", "pub", "oauth2", g1, (rec) => {
       rec.secrets = { refresh_token: "rt-1" };
     });
-    // 刷新请求发出后（等待网络时），agent 把凭证改成指向攻击者的端点
+    // After the refresh request is sent (while waiting on the network), the agent changes the credential to point at the attacker's endpoint
     const refreshing = call("accessToken", { type: "oauth2", name: "pub", force: true });
     await call("setupProtocol", {
       kind: "oauth2", type: "oauth2", name: "pub", overwrite: true, secrets: {},
@@ -287,15 +287,15 @@ describe("OAuth 2.0", () => {
     await assert.rejects(refreshing, /操作期间被修改/);
     const rec = vault.getRecord("oauth2", "pub").record;
     assert.notEqual(rec.generation, g1);
-    assert.equal(rec.secrets?.refresh_token, undefined, "轮换得到的 rt-2 没有落入攻击者配置");
+    assert.equal(rec.secrets?.refresh_token, undefined, "the rotated rt-2 did not end up in the attacker's config");
   });
 
-  it("安全：超大响应被中止，不会整个读进内存", async () => {
+  it("security: an oversized response is aborted and never read fully into memory", async () => {
     await call("setupProtocol", { kind: "oauth2", type: "oauth2", name: "big", config: oauthConfig({ flow: "client_credentials", token_url: `${base}/huge` }), secrets: { client_secret: "s" } });
     await assert.rejects(call("accessToken", { type: "oauth2", name: "big" }), /响应过大/);
   });
 
-  it("安全：get/info/list/审计日志都不暴露秘密", async () => {
+  it("security: get/info/list/the audit log never expose secrets", async () => {
     await call("setupProtocol", { kind: "oauth2", type: "oauth2", name: "svc", config: oauthConfig(), secrets: { client_secret: "s3cret" } });
     await call("oauthExchange", { type: "oauth2", name: "svc", code: "good-code", code_verifier: "v".repeat(43), redirect_uri: "http://127.0.0.1:5555/callback" });
     const exposed = JSON.stringify([
@@ -310,8 +310,8 @@ describe("OAuth 2.0", () => {
   });
 });
 
-describe("Google 服务账号", () => {
-  it("签 JWT 换 token，按 scope 缓存，subject 固定", async () => {
+describe("Google service account", () => {
+  it("signs a JWT to get a token, caches by scope, subject fixed", async () => {
     const keyJson = JSON.stringify({ type: "service_account", client_email: "bot@p.iam.gserviceaccount.com", private_key: pem(sa.privateKey), private_key_id: "kid1", token_uri: `${base}/token` });
     await call("setupProtocol", {
       kind: "google_service_account", type: "gsa", name: "bot", secrets: { key_json: keyJson },
@@ -323,36 +323,36 @@ describe("Google 服务账号", () => {
     assert.equal(t2.access_token, "sa:https://x/a https://x/b:admin@example.com");
     const n = seen.length;
     await call("accessToken", { type: "gsa", name: "bot", scopes: ["https://x/a", "https://x/b"] });
-    assert.equal(seen.length, n, "相同 scope 命中缓存");
+    assert.equal(seen.length, n, "same scope hits the cache");
     assert.equal(JSON.stringify(await call("get", { type: "gsa", name: "bot" })).includes("PRIVATE KEY"), false);
   });
 
-  it("安全：只能请求设置时允许的 scope 子集", async () => {
+  it("security: can only request a subset of the scopes allowed at setup", async () => {
     const keyJson = JSON.stringify({ type: "service_account", client_email: "bot@p.iam.gserviceaccount.com", private_key: pem(sa.privateKey), token_uri: `${base}/token` });
     await call("setupProtocol", { kind: "google_service_account", type: "gsa", name: "narrow", config: { scopes: ["https://x/read"] }, secrets: { key_json: keyJson } });
     await assert.rejects(call("accessToken", { type: "gsa", name: "narrow", scopes: ["https://mail.google.com/"] }), /不在该凭证允许的范围内/);
     assert.equal((await call("accessToken", { type: "gsa", name: "narrow", scopes: ["https://x/read"] })).access_token, "sa:https://x/read:");
   });
 
-  it("拒绝不是服务账号的 JSON", async () => {
+  it("rejects JSON that isn't a service account", async () => {
     await assert.rejects(call("setupProtocol", { kind: "google_service_account", type: "gsa", name: "x", config: {}, secrets: { key_json: '{"type":"authorized_user"}' } }), /service_account/);
   });
 });
 
 describe("GitHub App", () => {
-  it("自动发现唯一 installation，获取并缓存 token；收窄权限的 token 不缓存", async () => {
+  it("auto-discovers the unique installation, fetches and caches the token; a token with narrowed permissions is not cached", async () => {
     await call("setupProtocol", { kind: "github_app", type: "github_app", name: "bot", config: { app_id: "12345", api_base_url: base }, secrets: { private_key: pem(ghApp.privateKey) } });
     assert.equal((await call("accessToken", { type: "github_app", name: "bot" })).access_token, "ghs_full");
     const n = seen.length;
     assert.equal((await call("accessToken", { type: "github_app", name: "bot" })).access_token, "ghs_full");
-    assert.equal(seen.length, n, "命中缓存");
+    assert.equal(seen.length, n, "cache hit");
     assert.equal((await call("accessToken", { type: "github_app", name: "bot", repositories: ["repo1"] })).access_token, "ghs_narrow");
     assert.equal((await call("accessToken", { type: "github_app", name: "bot" })).access_token, "ghs_full");
   });
 });
 
-describe("JWT 签发", () => {
-  it("按模板签发 ES256（App Store Connect 风格），保留字段不可覆盖", async () => {
+describe("JWT issuance", () => {
+  it("issues ES256 per template (App Store Connect style), reserved fields cannot be overridden", async () => {
     const kp = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
     await call("setupProtocol", {
       kind: "jwt", type: "jwt", name: "asc",
@@ -372,7 +372,7 @@ describe("JWT 签发", () => {
 });
 
 describe("TOTP", () => {
-  it("从 otpauth URI 设置并生成验证码，不暴露种子", async () => {
+  it("sets up from an otpauth URI and generates a code, without exposing the seed", async () => {
     const uri = "otpauth://totp/GitHub:me%40example.com?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=GitHub&digits=6";
     await call("setupProtocol", { kind: "totp", type: "totp", name: "gh", config: {}, secrets: { secret: uri } });
     const c = await call<{ code: string; issuer: string; account: string }>("totp", { type: "totp", name: "gh" });
@@ -384,7 +384,7 @@ describe("TOTP", () => {
 });
 
 describe("AWS", () => {
-  it("GetSessionToken 与 AssumeRole + TOTP MFA", async () => {
+  it("GetSessionToken and AssumeRole + TOTP MFA", async () => {
     const secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
     await call("setupProtocol", { kind: "aws", type: "aws", name: "dev", config: { access_key_id: "AKIAEXAMPLEKEY123456" }, secrets: { secret_access_key: secret } });
     const c = await call<{ session_token: string; access_key_id: string }>("aws", { type: "aws", name: "dev" });
@@ -403,7 +403,7 @@ describe("AWS", () => {
     assert.equal(JSON.stringify(await call("get", { type: "aws", name: "prod" })).includes(secret), false);
   });
 
-  it("mfa_totp 必须指向 TOTP 凭证；access key 格式校验", async () => {
+  it("mfa_totp must point to a TOTP credential; access key format validation", async () => {
     await assert.rejects(
       call("setupProtocol", { kind: "aws", type: "aws", name: "x", config: { access_key_id: "ASIATEMPKEY123456789" }, secrets: { secret_access_key: "a".repeat(40) } }),
       /AKIA/,
@@ -411,8 +411,8 @@ describe("AWS", () => {
   });
 });
 
-describe("浏览器授权流程（本地回调）", () => {
-  it("PKCE + state：伪造的 state 被忽略，正确回调返回授权码", async () => {
+describe("browser authorization flow (local callback)", () => {
+  it("PKCE + state: a forged state is ignored, the correct callback returns the authorization code", async () => {
     let challenge = "";
     const r = await runBrowserFlow({
       authorizationUrl: "https://auth.example.com/authorize",
@@ -437,7 +437,7 @@ describe("浏览器授权流程（本地回调）", () => {
     assert.match(r.redirect_uri, /^http:\/\/127\.0\.0\.1:\d+\/callback$/);
   });
 
-  it("用户拒绝授权时报错", async () => {
+  it("errors when the user denies authorization", async () => {
     await assert.rejects(
       runBrowserFlow({
         authorizationUrl: "https://auth.example.com/authorize",

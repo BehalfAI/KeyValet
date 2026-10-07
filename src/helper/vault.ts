@@ -1,10 +1,10 @@
-// 加密凭证库。只依赖 node 内置模块 —— 这段代码以 root 运行。
+// Encrypted credential vault. Depends only on node's built-in modules -- this code runs as root.
 //
-// 目录布局（全部 0600/0700，属主为运行者，生产环境即 root）：
-//   master.key   32 字节随机主密钥
-//   vault.enc    AES-256-GCM 加密后的 JSON
-//   audit.log    审计日志（不含凭证值）
-//   .lock/       写锁（mkdir 原子性），多个 session 并发写入时串行化
+// Directory layout (all 0600/0700, owned by the process running it, which is root in production):
+//   master.key   32 random bytes, the master key
+//   vault.enc    JSON encrypted with AES-256-GCM
+//   audit.log    audit log (never contains credential values)
+//   .lock/       write lock (mkdir is atomic), serializing concurrent writes from multiple sessions
 
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -20,36 +20,36 @@ export interface TypeRecord {
   updatedAt: string;
 }
 
-/** 协议型凭证的种类；static 即普通的“存什么取什么” */
+/** The kinds of protocol-based credentials; static is just a plain “store whatever, retrieve whatever” */
 export const KINDS = ["static", "oauth2", "google_service_account", "github_app", "jwt", "totp", "aws"] as const;
 export type Kind = (typeof KINDS)[number];
 
 export interface HttpConfig {
-  /** 注入规则（static 凭证必填；token 类凭证省略，自动注入 Authorization: Bearer <token>） */
+  /** Injection rule (required for static credentials; omitted for token-based credentials, which auto-inject Authorization: Bearer <token>) */
   inject?: InjectRule;
-  /** 允许代理请求发往的域名（精确匹配；*.example.com 匹配其子域名） */
+  /** Hosts a proxied request is allowed to reach (exact match; *.example.com matches its subdomains) */
   allowed_hosts: string[];
-  /** 只能代理调用：禁止 get 读出秘密 */
+  /** Proxy-only: forbids get from reading out the secret */
   proxy_only: boolean;
   test?: TestRequest;
 }
 
 export interface CredentialRecord {
-  /** 缺省视为 static（兼容旧数据） */
+  /** Defaults to static if absent (for compatibility with old data) */
   kind?: Kind;
-  /** static 凭证的值；协议型凭证为空串 */
+  /** The value of a static credential; an empty string for protocol-based credentials */
   value: string;
-  /** 协议型凭证的非敏感配置（端点、client_id、scope 等） */
+  /** Non-sensitive configuration for a protocol-based credential (endpoint, client_id, scope, etc.) */
   config?: Record<string, unknown>;
-  /** 协议型凭证的长期秘密（refresh token、私钥、种子……），永不离开 root 进程 */
+  /** Long-lived secrets of a protocol-based credential (refresh token, private key, seed, ...); never leaves the root process */
   secrets?: Record<string, string>;
-  /** 协议运行状态（缓存的短期 token、过期时间等） */
+  /** Protocol runtime state (cached short-lived token, expiry, etc.) */
   state?: Record<string, unknown>;
-  /** 每次 setProtocol 生成的随机版本号；异步操作写回结果前校验，防止写进期间被替换的配置 */
+  /** Random version number generated on each setProtocol; validated before writing back an async operation's result, to prevent writing over a configuration that was replaced in the meantime */
   generation?: string;
-  /** 代理调用配置（注入规则、允许的域名、是否只能代理、验证请求） */
+  /** Proxy call configuration (injection rule, allowed hosts, proxy-only flag, test request) */
   http?: HttpConfig;
-  /** 创建时所用的模板 ID */
+  /** The template ID used at creation time */
   template?: string;
   description: string;
   attributes: Record<string, string>;
@@ -72,7 +72,7 @@ interface EncryptedFile {
 }
 
 const AAD = Buffer.from("keyvalet/vault/v1");
-/** 改名前（credential-mcp）写入的数据：读取时兼容，下次写入即升级为新标识 */
+/** Data written under the old name (credential-mcp) before the rename: read for compatibility, and upgraded to the new identifier on the next write */
 const LEGACY_AAD = Buffer.from("credential-mcp/vault/v1");
 const KEY_BYTES = 32;
 const LOCK_TIMEOUT_MS = 10_000;
@@ -146,7 +146,7 @@ function checkAttributes(a: unknown): Record<string, string> {
   return out;
 }
 
-/** 只取对象自身属性，避免 "constructor" 之类的名字命中原型链 */
+/** Reads only the object's own property, to avoid names like "constructor" hitting the prototype chain */
 function own<T>(obj: Record<string, T>, key: string): T | undefined {
   return Object.hasOwn(obj, key) ? obj[key] : undefined;
 }
@@ -173,7 +173,7 @@ export class Vault {
     this.lockPath = path.join(dir, ".lock");
   }
 
-  /** 创建/校验目录与主密钥。目录或文件权限不对时拒绝工作，而不是“修好”它。 */
+  /** Creates/validates the directory and master key. Refuses to operate if directory or file permissions are wrong, rather than “fixing” them. */
   init(): void {
     if (!fs.existsSync(this.dir)) {
       fs.mkdirSync(this.dir, { recursive: false, mode: 0o700 });
@@ -185,7 +185,7 @@ export class Vault {
       try {
         fs.writeFileSync(this.keyPath, key, { mode: 0o600, flag: "wx" });
       } catch (e) {
-        // 另一个 session 同时初始化：用它写入的那把
+        // Another session initialized concurrently: use the key it wrote
         if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
       }
     }
@@ -196,7 +196,7 @@ export class Vault {
 
     if (fs.existsSync(this.dataPath)) {
       this.assertPrivate(this.dataPath, false);
-      this.read(); // 尽早发现密钥/数据不匹配
+      this.read(); // catch a key/data mismatch as early as possible
     }
   }
 
@@ -224,7 +224,7 @@ export class Vault {
     if (!fs.existsSync(this.dataPath)) return emptyData();
     const file = JSON.parse(fs.readFileSync(this.dataPath, "utf8")) as EncryptedFile;
     if (file.v !== 1 || file.alg !== "aes-256-gcm") throw new VaultError(t("不支持的凭证库格式", "Unsupported vault format"));
-    const key = this.requireKey(); // 放在循环外：未初始化等错误要如实报告，不能被当成“解密失败”
+    const key = this.requireKey(); // kept outside the loop: errors like “not initialized” must be reported accurately, not masked as a “decryption failure”
     let plain: Buffer | null = null;
     for (const aad of [AAD, LEGACY_AAD]) {
       try {
@@ -234,7 +234,7 @@ export class Vault {
         plain = Buffer.concat([decipher.update(Buffer.from(file.ct, "base64")), decipher.final()]);
         break;
       } catch {
-        /* 试下一个标识 */
+        /* try the next identifier */
       }
     }
     if (!plain) throw new VaultError(t("凭证库解密失败：数据被篡改或主密钥不匹配", "Failed to decrypt vault: data has been tampered with or the master key does not match"));
@@ -258,7 +258,7 @@ export class Vault {
       tag: cipher.getAuthTag().toString("base64"),
       ct: ct.toString("base64"),
     };
-    // 原子写：临时文件 + fsync + rename，崩溃时不会留下半截文件
+    // Atomic write: temp file + fsync + rename, so a crash never leaves a half-written file
     const tmp = `${this.dataPath}.tmp-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
     const fd = fs.openSync(tmp, "wx", 0o600);
     try {
@@ -276,7 +276,7 @@ export class Vault {
     }
   }
 
-  /** 读-改-写，持有跨进程写锁 */
+  /** Read-modify-write, holding a cross-process write lock */
   private mutate<T>(fn: (data: VaultData) => T): T {
     this.lock();
     try {
@@ -300,11 +300,11 @@ export class Vault {
       }
       try {
         if (Date.now() - fs.statSync(this.lockPath).mtimeMs > LOCK_STALE_MS) {
-          fs.rmdirSync(this.lockPath); // 持锁进程已崩溃
+          fs.rmdirSync(this.lockPath); // the lock-holding process has crashed
           continue;
         }
       } catch {
-        continue; // 锁刚好被释放
+        continue; // the lock was just released
       }
       if (Date.now() > deadline) throw new VaultError(t("凭证库正忙（获取写锁超时）", "Vault is busy (timed out acquiring write lock)"));
       sleepSync(50);
@@ -319,7 +319,7 @@ export class Vault {
     }
   }
 
-  /** 读取审计日志末尾（最多 maxBytes 字节）的完整行 */
+  /** Reads the complete lines at the tail of the audit log (at most maxBytes bytes) */
   readAuditTail(maxBytes = 4 * 1024 * 1024): string[] {
     let fd: number;
     try {
@@ -333,7 +333,7 @@ export class Vault {
       const buf = Buffer.alloc(len);
       fs.readSync(fd, buf, 0, len, size - len);
       const lines = buf.toString("utf8").split("\n");
-      if (len < size) lines.shift(); // 第一行可能不完整
+      if (len < size) lines.shift(); // the first line may be incomplete
       return lines.filter((l) => l.trim());
     } finally {
       fs.closeSync(fd);
@@ -343,7 +343,7 @@ export class Vault {
   audit(entry: Record<string, unknown>): void {
     const line = JSON.stringify({ ts: new Date().toISOString(), pid: process.pid, ...entry }) + "\n";
     fs.appendFileSync(this.auditPath, line, { mode: 0o600 });
-    // 超过 10MB 轮转一次（保留上一份），防止无限增长
+    // Rotate once it exceeds 10MB (keeping one previous copy), to prevent unbounded growth
     try {
       if (fs.statSync(this.auditPath).size > 10 * 1024 * 1024) fs.renameSync(this.auditPath, `${this.auditPath}.1`);
     } catch {
@@ -351,7 +351,7 @@ export class Vault {
     }
   }
 
-  // ---------- 业务操作 ----------
+  // ---------- business operations ----------
 
   listTypes(): Array<{ name: string; description: string; count: number; createdAt: string }> {
     const data = this.read();
@@ -437,7 +437,7 @@ export class Vault {
     return !!creds && own(creds, name) !== undefined;
   }
 
-  /** 完整记录（含秘密）的深拷贝。只供 root helper 内部的协议实现和 root CLI 使用。 */
+  /** A deep copy of the full record (including secrets). For use only by protocol implementations inside the root helper and the root CLI. */
   getRecord(typeIn: unknown, nameIn: unknown): { type: string; name: string; record: CredentialRecord } {
     const type = normalizeType(typeIn);
     const name = normalizeName(nameIn);
@@ -448,7 +448,7 @@ export class Vault {
     return { type, name, record: structuredClone(c) };
   }
 
-  /** 读取 static 凭证的值。协议型凭证的秘密不能通过这里取出。 */
+  /** Reads the value of a static credential. A protocol-based credential's secrets cannot be retrieved this way. */
   get(typeIn: unknown, nameIn: unknown): {
     type: string;
     name: string;
@@ -482,14 +482,15 @@ export class Vault {
   }
 
   /**
-   * 写入凭证：先检查凭证类型，不存在则先创建类型，再写入值。
-   * 两步在同一把写锁、同一次落盘内完成，不会出现“类型建了但值没写”的中间态。
+   * Writes a credential: first checks the credential type, creating it first if it doesn't exist, then
+   * writes the value. Both steps complete within the same write lock and the same disk write, so there's
+   * no intermediate state where “the type was created but the value wasn't written.”
    */
   set(params: {
     type: unknown;
     name: unknown;
     value?: unknown;
-    /** 多个秘密字段（模板凭证）；提供时 value 可省略 */
+    /** Multiple secret fields (template credential); value may be omitted when this is provided */
     secrets?: Record<string, string>;
     http?: HttpConfig;
     template?: string;
@@ -536,8 +537,8 @@ export class Vault {
   }
 
   /**
-   * 写入协议型凭证。与 set 相同：类型不存在则先创建类型，再写入。
-   * config/secrets 的内容由调用方（protocols/*）校验。
+   * Writes a protocol-based credential. Same as set: the type is created first if it doesn't exist, then
+   * the credential is written. The contents of config/secrets are validated by the caller (protocols/*).
    */
   setProtocol(params: {
     type: unknown;
@@ -587,9 +588,10 @@ export class Vault {
   }
 
   /**
-   * 在写锁内修改协议凭证的 state/secrets（如刷新后的 token）。
-   * generation 必须与读取时一致：期间凭证被替换（哪怕种类相同）就拒绝写入，
-   * 否则刷新回来的 refresh token 可能被写进 agent 刚换上的恶意配置里。
+   * Modifies a protocol credential's state/secrets within the write lock (e.g. a refreshed token).
+   * generation must match what was read: if the credential was replaced in the meantime (even with the
+   * same kind), the write is refused -- otherwise a refreshed-back refresh token could get written into
+   * a malicious configuration the agent just swapped in.
    */
   patchRecord(typeIn: unknown, nameIn: unknown, kind: Kind, generation: string | undefined, fn: (record: CredentialRecord) => void): void {
     const type = normalizeType(typeIn);
@@ -605,7 +607,7 @@ export class Vault {
     });
   }
 
-  /** 修改代理调用配置（任何种类的凭证）。fn 返回新的配置；校验由调用方完成。 */
+  /** Modifies the proxy call configuration (for a credential of any kind). fn returns the new configuration; validation is done by the caller. */
   updateHttp(typeIn: unknown, nameIn: unknown, fn: (record: CredentialRecord) => HttpConfig | undefined): void {
     const type = normalizeType(typeIn);
     const name = normalizeName(nameIn);
