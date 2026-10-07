@@ -1,0 +1,20 @@
+{
+  "description": "KeyValet: store secrets the user pastes into the chat, and ask before a literal key is written to a file or shell command",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" prompt", "timeout": 10 }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          { "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" tool", "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}

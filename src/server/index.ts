@@ -28,6 +28,8 @@ const server = new McpServer(
         "邮箱（Outlook、Gmail）IMAP/SMTP：用 credential_oauth_login（provider=outlook 或 google）授权，" +
         "credential_access_token 传 format=xoauth2 取认证字符串，credential_imap_test 验证登录。\n" +
         "保存秘密时不要向用户索要明文：省略 value/client secret 等参数让用户在原生弹窗中输入，私钥类文件用文件路径参数导入。\n" +
+        "但如果用户已经在对话中给出了 API key、token、密码等秘密，请主动把它存进 KeyValet（credential_set 传 value，能匹配模板时带上 template），" +
+        "而不是写进 .env、配置文件、命令行或记忆；之后通过代理或网关使用它。\n" +
         "不要把读取到的凭证值回显给用户或写入文件/日志，除非用户明确要求。",
       "KeyValet: a local credential broker. Using a credential triggers Touch ID authentication (showing the stated purpose).\n" +
         "Tools that read credentials, fetch tokens or modify credentials all require purpose describing this specific use (concrete and truthful, e.g. \"Call OpenAI to generate a summary\"); " +
@@ -41,6 +43,8 @@ const server = new McpServer(
         "Mailboxes (Outlook, Gmail) over IMAP/SMTP: authorize with credential_oauth_login (provider=outlook or google), " +
         "get the auth string with credential_access_token format=xoauth2, and verify login with credential_imap_test.\n" +
         "When saving secrets, never ask the user for plaintext: omit value / client secret parameters so the user enters them in a native dialog, and import private-key files via the file path parameters.\n" +
+        "But if the user has already given an API key, token, password or other secret in the chat, proactively store it in KeyValet (credential_set with value, plus template when one matches) " +
+        "instead of writing it to .env, config files, command lines or memory; then use it through the proxy or gateway.\n" +
         "Do not echo credential values back to the user or write them to files/logs unless the user explicitly asks.",
     ),
   },

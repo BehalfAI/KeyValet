@@ -127,6 +127,7 @@ Listing, templates and audit queries never need Touch ID.
 /keyvalet:status               # current mode, remembered-until, grants of this session
 /keyvalet:lock                 # lock now and forget the remembered authorization
 /keyvalet:audit 20             # recent usage
+/keyvalet:add stripe           # store a new key via the private dialog
 ```
 
 Rules that keep this safe:
@@ -135,6 +136,17 @@ Rules that keep this safe:
 - A client can only make it **stricter**: e.g. register Codex with `KEYVALET_GRANT_MODE=per_use`; the stricter of the global and the client setting wins.
 - In `remember` mode any local process can use your credentials without a prompt until the window ends (secrets still stay hidden and every use is audited). `/keyvalet:lock` ends it early.
 - From a terminal: `keyvalet grant-mode remember 8`, `keyvalet grant-mode forget`.
+
+### Keeping KeyValet up to date (Claude Code plugin)
+
+The plugin makes Claude Code maintain your vault for you:
+
+- **Paste a key in the chat** ("here's my Stripe key: sk_live_…") and Claude stores it in KeyValet with the matching template, then uses it through the proxy or gateway instead of a `.env` file. A `UserPromptSubmit` hook recognizes ~25 key formats (OpenAI, Anthropic, GitHub, AWS, Stripe, Slack, Google, …) and tells Claude what to store, showing only a masked preview.
+- **Better: `/keyvalet:add openai`** — you type the key into KeyValet's private dialog, so it never passes through the chat or the model provider's logs.
+- **Before a literal key is written to a file or shell command**, a `PreToolUse` hook asks you to confirm and points Claude to KeyValet instead.
+- Claude also offers to move secrets it finds in `.env`/config files into KeyValet, and to replace a stored key when it stops working (401/403).
+
+Disable the hooks with `KEYVALET_HOOKS=off` in the environment Claude Code runs in.
 
 ### Purpose and audit
 

@@ -18,9 +18,9 @@ macOS, Node.js 20+ ([nodejs.org](https://nodejs.org) or nvm) and Xcode Command L
 
 Just ask your agent:
 
-> Store my OpenAI key in KeyValet with the openai template.
+> /keyvalet:add openai
 
-A native dialog asks **you** for the key — it never passes through the chat.
+A native dialog asks **you** for the key — it never passes through the chat. Pasted a key into the chat anyway? Claude stores it in KeyValet for you instead of a `.env` file.
 
 > Use KeyValet to list my OpenAI models.
 
@@ -36,6 +36,7 @@ OAuth, refresh tokens and private keys stay in KeyValet; the agent only ever get
 - **You choose how often to touch** — per use, per credential (default), per session, or once and remembered for hours. Switch with `/keyvalet:mode` in Claude Code; loosening always needs your fingerprint.
 - **SDKs and streaming** — a local gateway lets scripts and SDKs (`OPENAI_BASE_URL=…`) stream without holding the real key.
 - **Every auth flow** — API keys (~50 templates), OAuth 2.0, Google service accounts, GitHub Apps, JWT, TOTP, AWS STS.
+- **Maintained for you** — in Claude Code, keys you share are stored automatically, and you're asked before a key gets hard-coded into a file or command.
 - **Audit log** — every unlock, read and call, with its purpose. Local only, nothing in the cloud.
 
 ## Learn more

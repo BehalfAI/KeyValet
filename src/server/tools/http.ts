@@ -44,6 +44,8 @@ export interface TemplateSetArgs {
   name: string;
   fields?: Record<string, string | number | boolean>;
   secret_fields?: string[];
+  /** 用户已在对话中提供的秘密值（如粘贴的 API key）：模板只有一个需输入的秘密字段时直接使用，不再弹窗 */
+  value?: string;
   allowed_hosts?: string[];
   proxy_only?: boolean;
   description?: string;
@@ -112,12 +114,26 @@ export async function setFromTemplate(s: Requester, a: TemplateSetArgs) {
       ),
     );
 
+  if (a.value !== undefined && (!a.value || wanted.length !== 1)) {
+    if (!a.value) throw new Error(t("value 为空", "value is empty"));
+    throw new Error(
+      t(
+        `模板 ${tpl.id} 需要 ${wanted.length} 个秘密字段（${wanted.join("、")}），不能只用 value；请省略 value 让用户在弹窗中逐个输入`,
+        `Template ${tpl.id} needs ${wanted.length} secret fields (${wanted.join(", ")}), so value alone is not enough; omit value and let the user enter them in dialogs`,
+      ),
+    );
+  }
+
   const exists = await guardOverwrite(s, type, a.name, a.overwrite);
 
   // ---- 弹窗输入秘密（文案只含模板名、字段名和校验过的域名） ----
   const secrets: Record<string, string> = {};
   for (const n of wanted) {
     const f = byName.get(n)!;
+    if (a.value !== undefined) {
+      secrets[n] = a.value; // 用户已在对话中给出
+      continue;
+    }
     const where = tpl.inject ? t(`\n该凭证只会被代理发送到：${hosts.join("、")}`, `\nThis credential will only be sent by the proxy to: ${hosts.join(", ")}`) : "";
     const v = await promptSecret(
       t(

@@ -1,10 +1,19 @@
 {
   "name": "keyvalet",
-  "version": "0.1.0",
-  "description": "Slash commands and usage guidance for KeyValet: control how often Touch ID is required, check status, lock, and review the audit log.",
-  "author": { "name": "BehalfAI", "url": "https://github.com/BehalfAI" },
+  "version": "0.2.0",
+  "description": "KeyValet for Claude Code: stores keys you share into KeyValet automatically, warns before secrets are hard-coded, and adds /keyvalet:add, /keyvalet:mode, /keyvalet:status, /keyvalet:lock and /keyvalet:audit.",
+  "author": {
+    "name": "BehalfAI",
+    "url": "https://github.com/BehalfAI"
+  },
   "homepage": "https://behalfai.github.io/KeyValet/",
   "repository": "https://github.com/BehalfAI/KeyValet",
   "license": "Apache-2.0",
-  "keywords": ["credentials", "secrets", "mcp", "touch-id", "security"]
+  "keywords": [
+    "credentials",
+    "secrets",
+    "mcp",
+    "touch-id",
+    "security"
+  ]
 }

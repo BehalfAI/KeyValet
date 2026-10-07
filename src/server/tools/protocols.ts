@@ -562,6 +562,10 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
         name: nameField,
         type: optType("aws"),
         access_key_id: z.string().describe(t("Access key ID（AKIA 开头）", "Access key ID (starts with AKIA)")),
+        secret_access_key: z
+          .string()
+          .optional()
+          .describe(t("仅当用户已在对话中给出时传入；否则省略，由用户在弹窗输入", "Pass only if the user already gave it in the chat; otherwise omit and the user enters it in a dialog")),
         region: z.string().optional().describe(t("STS 所用区域，默认 us-east-1", "Region used for STS, default us-east-1")),
         role_arn: z.string().optional().describe(t("要扮演的 IAM 角色 ARN", "ARN of the IAM role to assume")),
         external_id: z.string().optional(),
@@ -582,7 +586,7 @@ export function registerProtocolTools(server: McpServer, session: HelperSession)
         : undefined;
       const region = safeDisplay(a.region ?? "us-east-1", /^[a-z]{2}(-gov)?-[a-z]+-\d$/, "region");
       const accessKeyId = safeDisplay(a.access_key_id, /^AKIA[A-Z0-9]{12,124}$/, t("access_key_id（应为 AKIA 开头的长期密钥）", "access_key_id (must be a long-term key starting with AKIA)"));
-      const secret = await promptSecret(
+      const secret = a.secret_access_key || await promptSecret(
         t(
           `请输入 AWS secret access key：\n\n凭证：${norm(type)}/${norm(a.name)}\nAccess key ID：${accessKeyId}\n\n它只用于签名发往 sts.${region}.amazonaws.com 的请求。`,
           `Enter the AWS secret access key:\n\nCredential: ${norm(type)}/${norm(a.name)}\nAccess key ID: ${accessKeyId}\n\nIt is only used to sign requests to sts.${region}.amazonaws.com.`,

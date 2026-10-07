@@ -18,9 +18,9 @@ curl -fsSL https://behalfai.github.io/KeyValet/install.sh | sh
 
 直接对 agent 说：
 
-> 用 KeyValet 的 openai 模板保存我的 OpenAI key。
+> /keyvalet:add openai
 
-会弹出一个原生对话框，由**你**输入 key，它不会经过对话。
+会弹出一个原生对话框，由**你**输入 key，它不会经过对话。如果你还是把 key 贴进了对话，Claude 会主动把它存进 KeyValet，而不是写进 `.env`。
 
 > 用 KeyValet 列出我的 OpenAI 模型。
 
@@ -36,6 +36,7 @@ OAuth、refresh token、私钥都留在 KeyValet 里，agent 只拿到短期 tok
 - **你决定多久按一次指纹**：每次、每个凭证（默认）、每个会话，或按一次后记住几个小时。在 Claude Code 里用 `/keyvalet:mode` 切换，放宽一定要你的指纹；
 - **SDK 和流式输出**：本地网关让脚本和 SDK（`OPENAI_BASE_URL=…`）边收边输出，却拿不到真实 key；
 - **各种认证都支持**：API key（约 50 个模板）、OAuth 2.0、Google 服务账号、GitHub App、JWT、TOTP、AWS STS；
+- **自动维护**：在 Claude Code 里，你给出的密钥会被自动存进来；要把密钥硬编码进文件或命令时，会先问你；
 - **审计日志**：每次解锁、读取、调用都连同目的一起记录。只在本机，不上云。
 
 ## 了解更多

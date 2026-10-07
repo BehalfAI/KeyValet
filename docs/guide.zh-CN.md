@@ -229,6 +229,7 @@ OPENAI_BASE_URL=http://127.0.0.1:52011/<令牌>/api.openai.com/v1 OPENAI_API_KEY
 /keyvalet:status               # 当前模式、记住到何时、本会话已授权的凭证
 /keyvalet:lock                 # 立即锁定，并清除“记住”状态
 /keyvalet:audit 20             # 最近的使用记录
+/keyvalet:add stripe           # 在私密弹窗里保存新的密钥
 ```
 
 保证安全的规则：
@@ -237,6 +238,17 @@ OPENAI_BASE_URL=http://127.0.0.1:52011/<令牌>/api.openai.com/v1 OPENAI_API_KEY
 - 客户端只能**收严**：比如给 Codex 注册时加上 `KEYVALET_GRANT_MODE=per_use`，最终生效的是全局设置和客户端设置中更严格的那个。
 - `remember` 模式下，有效期内本机任何进程都能直接使用你的凭证，不会弹出提示。不过秘密依然看不到，每次使用照常记录。想提前结束，用 `/keyvalet:lock`。
 - 在终端里：`keyvalet grant-mode remember 8`、`keyvalet grant-mode forget`。
+
+## 让 Claude Code 主动维护凭证库（插件）
+
+装好插件后，Claude Code 会替你维护凭证库：
+
+- **在对话里贴了密钥**（“这是我的 Stripe key：sk_live_…”），Claude 会用对应模板把它存进 KeyValet，之后通过代理或网关使用，而不是写进 `.env`。`UserPromptSubmit` hook 能识别约 25 种密钥格式（OpenAI、Anthropic、GitHub、AWS、Stripe、Slack、Google 等），只把掩码后的预览告诉 Claude。
+- **更推荐 `/keyvalet:add openai`**：在 KeyValet 的私密弹窗里输入密钥，它不会经过对话，也不会进入模型服务商的日志。
+- **要把明文密钥写进文件或命令行时**，`PreToolUse` hook 会先请你确认，并提示 Claude 改用 KeyValet。
+- 发现 `.env` 或配置文件里的密钥时，Claude 会提议迁移到 KeyValet；已存的密钥失效（401/403）时，会提议替换。
+
+如需关闭这些 hook，在 Claude Code 的运行环境中设置 `KEYVALET_HOOKS=off`。
 
 ## 目的（purpose）与审计
 

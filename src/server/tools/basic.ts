@@ -132,11 +132,13 @@ export function registerBasicTools(server: McpServer, session: HelperSession): v
           "推荐传 template（用 credential_templates 搜索，如 openai、anthropic、github，或通用的 bearer / header / query / basic）：" +
           "按模板逐个弹窗输入秘密字段，并自动配置代理调用（credential_http_request）和验证。" +
           "value 和 value_file 都省略时会弹出 macOS 隐藏输入框让用户直接输入（推荐，凭证不经过 AI 上下文）；" +
+          "用户已在对话中给出秘密时，直接用 value 传入并主动保存。" +
           "多行内容（如私钥）用 value_file 从文件导入。覆盖已有凭证需要 overwrite=true，并且会弹窗请用户确认。",
         "Save a static credential (API key, password, token, SSH private key, etc.). The credential type is created first if it does not exist. " +
           "Passing template is recommended (search with credential_templates, e.g. openai, anthropic, github, or the generic bearer / header / query / basic): " +
           "the user is prompted for each secret field in a dialog, and proxied calls (credential_http_request) and verification are configured automatically. " +
           "If both value and value_file are omitted, a hidden macOS input dialog lets the user type the value directly (recommended - the secret never passes through the AI context); " +
+          "if the user already gave the secret in the chat, pass it via value and store it proactively. " +
           "import multi-line content (e.g. private keys) from a file with value_file. Overwriting an existing credential requires overwrite=true and the user is asked to confirm.",
       ),
       inputSchema: {
@@ -153,7 +155,15 @@ export function registerBasicTools(server: McpServer, session: HelperSession): v
         allowed_hosts: z.array(z.string()).optional().describe(t("仅模板：代理允许的域名（默认按模板计算）", "Template only: hosts the proxy may send to (default: derived from the template)")),
         proxy_only: z.boolean().optional().describe(t("仅模板：只能代理调用，禁止 credential_get 读出原值", "Template only: proxy-only - credential_get cannot read the raw value")),
         verify: z.boolean().optional().describe(t("仅模板：保存后立即验证（默认 true）", "Template only: verify right after saving (default true)")),
-        value: z.string().optional().describe(t("凭证值；省略则由用户在弹窗中输入", "Credential value; if omitted, the user enters it in a dialog")),
+        value: z
+          .string()
+          .optional()
+          .describe(
+            t(
+              "凭证值；省略则由用户在弹窗中输入。用户已在对话中给出密钥时直接传入（配合模板时，模板须只有一个秘密字段）",
+              "Credential value; if omitted, the user enters it in a dialog. Pass it when the user already gave the secret in the chat (with a template, the template must have a single secret field)",
+            ),
+          ),
         value_file: z.string().optional().describe(t("从该文件读取凭证值（内容不会进入 AI 上下文），如 ~/.ssh/id_ed25519", "Read the credential value from this file (content never enters the AI context), e.g. ~/.ssh/id_ed25519")),
         description: z.string().optional().describe(t("凭证说明，例如用途", "Credential description, e.g. what it is used for")),
         attributes: z
@@ -174,10 +184,10 @@ export function registerBasicTools(server: McpServer, session: HelperSession): v
       const { name, value, value_file, description, attributes, type_description, overwrite, purpose } = a;
       const s = session.scoped(purpose, { type: a.type, name });
       if (a.template) {
-        if (value || value_file || attributes) return fail(
+        if (value_file || attributes) return fail(
             t(
-              "使用模板时请用 fields 传非敏感字段，秘密字段会弹窗输入（不要传 value / value_file / attributes）。",
-              "With a template, pass non-sensitive fields via fields; secret fields are entered in a dialog (do not pass value / value_file / attributes).",
+              "使用模板时请用 fields 传非敏感字段；秘密字段会弹窗输入，或者用户已在对话中给出时通过 value 传入（不要传 value_file / attributes）。",
+              "With a template, pass non-sensitive fields via fields; secret fields are entered in a dialog, or passed via value when the user already gave it in the chat (do not pass value_file / attributes).",
             ),
           );
         const r = await setFromTemplate(s, { ...a, template: a.template });

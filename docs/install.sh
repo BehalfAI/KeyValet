@@ -77,7 +77,7 @@ if [ -z "${KEYVALET_NO_REGISTER:-}" ] && command -v claude >/dev/null 2>&1; then
     claude mcp add keyvalet --scope user -- "$INSTALL_DIR/bin/node" "$INSTALL_DIR/app/dist/server/index.js" >/dev/null
     say "Registered KeyValet with Claude Code."
   fi
-  # 插件：/keyvalet:mode、/keyvalet:status、/keyvalet:lock、/keyvalet:audit 以及使用指引
+  # 插件：/keyvalet:add、/keyvalet:mode、/keyvalet:status、/keyvalet:lock、/keyvalet:audit 以及使用指引
   if claude plugin marketplace list 2>/dev/null | grep -q keyvalet; then
     claude plugin marketplace update keyvalet >/dev/null 2>&1 || true
   else
@@ -87,7 +87,7 @@ if [ -z "${KEYVALET_NO_REGISTER:-}" ] && command -v claude >/dev/null 2>&1; then
     claude plugin update keyvalet@keyvalet >/dev/null 2>&1 || true
     say "Updated the KeyValet plugin for Claude Code."
   elif claude plugin install keyvalet@keyvalet >/dev/null 2>&1; then
-    say "Installed the KeyValet plugin (/keyvalet:mode, /keyvalet:status, /keyvalet:lock, /keyvalet:audit)."
+    say "Installed the KeyValet plugin (/keyvalet:add, /keyvalet:mode, /keyvalet:status, /keyvalet:lock, /keyvalet:audit)."
   else
     say "Could not install the Claude Code plugin automatically; run: claude plugin marketplace add $REPO && claude plugin install keyvalet@keyvalet"
   fi
