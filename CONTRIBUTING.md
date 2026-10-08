@@ -4,21 +4,32 @@ Thanks for your interest! KeyValet handles secrets and runs code as root, so cha
 
 ## Setup
 
+The live implementation is the Rust workspace in `rust/` (what `scripts/install.sh` actually builds and ships):
+
 ```sh
-npm install
-npm test
+cd rust
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo build --workspace --locked
+cargo test --workspace --locked
 ```
 
-Tests run as your normal user in temporary directories with local mock servers — no root, no network, no Touch ID needed. Install (`./scripts/install.sh`) only when you want to try the real flow.
+CI runs exactly these four commands; a PR with `cargo clippy` warnings or unformatted code will not pass. Tests run as your normal user in temporary directories with local mock servers — no root, no network, no Touch ID needed. Install (`./scripts/install.sh`) only when you want to try the real flow.
+
+The TypeScript tree under `src/` predates the Rust rewrite and is kept for now; `npm install && npm test` still exercises it. New work goes in `rust/`.
 
 ## Ground rules
 
-- **Security checks belong in the root helper (`src/helper`)**, never only in the MCP server (`src/server`): an agent can talk to the helper directly.
+- **Security checks belong in the root helper (`rust/crates/kv-helper`)**, never only in the MCP server (`rust/crates/kv-mcp`): an agent can talk to the helper directly.
 - Never put agent-controlled free text into secret-input dialogs; only validated identifiers/hosts.
 - Never return, log or include in error messages any secret (or a string built from one).
-- The helper depends only on Node.js built-ins.
+- Keep the helper's dependency list small; justify any new crate in the PR description.
 - Every security-relevant change needs a regression test.
 - Keep `README.md`, `README.zh-CN.md`, `docs/guide.md`, `docs/guide.zh-CN.md` and `SECURITY.md` in sync with behavior changes.
+
+## Sign-off (DCO)
+
+Every commit must be signed off (`git commit -s`), certifying you have the right to submit the change under [the Developer Certificate of Origin](https://developercertificate.org/). This is a `Signed-off-by: Name <email>` trailer, not a cryptographic signature — most contributors just add `-s` to their usual `git commit`. PRs with unsigned commits will be asked to amend before merge.
 
 ## Templates
 

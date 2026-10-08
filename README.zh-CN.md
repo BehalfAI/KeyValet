@@ -43,7 +43,7 @@ OAuth、refresh token、私钥都留在 KeyValet 里，agent 只拿到短期 tok
 
 - [使用指南](docs/guide.zh-CN.md)：概念、全部工具、模板、网关、命令行
 - [安全模型](SECURITY.md)：能保证什么，不能保证什么
-- [参与贡献](CONTRIBUTING.md)
+- [参与贡献](CONTRIBUTING.md) · [行为准则](CODE_OF_CONDUCT.md) · [治理](GOVERNANCE.md) · [商标政策](TRADEMARK.md)
 
 卸载：`curl -fsSL https://keyvalet.dev/install.sh | sh -s -- --uninstall`
 

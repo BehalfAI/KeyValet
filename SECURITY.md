@@ -17,16 +17,16 @@ Please **do not** open a public issue. Use GitHub's private vulnerability report
 | Component | Runs as | Trusted? |
 |---|---|---|
 | AI agent / MCP client | your user | **Semi-trusted.** May be prompt-injected. May speak MCP to the KeyValet server *and* may run arbitrary commands as your user (including talking to the helper directly). |
-| KeyValet MCP server (`src/server`) | your user | Convenience layer. **Security checks never rely on it alone.** |
-| Root helper (`src/helper`) | root | Trusted. Enforces every security decision. |
-| Touch ID program (`touchid`) | your user (dropped from root) | Trusted binary: root-owned, hardened-runtime signed; result returned to the helper via exit code. |
+| KeyValet MCP server (`rust/crates/kv-mcp`) | your user | Convenience layer. **Security checks never rely on it alone.** |
+| Root helper (`rust/crates/kv-helper`) | root | Trusted. Enforces every security decision. |
+| Touch ID program (`rust/crates/kv-touchid`) | your user (dropped from root) | Trusted binary: root-owned, hardened-runtime signed; result returned to the helper via exit code. |
 | macOS (sudo, LocalAuthentication, osascript) | — | Trusted. |
 
 ## What KeyValet guarantees
 
 Assuming macOS and the installed files are not compromised:
 
-1. **No secret without the device owner.** The vault (`/var/db/keyvalet`, root, `0700`, AES-256-GCM) is only readable by root. The only passwordless sudo rule allows exactly `/usr/local/lib/keyvalet/bin/node /usr/local/lib/keyvalet/app/dist/helper/main.js`. Before serving any request the helper requires device-owner authentication (Touch ID, or the login password in the system dialog) with the stated purpose shown.
+1. **No secret without the device owner.** The vault (`/var/db/keyvalet`, root, `0700`, AES-256-GCM) is only readable by root. The only passwordless sudo rule allows exactly `/usr/local/lib/keyvalet/bin/kv-helper`. Before serving any request the helper requires device-owner authentication (Touch ID, or the login password in the system dialog) with the stated purpose shown.
 2. **You set the cadence, and only you can loosen it.** Grant modes: `per_use`, `per_credential` (default; approving one credential does not unlock others), `per_session`, `remember` (N hours across sessions). The mode lives in root-only settings; loosening requires device-owner authentication (Touch ID) in the root helper, so an agent cannot loosen it by itself — not even via the `/keyvalet:mode` slash command it may be asked to run. Clients can only tighten it (`KEYVALET_GRANT_MODE`).
 3. **Long-term protocol secrets never leave the root helper.** Agents receive only derived, short-lived material (access tokens, installation tokens, signed JWTs, TOTP codes, STS credentials) or proxied responses.
 4. **Proxy-only credentials are never revealed** through `get`, `accessToken`, error messages or (best effort, see below) proxied responses.
@@ -45,13 +45,13 @@ Assuming macOS and the installed files are not compromised:
 - **The stated purpose is unverified.** It is the agent's claim; it is shown and logged, not checked.
 - **Approving a malicious prompt.** Malware running as your user can trigger the same Touch ID prompt (the source directory shown is supplied by the client). If you approve it, it gets the grant.
 - **Upstream reflection beyond redaction.** Responses are redacted for the exact secret and common encodings (URL, form, JSON escapes, base64/base64url, hex, case-insensitive), and binary responses containing a secret are refused — but an allowed host that transforms and echoes a secret in some other encoding could still leak it. Only allow hosts you trust.
-- **Compromise of root or macOS**, physical attacks, or a compromised Node.js runtime at install time (the installer copies a statically linked Node binary into a root-owned directory and refuses Homebrew's node).
+- **Compromise of root or macOS**, physical attacks, or a compromised build: the installer downloads the repository source over HTTPS from GitHub and builds it locally with `cargo build --release --locked` (exact dependency versions from the committed `Cargo.lock`). It does not yet verify a signature or checksum on the downloaded source — pin a release tag (`KEYVALET_VERSION=vX.Y.Z`) and audit it yourself if that matters to you.
 - **Secrets after they are handed out.** Values returned by `credential_get` and short-lived tokens are in the agent's context and may be retained by the model provider.
 - **Denial of service.** An agent can delete nothing without your confirmation, but it can spam requests (rate-limited prompts, 30 s cooldown after failed authentication).
 
 ## Design notes
 
-- The helper verifies at startup that it, all of its code, and the Node binary are root-owned, not group/other-writable and not symlinked; otherwise it refuses to run.
+- The helper verifies at startup that it and every file it loads are root-owned, not group/other-writable and not symlinked; otherwise it refuses to run.
 - Concurrent changes are guarded: credential records carry a random generation ID so that a refresh that completes after the record was replaced cannot write tokens into the new (possibly attacker-controlled) configuration; proxy-config changes re-check the configuration after the confirmation dialog.
 - Root-helper hardening: bounded line size, bounded in-flight requests, bounded response sizes (streamed with limits), no automatic decompression.
 - The legacy `credential-mcp` vault format (pre-rename) is still readable and is upgraded on the next write.

@@ -43,7 +43,7 @@ OAuth, refresh tokens and private keys stay in KeyValet; the agent only ever get
 
 - [Guide](docs/guide.md) — concepts, all tools, templates, gateway, CLI
 - [Security model](SECURITY.md) — what KeyValet guarantees, and what it doesn't
-- [Contributing](CONTRIBUTING.md)
+- [Contributing](CONTRIBUTING.md) · [Code of Conduct](CODE_OF_CONDUCT.md) · [Governance](GOVERNANCE.md) · [Trademark policy](TRADEMARK.md)
 
 Uninstall: `curl -fsSL https://keyvalet.dev/install.sh | sh -s -- --uninstall`
 
