@@ -351,7 +351,7 @@
     <div class="install">
       <div>
         <p><span lang="en">One command. It checks the requirements, asks for your password once, and sets up Claude Code for you. Run it again to upgrade.</span><span lang="zh">一条命令。它会检查运行环境，要你输一次密码，并自动配置好 Claude Code。重跑即可升级。</span></p>
-        <pre><code>curl -fsSL https://behalfai.github.io/KeyValet/install.sh | sh</code></pre>
+        <pre><code>curl -fsSL https://keyvalet.dev/install.sh | sh</code></pre>
         <p><span lang="en">Needs macOS, Node.js 20+ from nodejs.org or nvm, and the Xcode Command Line Tools.</span><span lang="zh">需要 macOS、来自 nodejs.org 或 nvm 的 Node.js 20+，以及 Xcode 命令行工具。</span></p>
       </div>
       <div>
@@ -374,7 +374,7 @@
 
 <script>
   // 仓库地址只在这里配置一次（部署时替换）
-  const REPO = "https://github.com/BehalfAI/KeyValet";
+  const REPO = "https://github.com/KeyValet/KeyValet";
   document.querySelectorAll("[data-repo]").forEach((a) => (a.href = REPO));
   document.querySelectorAll("[data-repo-file]").forEach((a) => (a.href = `${REPO}/blob/main/${a.dataset.repoFile}`));
   document.querySelectorAll("[data-clone]").forEach((el) => (el.textContent = `git clone ${REPO}.git`));

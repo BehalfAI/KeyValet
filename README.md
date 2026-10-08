@@ -4,12 +4,12 @@
 
 KeyValet lets Claude Code, Cursor and other AI agents use your API keys and OAuth accounts — without ever seeing them. You approve each credential with Touch ID, KeyValet makes the call, and every use is logged.
 
-[Website](https://behalfai.github.io/KeyValet/) · [Guide](docs/guide.md) · [Security](SECURITY.md) · [简体中文](README.zh-CN.md)
+[Website](https://keyvalet.dev/) · [Guide](docs/guide.md) · [Security](SECURITY.md) · [简体中文](README.zh-CN.md)
 
 ## Install
 
 ```sh
-curl -fsSL https://behalfai.github.io/KeyValet/install.sh | sh
+curl -fsSL https://keyvalet.dev/install.sh | sh
 ```
 
 macOS, Node.js 20+ ([nodejs.org](https://nodejs.org) or nvm) and Xcode Command Line Tools. You'll be asked for your password once. Claude Code is configured automatically; for other MCP clients see the [guide](docs/guide.md#install).
@@ -45,6 +45,6 @@ OAuth, refresh tokens and private keys stay in KeyValet; the agent only ever get
 - [Security model](SECURITY.md) — what KeyValet guarantees, and what it doesn't
 - [Contributing](CONTRIBUTING.md)
 
-Uninstall: `curl -fsSL https://behalfai.github.io/KeyValet/install.sh | sh -s -- --uninstall`
+Uninstall: `curl -fsSL https://keyvalet.dev/install.sh | sh -s -- --uninstall`
 
-Apache-2.0 · by [BehalfAI](https://github.com/BehalfAI)
+Apache-2.0 · by [Simvito Limited](https://github.com/KeyValet)

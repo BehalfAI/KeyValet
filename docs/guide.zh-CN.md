@@ -60,13 +60,13 @@ KeyValet 是一个运行在 macOS 本机的「AI agent 凭证代理」。Claude 
 安装会写入 `/etc/sudoers.d/keyvalet`，只允许你免密运行凭证库 helper。写入前后都会用 `visudo` 校验，卸载时会删除。
 
 ```sh
-curl -fsSL https://behalfai.github.io/KeyValet/install.sh | sh
+curl -fsSL https://keyvalet.dev/install.sh | sh
 ```
 
 这条命令会下载最新版本（没有正式版本时用 `main` 分支），检查运行环境，运行安装程序（要输一次密码）；如果装了 Claude Code，还会自动注册 MCP。
 
 - 升级：重跑同一条命令，凭证库不受影响；
-- 卸载：`curl -fsSL https://behalfai.github.io/KeyValet/install.sh | sh -s -- --uninstall`；
+- 卸载：`curl -fsSL https://keyvalet.dev/install.sh | sh -s -- --uninstall`；
 - 从源码安装：克隆仓库后运行 `./scripts/install.sh`；
 - 没有 Claude Code 的话，手动注册：命令为 `/usr/local/lib/keyvalet/bin/node`，参数为 `/usr/local/lib/keyvalet/app/dist/server/index.js`。
 

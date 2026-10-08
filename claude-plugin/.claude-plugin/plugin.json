@@ -3,11 +3,11 @@
   "version": "0.2.0",
   "description": "KeyValet for Claude Code: stores keys you share into KeyValet automatically, warns before secrets are hard-coded, and adds /keyvalet:add, /keyvalet:mode, /keyvalet:status, /keyvalet:lock and /keyvalet:audit.",
   "author": {
-    "name": "BehalfAI",
-    "url": "https://github.com/BehalfAI"
+    "name": "Simvito Limited",
+    "url": "https://github.com/KeyValet"
   },
-  "homepage": "https://behalfai.github.io/KeyValet/",
-  "repository": "https://github.com/BehalfAI/KeyValet",
+  "homepage": "https://keyvalet.dev/",
+  "repository": "https://github.com/KeyValet/KeyValet",
   "license": "Apache-2.0",
   "keywords": [
     "credentials",

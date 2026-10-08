@@ -4,12 +4,12 @@
 
 KeyValet 让 Claude Code、Cursor 等 AI agent 使用你的 API key 和 OAuth 账号，却看不到它们。每个凭证由你用 Touch ID 批准，由 KeyValet 代为调用，每次使用都有记录。
 
-[官网](https://behalfai.github.io/KeyValet/) · [使用指南](docs/guide.zh-CN.md) · [安全模型](SECURITY.md) · [English](README.md)
+[官网](https://keyvalet.dev/) · [使用指南](docs/guide.zh-CN.md) · [安全模型](SECURITY.md) · [English](README.md)
 
 ## 安装
 
 ```sh
-curl -fsSL https://behalfai.github.io/KeyValet/install.sh | sh
+curl -fsSL https://keyvalet.dev/install.sh | sh
 ```
 
 需要 macOS、Node.js 20+（来自 [nodejs.org](https://nodejs.org) 或 nvm）和 Xcode 命令行工具。安装时要输一次密码。会自动配置好 Claude Code；其他 MCP 客户端见[使用指南](docs/guide.zh-CN.md#安装)。
@@ -45,6 +45,6 @@ OAuth、refresh token、私钥都留在 KeyValet 里，agent 只拿到短期 tok
 - [安全模型](SECURITY.md)：能保证什么，不能保证什么
 - [参与贡献](CONTRIBUTING.md)
 
-卸载：`curl -fsSL https://behalfai.github.io/KeyValet/install.sh | sh -s -- --uninstall`
+卸载：`curl -fsSL https://keyvalet.dev/install.sh | sh -s -- --uninstall`
 
-Apache-2.0 · 来自 [BehalfAI](https://github.com/BehalfAI)
+Apache-2.0 · 来自 [Simvito Limited](https://github.com/KeyValet)

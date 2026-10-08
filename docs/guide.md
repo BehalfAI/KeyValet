@@ -60,10 +60,10 @@ KeyValet's answer: **secrets stay on your machine, owned by root. Agents ask; yo
 ## Install
 
 ```sh
-curl -fsSL https://behalfai.github.io/KeyValet/install.sh | sh
+curl -fsSL https://keyvalet.dev/install.sh | sh
 ```
 
-This downloads the latest release (or `main`), checks the requirements, runs the installer (it asks for your password once) and registers KeyValet with Claude Code if it is installed. Re-run it to upgrade; uninstall with `curl -fsSL https://behalfai.github.io/KeyValet/install.sh | sh -s -- --uninstall`. From a clone you can run `./scripts/install.sh` directly.
+This downloads the latest release (or `main`), checks the requirements, runs the installer (it asks for your password once) and registers KeyValet with Claude Code if it is installed. Re-run it to upgrade; uninstall with `curl -fsSL https://keyvalet.dev/install.sh | sh -s -- --uninstall`. From a clone you can run `./scripts/install.sh` directly.
 
 The installer builds everything, copies it to root-owned `/usr/local/lib/keyvalet`, creates the vault at `/var/db/keyvalet`, installs the `keyvalet` CLI, and adds **one** sudoers rule (`/etc/sudoers.d/keyvalet`) that lets your user start *only* the KeyValet helper without a password — the helper then requires Touch ID before doing anything. The rule is validated with `visudo` before and after installation.
 

@@ -11,6 +11,14 @@
   "author": "Guang",
   "license": "Apache-2.0",
   "description": "Give your AI agents a valet key, not your master key. A local credential broker for AI agents (MCP) on macOS.",
+  "homepage": "https://keyvalet.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KeyValet/KeyValet.git"
+  },
+  "bugs": {
+    "url": "https://github.com/KeyValet/KeyValet/issues"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",
     "zod": "^4.6.5"

@@ -2,14 +2,14 @@
   "name": "keyvalet",
   "description": "KeyValet — give your AI agents a valet key, not your master key. Plugins for the KeyValet credential broker.",
   "owner": {
-    "name": "BehalfAI",
-    "url": "https://github.com/BehalfAI"
+    "name": "Simvito Limited",
+    "url": "https://github.com/KeyValet"
   },
   "plugins": [
     {
       "name": "keyvalet",
       "source": "./claude-plugin",
-      "description": "Keeps your keys in KeyValet: stores secrets you share, warns before keys are hard-coded, and adds slash commands (requires the KeyValet MCP server: curl -fsSL https://behalfai.github.io/KeyValet/install.sh | sh).",
+      "description": "Keeps your keys in KeyValet: stores secrets you share, warns before keys are hard-coded, and adds slash commands (requires the KeyValet MCP server: curl -fsSL https://keyvalet.dev/install.sh | sh).",
       "version": "0.2.0"
     }
   ]

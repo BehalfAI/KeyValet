@@ -1,18 +1,18 @@
 #!/bin/sh
 # KeyValet one-line installer (macOS).
 #
-#   curl -fsSL https://behalfai.github.io/KeyValet/install.sh | sh
+#   curl -fsSL https://keyvalet.dev/install.sh | sh
 #
 # Downloads KeyValet from GitHub into a temporary directory, runs its installer
 # (which asks for your password once), registers it with Claude Code if present,
 # and cleans up. Re-run to upgrade.
 #
-#   Uninstall:          curl -fsSL https://behalfai.github.io/KeyValet/install.sh | sh -s -- --uninstall
+#   Uninstall:          curl -fsSL https://keyvalet.dev/install.sh | sh -s -- --uninstall
 #   Pin a version:      KEYVALET_VERSION=v0.1.0 sh install.sh      (default: latest release, else main)
 #   Skip registration:  KEYVALET_NO_REGISTER=1 sh install.sh
 set -eu
 
-REPO="BehalfAI/KeyValet"
+REPO="KeyValet/KeyValet"
 INSTALL_DIR=/usr/local/lib/keyvalet
 ACTION=install
 [ "${1:-}" = "--uninstall" ] && ACTION=uninstall
