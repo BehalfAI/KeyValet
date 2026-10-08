@@ -105,10 +105,47 @@ impl Requester<'_> {
     }
 }
 
+/// Field names worth showing in an approval prompt when present at the top level of a JSON
+/// request body, in priority order -- picked to cover the first batch of templates mentioned in
+/// the action plan (OpenAI/Anthropic -> model, GitHub -> repo, Slack -> channel, Stripe -> amount)
+/// without tying this to any specific template: any JSON body with one of these keys benefits,
+/// not just the six named services. Deliberately NOT a per-template declarative rule (the
+/// originally planned design) -- that needs the credential's template id, which isn't available
+/// here without an extra round trip to the vault just to enrich a display string; this plain,
+/// template-agnostic field list gets most of the same user-visible benefit for far less
+/// machinery. Revisit if a real need for per-template precision shows up.
+const SUMMARY_BODY_FIELDS: &[&str] = &["model", "repo", "channel", "amount", "subject", "text"];
+
+/// A short `key=value` built from the first one or two `SUMMARY_BODY_FIELDS` present at the top
+/// level of a JSON object body, e.g. `model=gpt-5` for an OpenAI/Anthropic chat completion body.
+/// String values are truncated and single-lined; nested objects/arrays are skipped (showing e.g.
+/// a whole `messages` array wouldn't fit a prompt and isn't the point -- the field names above
+/// are chosen to be short, identifying values).
+fn summarize_body(body: &Value) -> Option<String> {
+    let obj = body.as_object()?;
+    let parts: Vec<String> = SUMMARY_BODY_FIELDS
+        .iter()
+        .filter_map(|&field| {
+            let v = obj.get(field)?;
+            let shown = match v {
+                Value::String(s) => s.chars().take(40).collect::<String>().replace('\n', " "),
+                Value::Number(n) => n.to_string(),
+                Value::Bool(b) => b.to_string(),
+                _ => return None, // objects/arrays/null: not a short, identifying value
+            };
+            Some(format!("{field}={shown}"))
+        })
+        .take(2)
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
 /// `"METHOD host/path"` for an httpRequest/httpTest op's params, e.g. `"POST api.openai.com/v1/
 /// chat/completions"` -- mirrors `kv_proxy::proxy::describe_target`'s format (not reused directly:
 /// this crate doesn't otherwise depend on kv-proxy, which is the privileged helper's concern, not
 /// the unprivileged MCP server's). Deliberately drops the query string, same as the audit log.
+/// Appends a short `summarize_body` hint (e.g. `· model=gpt-5`) when the body is a JSON object
+/// with a recognized field.
 fn http_request_hint(params: &Map<String, Value>) -> Option<String> {
     let url = params.get("url")?.as_str()?;
     let method = params
@@ -116,7 +153,11 @@ fn http_request_hint(params: &Map<String, Value>) -> Option<String> {
         .and_then(Value::as_str)
         .unwrap_or("GET");
     let u = url::Url::parse(url).ok()?;
-    let s = format!("{} {}{}", method.to_uppercase(), u.host_str()?, u.path());
+    let mut s = format!("{} {}{}", method.to_uppercase(), u.host_str()?, u.path());
+    if let Some(summary) = params.get("body").and_then(summarize_body) {
+        s.push_str(" · ");
+        s.push_str(&summary);
+    }
     Some(s.chars().take(300).collect())
 }
 
@@ -591,4 +632,82 @@ fn install_problem() -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod request_hint_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn params(method: &str, url: &str, body: Option<Value>) -> Map<String, Value> {
+        let mut p = Map::new();
+        p.insert("method".into(), json!(method));
+        p.insert("url".into(), json!(url));
+        if let Some(b) = body {
+            p.insert("body".into(), b);
+        }
+        p
+    }
+
+    #[test]
+    fn plain_request_has_no_summary_suffix() {
+        let p = params("GET", "https://api.openai.com/v1/models", None);
+        assert_eq!(
+            http_request_hint(&p).unwrap(),
+            "GET api.openai.com/v1/models"
+        );
+    }
+
+    #[test]
+    fn openai_style_body_surfaces_the_model() {
+        let p = params(
+            "POST",
+            "https://api.openai.com/v1/chat/completions",
+            Some(json!({"model": "gpt-5", "messages": [{"role": "user", "content": "hi"}]})),
+        );
+        assert_eq!(
+            http_request_hint(&p).unwrap(),
+            "POST api.openai.com/v1/chat/completions · model=gpt-5"
+        );
+    }
+
+    #[test]
+    fn slack_style_body_surfaces_the_channel_not_the_long_text() {
+        let p = params(
+            "POST",
+            "https://slack.com/api/chat.postMessage",
+            Some(json!({"channel": "#general", "text": "deploy finished"})),
+        );
+        let hint = http_request_hint(&p).unwrap();
+        assert!(hint.contains("channel=#general"), "{hint}");
+        assert!(hint.contains("text=deploy finished"), "{hint}");
+    }
+
+    #[test]
+    fn a_long_or_multiline_field_value_is_truncated_and_single_lined() {
+        let body =
+            json!({"subject": "line one\nline two and then a lot more text past forty characters"});
+        let summary = summarize_body(&body).unwrap();
+        assert!(!summary.contains('\n'), "{summary}");
+        assert!(summary.len() < 60, "{summary}");
+    }
+
+    #[test]
+    fn a_body_with_no_recognized_fields_adds_nothing() {
+        let body = json!({"unrelated_field": "value"});
+        assert!(summarize_body(&body).is_none());
+    }
+
+    #[test]
+    fn a_non_object_body_is_ignored_without_panicking() {
+        assert!(summarize_body(&json!("just a string")).is_none());
+        assert!(summarize_body(&json!([1, 2, 3])).is_none());
+    }
+
+    #[test]
+    fn query_credential_http_request_without_url_has_no_hint() {
+        let mut p = Map::new();
+        p.insert("method".into(), json!("GET"));
+        assert!(http_request_hint(&p).is_none());
+    }
 }
