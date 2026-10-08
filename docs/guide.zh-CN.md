@@ -49,8 +49,8 @@ KeyValet 是一个运行在 macOS 本机的「AI agent 凭证代理」。Claude 
 
 - 解锁后，这个 session 中的 agent 能读取**所有**凭证。只在你信任的会话里解锁。
 - 读取到的凭证值会进入该 agent 的上下文，因此也会发给模型服务商。
-- 本工具防不住已经以你的用户身份运行、并且你主动配合的恶意程序。例如，你被诱导按下了它触发的 Touch ID。所以要看清 Touch ID 弹窗里显示的目的和来源目录。
-- `purpose` 由 agent 填写，审计日志记录的是 agent 声称的目的，无法自动验证真实性。
+- 本工具防不住已经以你的用户身份运行、并且你主动配合的恶意程序。例如，你被诱导按下了它触发的 Touch ID。所以要看清 Touch ID 弹窗里显示的目的、请求和来源目录。
+- `purpose` 由 agent 填写，「请求」那一行由 MCP 服务端根据即将发出的调用生成；两者都只是展示和记入审计，不会跟后续实际发生的调用做加密绑定，无法自动验证真实性。
 
 ## 安装
 
@@ -254,7 +254,7 @@ OPENAI_BASE_URL=http://127.0.0.1:52011/<令牌>/api.openai.com/v1 OPENAI_API_KEY
 ## 目的（purpose）与审计
 
 - 读取凭证（`credential_get`）、获取 token、TOTP 码或 AWS 临时凭证、测试邮箱、写入、修改、删除凭证，以及解锁（`credential_unlock`），都**必须**传 `purpose`；
-- 需要解锁时，`purpose` 会显示在 Touch ID 弹窗中，如「目的：读取订单 #6 的测试邮件」；
+- 需要解锁时，`purpose` 会显示在 Touch ID 弹窗中，如「目的：读取订单 #6 的测试邮件」；`credential_http_request`/`credential_test` 还会多显示一行「请求：」（method、host、path，不含查询参数），由即将发出的那次调用生成；
 - 每条操作都写入审计日志，记录时间、会话 ID、操作、凭证、种类、目的、结果、来源目录，**不含任何凭证值**；
 - root helper 会再检查一次：缺少 `purpose` 的读取或修改请求一律拒绝；
 - 用 `credential_audit_log` 查询，可按本会话（`this_session_only`）、凭证、操作、起始时间过滤。

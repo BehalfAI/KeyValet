@@ -219,6 +219,55 @@ async fn per_credential_unauthorized_denied_then_usable_after_grant_but_only_for
     );
 }
 
+/// The MCP server attaches `request_hint` (method + host + path of the HTTP call it's about to
+/// make) to the `grant` call for an HTTP-shaped op; `grant_credential` must fold it into the
+/// Touch ID reason, ahead of `purpose`. A plain, hint-less grant (e.g. the explicit
+/// `credential_grant` tool, or any non-HTTP op) must look exactly as before -- no empty
+/// "Request:" line.
+#[tokio::test]
+async fn grant_reason_includes_the_request_hint_when_the_mcp_server_supplies_one() {
+    let (_tmp, vault) = new_vault();
+    let fake = FakeAuth::new();
+    let mut auth = session_auth(&vault, GrantMode::PerCredential, fake.clone());
+    let confirmer = PanicConfirmer;
+
+    fake.push(true);
+    call(
+        &vault,
+        &mut auth,
+        &confirmer,
+        "grant",
+        json!({
+            "type": "api_key",
+            "name": "openai",
+            "purpose": "Summarize meeting notes",
+            "request_hint": "POST api.openai.com/v1/chat/completions",
+        }),
+    )
+    .await;
+    let reason = &fake.reasons()[0];
+    assert!(
+        reason.contains("请求：POST api.openai.com/v1/chat/completions"),
+        "reason should show the request ahead of the purpose, got: {reason}"
+    );
+    assert!(reason.find("请求：").unwrap() < reason.find("目的：").unwrap());
+
+    fake.push(true);
+    call(
+        &vault,
+        &mut auth,
+        &confirmer,
+        "grant",
+        json!({"type": "api_key", "name": "github", "purpose": "Create a repo"}),
+    )
+    .await;
+    let plain_reason = &fake.reasons()[1];
+    assert!(
+        !plain_reason.contains("请求："),
+        "no request_hint -> no 请求： line, got: {plain_reason}"
+    );
+}
+
 #[tokio::test]
 async fn failed_touch_id_denies_grant_but_new_credentials_are_auto_authorized_and_metadata_ops_are_free(
 ) {

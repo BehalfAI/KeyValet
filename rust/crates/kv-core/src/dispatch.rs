@@ -217,13 +217,28 @@ async fn grant_credential<G: AuthorizeGate>(
         return Ok(json!({"granted": key, "already": true}));
     }
     let purpose = clean_purpose(get_str(p, "purpose").as_deref()).unwrap_or_default();
+    // Set only for an HTTP-shaped call: method + host + path, built by the MCP server from the
+    // same request it's about to send. Not a cryptographic binding -- just a more concrete,
+    // harder-to-fake-sounding line than `purpose` alone. Like `purpose`, it is shown and logged,
+    // never verified against what the helper actually ends up sending; see SECURITY.md.
+    let request = get_str(p, "request_hint")
+        .map(|h| clip(&h))
+        .unwrap_or_default();
+    let (req_zh, req_en) = if request.is_empty() {
+        (String::new(), String::new())
+    } else {
+        (
+            format!("请求：{request}\n"),
+            format!("Request: {request}\n"),
+        )
+    };
     let where_ = kv_i18n::t(
         &format!(
-            "目的：{purpose}\n来源目录（agent 提供）：{}",
+            "{req_zh}目的：{purpose}\n来源目录（agent 提供）：{}",
             ctx.cwd.as_deref().unwrap_or("未知")
         ),
         &format!(
-            "Purpose: {purpose}\nWorking directory (reported by agent): {}",
+            "{req_en}Purpose: {purpose}\nWorking directory (reported by agent): {}",
             ctx.cwd.as_deref().unwrap_or("unknown")
         ),
     );

@@ -24,7 +24,7 @@ A native dialog asks **you** for the key — it never passes through the chat. P
 
 > Use KeyValet to list my OpenAI models.
 
-Touch ID shows *which* credential and *why*. KeyValet makes the request; the agent only gets the response.
+Touch ID shows *which* credential, *the actual request* (method, host, path), and *why*. KeyValet makes the request; the agent only gets the response.
 
 > Connect my GitHub account through KeyValet and create a repo called demo.
 

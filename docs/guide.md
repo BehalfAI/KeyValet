@@ -84,7 +84,7 @@ credential_templates    { query: "openai" }
 credential_set          { template: "openai", name: "main", purpose: "Store my OpenAI key" }
                           → a native dialog asks YOU for the key (not the agent); proxy + test are configured and the key is verified
 credential_http_request { name: "main", url: "https://api.openai.com/v1/models", purpose: "List models" }
-                          → Touch ID: "use credential openai/main — purpose: List models" → response returned, key never shown
+                          → Touch ID: "Request: GET api.openai.com/v1/models — Purpose: List models" → response returned, key never shown
 credential_audit_log    { this_session_only: true }
 ```
 
@@ -150,7 +150,7 @@ Disable the hooks with `KEYVALET_HOOKS=off` in the environment Claude Code runs 
 
 ### Purpose and audit
 
-Every tool that reads, uses or changes a credential **requires** a `purpose`. It is shown in the Touch ID prompt and written to the audit log (`/var/db/keyvalet/audit.log`, root-only, rotated at 10 MB). The root helper enforces this too. The purpose is the agent's *claim* — read it before approving.
+Every tool that reads, uses or changes a credential **requires** a `purpose`. It is shown in the Touch ID prompt and written to the audit log (`/var/db/keyvalet/audit.log`, root-only, rotated at 10 MB). The root helper enforces this too. For `credential_http_request`/`credential_test`, the prompt also shows a request line (method, host, path — never the query string) built from the call about to be made. Both the purpose and the request line are the agent's *claim* — read them before approving.
 
 ### Proxy calls
 

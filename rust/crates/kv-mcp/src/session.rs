@@ -105,6 +105,21 @@ impl Requester<'_> {
     }
 }
 
+/// `"METHOD host/path"` for an httpRequest/httpTest op's params, e.g. `"POST api.openai.com/v1/
+/// chat/completions"` -- mirrors `kv_proxy::proxy::describe_target`'s format (not reused directly:
+/// this crate doesn't otherwise depend on kv-proxy, which is the privileged helper's concern, not
+/// the unprivileged MCP server's). Deliberately drops the query string, same as the audit log.
+fn http_request_hint(params: &Map<String, Value>) -> Option<String> {
+    let url = params.get("url")?.as_str()?;
+    let method = params
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or("GET");
+    let u = url::Url::parse(url).ok()?;
+    let s = format!("{} {}{}", method.to_uppercase(), u.host_str()?, u.path());
+    Some(s.chars().take(300).collect())
+}
+
 fn gen_session_id() -> String {
     use rand::RngCore;
     let mut bytes = [0u8; 6];
@@ -218,6 +233,14 @@ impl HelperSession {
         } else {
             REQUEST_TIMEOUT
         };
+        // For an HTTP-shaped op, show the Touch ID prompt what it's actually about to send
+        // (method + host + path -- not the query string, matching how this same call is later
+        // audited). Built from the very params this call is sending, not re-derived later, so it
+        // can't drift from the real request; it's still just a display hint, never a cryptographic
+        // binding -- see the comment beside `request_hint` in kv-core's `grant_credential`.
+        let request_hint = matches!(op, "httpRequest" | "httpTest")
+            .then(|| http_request_hint(&params))
+            .flatten();
         match self.send(op, params.clone(), timeout).await {
             Ok(v) => Ok(v),
             Err(e) => {
@@ -229,15 +252,22 @@ impl HelperSession {
                 let Some((ty, name)) = key.trim().split_once('/') else {
                     return Err(e);
                 };
-                self.grant(ty, name, unlock_purpose).await?;
+                self.grant(ty, name, unlock_purpose, request_hint.as_deref())
+                    .await?;
                 self.send(op, params, timeout).await
             }
         }
     }
 
     /// Authorizes this session to use a credential (concurrent grants are coalesced into a single
-    /// prompt -- see the `grant_lock` doc comment).
-    pub async fn grant(&self, ty: &str, name: &str, purpose: &str) -> Result<Value, SessionError> {
+    /// prompt -- see the `grant_lock` doc comment). `request_hint`: see `request_value`.
+    pub async fn grant(
+        &self,
+        ty: &str,
+        name: &str,
+        purpose: &str,
+        request_hint: Option<&str>,
+    ) -> Result<Value, SessionError> {
         let key = format!("{ty}/{name}");
         let _guard = self.grant_lock.lock().await;
         if self.last_granted.lock().unwrap().as_deref() == Some(key.as_str()) {
@@ -247,6 +277,9 @@ impl HelperSession {
         params.insert("type".into(), Value::String(ty.to_string()));
         params.insert("name".into(), Value::String(name.to_string()));
         params.insert("purpose".into(), Value::String(purpose.to_string()));
+        if let Some(h) = request_hint {
+            params.insert("request_hint".into(), Value::String(h.to_string()));
+        }
         let r = self.send("grant", params, GRANT_TIMEOUT).await?;
         *self.last_granted.lock().unwrap() = Some(key);
         Ok(r)

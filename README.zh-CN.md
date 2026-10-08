@@ -24,7 +24,7 @@ curl -fsSL https://keyvalet.dev/install.sh | sh
 
 > 用 KeyValet 列出我的 OpenAI 模型。
 
-Touch ID 弹窗写明要用哪个凭证、做什么。KeyValet 代为请求，agent 只拿到结果。
+Touch ID 弹窗写明要用哪个凭证、真实请求（method、host、path）、做什么。KeyValet 代为请求，agent 只拿到结果。
 
 > 通过 KeyValet 连接我的 GitHub 账号，建一个叫 demo 的仓库。
 
