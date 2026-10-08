@@ -735,7 +735,7 @@ impl Server {
     #[tool(description = kv_i18n::t(
         "搜索凭证模板（内置通用模板 + 自带模板库中的常用服务，以及可选的本地 n8n 模板库）。模板定义了需要哪些字段、哪些是秘密、如何注入请求（代理调用）、如何验证。传 id 查看完整模板。不需要解锁。",
         "Search credential templates (built-in generic templates + common services from the bundled catalog, plus the optional local n8n catalog). A template defines which fields are needed, which are secret, how they are injected into requests (proxied calls) and how to verify them. Pass id to see the full template. Does not require unlocking.",
-    ))]
+    ), annotations(read_only_hint = true))]
     async fn credential_templates(
         &self,
         Parameters(a): Parameters<TemplatesArgs>,
@@ -757,7 +757,7 @@ impl Server {
     #[tool(description = kv_i18n::t(
         "代理调用：由凭证库把凭证注入 HTTP 请求并发出，只返回响应——agent 看不到 API key / token。适用于配置了代理的 static 凭证（模板或手动规则）以及 oauth2 / google_service_account / github_app / jwt 凭证（自动注入 access token）。流式（SSE）响应会被完整接收，并在 stream.text 中返回从大模型增量拼出的完整文本；程序需要边收边输出时请用 credential_gateway。只允许 https、只能发往该凭证允许的域名；不跟随重定向；响应中出现的秘密会被替换为 [REDACTED]。",
         "Proxied call: the vault injects the credential into the HTTP request, sends it and returns only the response - the agent never sees the API key / token. Works with static credentials that have a proxy configuration (from a template or manual rules) and with oauth2 / google_service_account / github_app / jwt credentials (access token injected automatically). Streaming (SSE) responses are received in full, and the text assembled from LLM deltas is returned in stream.text; for programs that need to stream incrementally, use credential_gateway. HTTPS only, and only to the credential's allowed hosts; redirects are not followed; secrets appearing in the response are replaced with [REDACTED].",
-    ))]
+    ), annotations(open_world_hint = true))]
     async fn credential_http_request(
         &self,
         Parameters(a): Parameters<HttpRequestArgs>,
@@ -786,7 +786,7 @@ impl Server {
     #[tool(description = kv_i18n::t(
         "用凭证的验证请求（来自模板，或 credential_configure_http 设置的 test）检查凭证是否有效。只返回是否成功、状态码和响应摘要。",
         "Check whether a credential works using its verification request (from the template, or the test set via credential_configure_http). Returns only success, status code and a response summary.",
-    ))]
+    ), annotations(read_only_hint = true, open_world_hint = true))]
     async fn credential_test(&self, Parameters(a): Parameters<TestArgs>) -> CallToolResult {
         wrap(async {
             let target = CredentialTarget {
@@ -874,7 +874,7 @@ impl Server {
     #[tool(description = kv_i18n::t(
         "为凭证开通本地网关，给不能走 MCP 的程序（SDK、CLI、脚本）使用，支持流式响应。网关地址和本会话专属令牌写入一个仅你可读的环境变量文件（env_file）；用 `set -a; . <env_file>; set +a; <命令>` 运行程序，常见 SDK（OpenAI、Anthropic 等）的 BASE_URL 和 API_KEY 已设置好。程序把令牌当作 API key 发送，网关替换为真实凭证、只转发到允许的域名并对响应脱敏——程序和 agent 都拿不到真实 key。只接受你本人账户的进程连接；会话结束即失效。不要读取、打印该文件，也不要把其中的值写进命令行参数。凭证需先配置代理（credential_set 用模板，或 credential_configure_http）。",
         "Open a local gateway for a credential, for programs that cannot use MCP (SDKs, CLIs, scripts); streaming responses are supported. The gateway URL and a per-session token are written to an environment file readable only by you (env_file); run programs with `set -a; . <env_file>; set +a; <command>` - BASE_URL and API_KEY for common SDKs (OpenAI, Anthropic, …) are already set. The program sends the token as its API key; the gateway swaps in the real credential, forwards only to allowed hosts and redacts responses, so neither the program nor the agent ever holds the real key. Only processes of your own user account may connect; the token stops working when the session ends. Never read or print the file, or put its values in command-line arguments. The credential must have a proxy configuration (credential_set with a template, or credential_configure_http).",
-    ))]
+    ), annotations(open_world_hint = true))]
     async fn credential_gateway(&self, Parameters(a): Parameters<GatewayArgs>) -> CallToolResult {
         wrap(async {
             let target = CredentialTarget { r#type: a.r#type.clone(), name: Some(a.name.clone()) };

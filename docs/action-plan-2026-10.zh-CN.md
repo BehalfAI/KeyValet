@@ -38,9 +38,9 @@
 
 | # | 任务 | 产出 | 完成标准 |
 | --- | --- | --- | --- |
-| 0.1 | `代码` 提交五份规划文档和本文 | 一次 commit：`docs/*-2026-10.zh-CN.md` | `git log` 可见；不要提交 `rust/` 以外的半成品 |
+| 0.1 | `代码` 提交五份规划文档和本文 | ✅ 已完成 | `git log` 可见 |
 | 0.2 | `运营` 商标检索：USPTO、WIPO Global Brand Database、UKIPO、CNIPA、香港知识产权署，第 9 类与第 42 类，查 "KeyValet" 与 "Key Valet" | ✅ 初步检索已完成：`docs/trademark-check.md`——没查到软件/SaaS 类的注册商标冲突；"Key Valet" 这个名字被几家不相关的小公司在用（新泽西一家做汽车防盗硬件的 Key Valet Inc.、卡塔尔一家代客泊车公司），均非软件领域，WIPO 库被验证码挡住没能直接查。**这只是网络搜索式的初筛，不是专业检索**，真要正式注册商标或大规模投广告前建议花钱找律师或检索服务做一次正式查询 | 初筛无直接冲突，可以继续用这个名字；正式注册前再做一次专业检索 |
-| 0.3 | `运营` ~~注册 keyvalet.dev~~ **已完成**；防御性注册 .ai / .io / .app（可选，非阻塞）；DNS 托管；提交 HSTS 预加载；开 DNSSEC；设 CAA | 域名可解析到 GitHub Pages | `https://keyvalet.dev` 返回官网 |
+| 0.3 | `运营` ~~注册 keyvalet.dev~~ **已完成**；防御性注册 .ai / .io / .app（可选，非阻塞）；DNS 托管；提交 HSTS 预加载；开 DNSSEC；设 CAA | ✅ 域名与 DNS 已完成（Cloudflare 托管，10-09 从 GitHub Pages 切到 Cloudflare Pages，见下方记录）；HSTS/DNSSEC/CAA 还没做 | `https://keyvalet.dev` 返回官网——已验证，证书有效 |
 | 0.4 | `运营` GitHub 组织 `KeyValet` **已创建**；仓库 **已转移**到 `KeyValet/KeyValet`；本机 remote、README、`package.json`、两个插件 manifest、`install.sh`、`index.html` 里的地址 **已更新为 keyvalet.dev**（这几个文件后来又从 `docs/` 迁到了 `site/`，见下方 2026-10-09 的记录） | 旧链接自动重定向 | `curl -fsSL https://keyvalet.dev/install.sh` 可用（待 DNS 生效） |
 | 0.5 | `运营` 占住 npm、crates.io、PyPI 的 `keyvalet` 包名（发布占位版本） | — | ⏸ 2026-10-09 决定暂不占位：三个包名目前都还没人用，优先级不高，先放着；想占的时候 npm 已登录，crates.io/PyPI 还需单独登录 |
 | 0.6 | `运营` D-U-N-S **已完成**；开 Apple Developer Program 组织账号（待办）；开 Stripe 账号（待办——Antom 已配置好但技术选型复盘后改用 Stripe 作为 Team 自助订阅的主要收款渠道，理由见下方说明；Antom 保留配置，以后若做 APAC 场景可用） | 两个账号 | Stripe 可创建 Product；Apple 账号可建 App ID |
@@ -61,15 +61,15 @@
 | 1.1 | `代码` 在 `rust/crates/kv-core` 新增 `request.rs`：`UseRequest`、JCS 规范化、`digest`（A §7.2）；在 `src/helper/protocols/http.ts` 与 `kv-core/dispatch.rs` 的 HTTP 路径上生成它 | 结构体与单测 | 同一请求两次 digest 相同，改任一字段 digest 不同 |
 | 1.2 | `代码` Touch ID 文案改为四行结构（P 附录 A）：凭据与层级、「agent 说：」用途、真实请求、来源；先用 method + host + path，`summarize` 下周接 | `auth-gate.ts` / `auth_gate.rs` 文案改动 | ⏳ 部分完成：`credential_http_request`/`credential_test` 的 Grant 弹窗现在会在用途前多显示一行「请求：method host/path」（`kv-core/dispatch.rs` 的 `grant_credential` + `kv-mcp/session.rs` 的 `request_value`/`grant`，已过 `cargo fmt`/`clippy -D warnings`/`build`/`test`，新增单测）；还没做的：风险层级标注、「agent 说：」前缀框出用途、`summarize` 人类可读摘要——这些要等策略引擎（见下）落地 |
 | 1.3 | `代码` 审批绑定：审批结果带 digest 与一次性 nonce，执行前复核；nonce 存本地 SQLite（A §7.3） | `kv-core/approval.rs` | 重放同一审批第二次被拒；审批后改 body 被拒 |
-| 1.4 | `代码` 把 `rust/` 工作区提交进 git，CI 跑 `cargo test` 与 clippy | `.github/workflows/rust.yml` | CI 绿 |
-| 1.5 | `市场` 官网改版：Zola 项目 `site/`，首页（主张、GIF 占位、安装命令、三条支撑）、定价页、对比页、安全页；GitHub Pages 源切到 Actions 构建 | `site/` 与 `pages.yml` | keyvalet.dev 显示新站 |
+| 1.4 | `代码` 把 `rust/` 工作区提交进 git，CI 跑 `cargo test` 与 clippy | ✅ 早就做了：10-07 那次「Rewrite KeyValet in Rust」commit 已经把整个工作区提交，CI 的 `rust` job（`.github/workflows/test.yml`）本来就在跑 `fmt --check`/`clippy -D warnings`/`build`/`test` 四件套 | CI 绿 |
+| 1.5 | `市场` 官网改版：Zola 项目 `site/`，首页（主张、GIF 占位、安装命令、三条支撑）、定价页、对比页、安全页；GitHub Pages 源切到 Actions 构建 | ⏳ 部分完成，且走了不同的路：10-09 把原来混在 `docs/` 里的站点文件（`index.html`/`guide.md`/`install.sh` 等）迁到新的 `site/` 目录——这是因为发现 `docs/` 同时是发布根目录又放着内部规划文档，财务假设等内容被公开发布了，必须马上拆开（见上方事故记录）。顺带把发布方式从 GitHub Pages 换成了 Cloudflare Pages（CI 用 `cloudflare/wrangler-action`，一次性项目创建和域名绑定已手动做完）。**还没做的**：Zola 本身、定价页、对比页（内容已经在 `marketing/compare-1password.md` 写好，还没搬上站）、安全页、GIF、三条支撑的首屏文案——现在 `site/` 里还是旧的 `index.html`，不是这一项原本设想的改版 | keyvalet.dev 已经在用 Cloudflare Pages，证书有效；真正的"改版"（内容、设计）还没做 |
 
 ### 第 2 周
 
 | # | 任务 | 产出 | 完成标准 |
 | --- | --- | --- | --- |
 | 2.1 | `代码` 模板 `summarize` 规则：先写 OpenAI、Anthropic、GitHub、Stripe、AWS、Slack 六个（P §8） | `templates/catalog.json` 字段 + 渲染函数 | OpenAI 请求弹窗显示 `POST chat/completions · model=…` |
-| 2.2 | `代码` 全部 MCP 工具加 annotations（A §5.1） | 工具定义改动 | `credential_list` 等在 Claude Code 中不再触发写操作级权限提示 |
+| 2.2 | `代码` 全部 MCP 工具加 annotations（A §5.1） | ✅ 已完成：13 个工具标了注解——`credential_status/list/list_types/get/audit_log/templates` 标 `readOnlyHint`，`delete/delete_type` 标 `destructiveHint`，`http_request/gateway` 标 `openWorldHint`，`test/imap_test/graph_mail_test` 同时标 `readOnlyHint`+`openWorldHint`；其余（`set`、`configure_http`、各 `setup_*`、`oauth_login` 等）不打注解，按 MCP 规范默认当作"可能有副作用"处理，没有强行分类。新增 4 个单测（`kv-mcp/src/tools/basic.rs` 的 `annotation_tests`） | `credential_list` 等在 Claude Code 中不再触发写操作级权限提示；`cargo test` 验证注解值 |
 | 2.3 | `代码` `kv-hook` 二进制 + Claude Code 适配器，替换 `claude-plugin/hooks/secrets.mjs` 的逻辑；`run.sh` 只做转发（A §5.2） | `rust/crates/kv-hook` | 现有三个 hook 场景行为不变 |
 | 2.4 | `代码` Codex 适配器（同一 JSON 结构，目标 `~/.codex/hooks.json`） | 适配器 + manifest | 在 Codex 里把 key 写进 `.env` 被拦下 |
 | 2.5 | `市场` 录 60 秒演示（`marketing/demo-script.md`）；GIF 进 README 顶部；社交预览图 | GIF + MP4 | README 首屏可见 |

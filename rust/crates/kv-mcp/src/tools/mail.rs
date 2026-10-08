@@ -47,7 +47,7 @@ impl Server {
     #[tool(description = kv_i18n::t(
         "用 oauth2 凭证通过 XOAUTH2 登录 IMAP，只读打开收件箱（EXAMINE，不改变任何邮件状态）后退出，用于验证邮箱授权是否可用。Outlook/Microsoft 默认 outlook.office365.com，Google 默认 imap.gmail.com。不会返回 token。",
         "Log in to IMAP via XOAUTH2 using an oauth2 credential, open the inbox read-only (EXAMINE; no message state is changed), then log out. Use it to verify that mailbox authorization works. Defaults: outlook.office365.com for Outlook/Microsoft, imap.gmail.com for Google. Never returns the token.",
-    ))]
+    ), annotations(read_only_hint = true, open_world_hint = true))]
     async fn credential_imap_test(
         &self,
         Parameters(a): Parameters<ImapTestArgs>,
@@ -120,7 +120,7 @@ impl Server {
     #[tool(description = kv_i18n::t(
         "用 oauth2 凭证（Microsoft Graph，scope 含 Mail.Read）只读查看邮件夹：邮件总数、未读数和最近几封的时间/发件人/标题，用于验证 Outlook / Microsoft 365 邮箱授权是否可用。不改变任何邮件状态，不返回 token。",
         "Read a mail folder read-only using an oauth2 credential (Microsoft Graph, scope includes Mail.Read): total and unread counts plus the time/sender/subject of the most recent messages. Use it to verify that Outlook / Microsoft 365 mailbox authorization works. Changes no message state and never returns the token.",
-    ))]
+    ), annotations(read_only_hint = true, open_world_hint = true))]
     async fn credential_graph_mail_test(
         &self,
         Parameters(a): Parameters<GraphMailArgs>,

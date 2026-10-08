@@ -169,7 +169,7 @@ impl Server {
     #[tool(description = kv_i18n::t(
         "查看凭证库在本 session 中是否已解锁、授权模式、本会话已授权的凭证（不会触发认证）",
         "Show whether the vault is unlocked for this session, the grant mode, and which credentials this session has been granted (does not trigger authentication)",
-    ))]
+    ), annotations(read_only_hint = true))]
     async fn credential_status(&self) -> CallToolResult {
         wrap(async {
             let st = self.session.status().await;
@@ -276,7 +276,7 @@ impl Server {
         .await
     }
 
-    #[tool(description = kv_i18n::t("列出所有凭证类型及每种类型下的凭证数量", "List all credential types and the number of credentials of each type"))]
+    #[tool(description = kv_i18n::t("列出所有凭证类型及每种类型下的凭证数量", "List all credential types and the number of credentials of each type"), annotations(read_only_hint = true))]
     async fn credential_list_types(
         &self,
         Parameters(a): Parameters<ListTypesArgs>,
@@ -335,7 +335,7 @@ impl Server {
     #[tool(description = kv_i18n::t(
         "列出凭证（类型、名称、kind、说明和非敏感属性，不含凭证值）。kind 不是 static 的是协议凭证，需用对应工具取 token。",
         "List credentials (type, name, kind, description and non-sensitive attributes; no secret values). Credentials whose kind is not static are protocol credentials; use the matching tool to obtain tokens.",
-    ))]
+    ), annotations(read_only_hint = true))]
     async fn credential_list(&self, Parameters(a): Parameters<ListArgs>) -> CallToolResult {
         wrap(async {
             let purpose = a
@@ -356,7 +356,7 @@ impl Server {
     #[tool(description = kv_i18n::t(
         "读取一个凭证。static 凭证返回值及说明、非敏感属性；协议凭证（oauth2、google_service_account、github_app、jwt、totp、aws）只返回配置和状态，长期秘密不会返回，请用 credential_access_token / credential_totp_code / credential_aws_credentials 获取短期凭证。",
         "Read a credential. For static credentials, returns the value, description and non-sensitive attributes; for protocol credentials (oauth2, google_service_account, github_app, jwt, totp, aws), returns only configuration and status (long-lived secrets are never returned) - use credential_access_token / credential_totp_code / credential_aws_credentials to obtain short-lived credentials.",
-    ))]
+    ), annotations(read_only_hint = true))]
     async fn credential_get(&self, Parameters(a): Parameters<GetArgs>) -> CallToolResult {
         wrap(async {
             let target = CredentialTarget {
@@ -448,7 +448,7 @@ impl Server {
         wrap(super::http::credential_set_impl(self, a)).await
     }
 
-    #[tool(description = kv_i18n::t("删除一个凭证（会弹窗请用户确认）", "Delete a credential (the user is asked to confirm)"))]
+    #[tool(description = kv_i18n::t("删除一个凭证（会弹窗请用户确认）", "Delete a credential (the user is asked to confirm)"), annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true))]
     async fn credential_delete(&self, Parameters(a): Parameters<DeleteArgs>) -> CallToolResult {
         wrap(async {
             let s = self.session.scoped(a.purpose, None);
@@ -475,7 +475,7 @@ impl Server {
     #[tool(description = kv_i18n::t(
         "删除一个空的凭证类型（类型下还有凭证时会失败；会弹窗请用户确认）",
         "Delete an empty credential type (fails if it still contains credentials; the user is asked to confirm)",
-    ))]
+    ), annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true))]
     async fn credential_delete_type(
         &self,
         Parameters(a): Parameters<DeleteTypeArgs>,
@@ -513,7 +513,7 @@ impl Server {
     #[tool(description = kv_i18n::t(
         "查询凭证库的操作记录（最新的在前）：解锁、读取凭证、获取 token、修改/删除等，每条含时间、会话、操作、凭证、目的和结果。不含任何凭证值。可按本会话、凭证、操作、时间过滤。",
         "Query the vault's audit log (newest first): unlocks, credential reads, token requests, changes/deletions, etc. Each entry has time, session, operation, credential, purpose and result. Contains no credential values. Filter by this session, credential, operation or time.",
-    ))]
+    ), annotations(read_only_hint = true))]
     async fn credential_audit_log(
         &self,
         Parameters(a): Parameters<AuditLogArgs>,
@@ -581,5 +581,64 @@ impl Server {
             ))
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod annotation_tests {
+    //! The annotations below are display-only hints an MCP client (e.g. Claude Code) uses to
+    //! avoid an unnecessary write-level permission prompt for a call that can't change anything,
+    //! or to flag one that can destroy data -- see action-plan item 2.2 and SECURITY.md's trust
+    //! model. They're the client's business logic to trust or not; the helper's own security
+    //! checks (grant modes, Touch ID, the root helper) don't rely on them at all.
+    use crate::server::Server;
+
+    #[test]
+    fn reads_are_marked_read_only() {
+        for tool in [
+            Server::credential_status_tool_attr(),
+            Server::credential_list_tool_attr(),
+            Server::credential_list_types_tool_attr(),
+            Server::credential_get_tool_attr(),
+            Server::credential_audit_log_tool_attr(),
+            Server::credential_templates_tool_attr(),
+        ] {
+            let a = tool
+                .annotations
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} should carry annotations at all", tool.name));
+            assert_eq!(
+                a.read_only_hint,
+                Some(true),
+                "{} should be read_only_hint: true",
+                tool.name
+            );
+        }
+    }
+
+    #[test]
+    fn deletes_are_marked_destructive_and_not_read_only() {
+        for tool in [
+            Server::credential_delete_tool_attr(),
+            Server::credential_delete_type_tool_attr(),
+        ] {
+            let a = tool.annotations.as_ref().unwrap();
+            assert_eq!(a.read_only_hint, Some(false), "{}", tool.name);
+            assert_eq!(a.destructive_hint, Some(true), "{}", tool.name);
+        }
+    }
+
+    #[test]
+    fn proxied_network_calls_are_marked_open_world() {
+        let tool = Server::credential_http_request_tool_attr();
+        assert_eq!(tool.annotations.unwrap().open_world_hint, Some(true));
+    }
+
+    #[test]
+    fn a_tool_with_no_explicit_annotations_carries_none() {
+        // credential_set isn't obviously read-only, destructive, or open-world (it's a local
+        // write), so it's intentionally left unannotated -- the spec's own safe defaults
+        // (not read-only, potentially destructive) apply without us having to assert them here.
+        assert!(Server::credential_set_tool_attr().annotations.is_none());
     }
 }
