@@ -41,7 +41,7 @@
 | 0.2 | `运营` 商标检索：USPTO、WIPO Global Brand Database、UKIPO、CNIPA、香港知识产权署，第 9 类与第 42 类，查 "KeyValet" 与 "Key Valet" | ✅ 初步检索已完成：`docs/trademark-check.md`——没查到软件/SaaS 类的注册商标冲突；"Key Valet" 这个名字被几家不相关的小公司在用（新泽西一家做汽车防盗硬件的 Key Valet Inc.、卡塔尔一家代客泊车公司），均非软件领域，WIPO 库被验证码挡住没能直接查。**这只是网络搜索式的初筛，不是专业检索**，真要正式注册商标或大规模投广告前建议花钱找律师或检索服务做一次正式查询 | 初筛无直接冲突，可以继续用这个名字；正式注册前再做一次专业检索 |
 | 0.3 | `运营` ~~注册 keyvalet.dev~~ **已完成**；防御性注册 .ai / .io / .app（可选，非阻塞）；DNS 托管；提交 HSTS 预加载；开 DNSSEC；设 CAA | 域名可解析到 GitHub Pages | `https://keyvalet.dev` 返回官网 |
 | 0.4 | `运营` GitHub 组织 `KeyValet` **已创建**；仓库 **已转移**到 `KeyValet/KeyValet`；本机 remote、README、`package.json`、两个插件 manifest、`install.sh`、`docs/index.html` 里的地址 **已更新为 keyvalet.dev** | 旧链接自动重定向 | `curl -fsSL https://keyvalet.dev/install.sh` 可用（待 DNS 生效） |
-| 0.5 | `运营` 占住 npm、crates.io、PyPI 的 `keyvalet` 包名（发布占位版本） | 三个包页面 | 均显示归属 keyvalet 组织 |
+| 0.5 | `运营` 占住 npm、crates.io、PyPI 的 `keyvalet` 包名（发布占位版本） | — | ⏸ 2026-10-09 决定暂不占位：三个包名目前都还没人用，优先级不高，先放着；想占的时候 npm 已登录，crates.io/PyPI 还需单独登录 |
 | 0.6 | `运营` D-U-N-S **已完成**；开 Apple Developer Program 组织账号（待办）；开 Stripe 账号（待办——Antom 已配置好但技术选型复盘后改用 Stripe 作为 Team 自助订阅的主要收款渠道，理由见下方说明；Antom 保留配置，以后若做 APAC 场景可用） | 两个账号 | Stripe 可创建 Product；Apple 账号可建 App ID |
 | 0.7 | `开源` 开启 GitHub Private Vulnerability Reporting；加 `CODE_OF_CONDUCT.md`（Contributor Covenant 2.1）；加 issue 模板 4 种与 PR 模板（O 附录 D）；`CONTRIBUTING.md` 加 DCO 与 Rust 规范 | 文件进仓库 | 新建 issue 时出现模板选择 |
 | 0.8 | `开源` 写 `GOVERNANCE.md`（O 附录 A）与商标政策页（O 附录 B） | 两个文件 | 从 README 链接到它们 |
