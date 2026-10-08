@@ -4,6 +4,7 @@
 - 用法：这是五份规划文档（战略、产品、架构、营销、开源）的执行版。每一条都写明做什么、产出是什么、怎么算完成。按顺序做，遇到门槛先复盘再往下走。
 - 时间假设：一个人，每周约 40 小时投入 KeyValet（其余时间自由职业），其中约 8 小时营销与社区。
 - 章节索引：战略 S、产品 P、架构 A、营销 M、开源 O，例如「A §7.6」指架构文档第 7.6 节。
+- ⚠️ **2026-10-09 事故记录**：六份规划文档（本文件及战略、架构、产品、开源、商标检索）曾被当成普通文件放进 `docs/`，而 `docs/` 同时是 GitHub Pages 的发布根目录——结果财务假设、商业决策理由等内部内容被公开发布在 keyvalet.dev 上，从 push 到发现大约数十分钟。已把官网文件（`index.html`、`guide.md`、`guide.zh-CN.md`、`install.sh`、`CNAME`、`favicon.svg`）迁到新的 `site/` 目录，Pages 发布源改成 `site/`，内部规划文档留在 `docs/` 不再对外发布；已验证修复后不再可公开访问。教训：任何新建目录先确认它是不是某个发布流程的根目录，别事后才查。
 
 ## 目录
 
@@ -40,7 +41,7 @@
 | 0.1 | `代码` 提交五份规划文档和本文 | 一次 commit：`docs/*-2026-10.zh-CN.md` | `git log` 可见；不要提交 `rust/` 以外的半成品 |
 | 0.2 | `运营` 商标检索：USPTO、WIPO Global Brand Database、UKIPO、CNIPA、香港知识产权署，第 9 类与第 42 类，查 "KeyValet" 与 "Key Valet" | ✅ 初步检索已完成：`docs/trademark-check.md`——没查到软件/SaaS 类的注册商标冲突；"Key Valet" 这个名字被几家不相关的小公司在用（新泽西一家做汽车防盗硬件的 Key Valet Inc.、卡塔尔一家代客泊车公司），均非软件领域，WIPO 库被验证码挡住没能直接查。**这只是网络搜索式的初筛，不是专业检索**，真要正式注册商标或大规模投广告前建议花钱找律师或检索服务做一次正式查询 | 初筛无直接冲突，可以继续用这个名字；正式注册前再做一次专业检索 |
 | 0.3 | `运营` ~~注册 keyvalet.dev~~ **已完成**；防御性注册 .ai / .io / .app（可选，非阻塞）；DNS 托管；提交 HSTS 预加载；开 DNSSEC；设 CAA | 域名可解析到 GitHub Pages | `https://keyvalet.dev` 返回官网 |
-| 0.4 | `运营` GitHub 组织 `KeyValet` **已创建**；仓库 **已转移**到 `KeyValet/KeyValet`；本机 remote、README、`package.json`、两个插件 manifest、`install.sh`、`docs/index.html` 里的地址 **已更新为 keyvalet.dev** | 旧链接自动重定向 | `curl -fsSL https://keyvalet.dev/install.sh` 可用（待 DNS 生效） |
+| 0.4 | `运营` GitHub 组织 `KeyValet` **已创建**；仓库 **已转移**到 `KeyValet/KeyValet`；本机 remote、README、`package.json`、两个插件 manifest、`install.sh`、`index.html` 里的地址 **已更新为 keyvalet.dev**（这几个文件后来又从 `docs/` 迁到了 `site/`，见下方 2026-10-09 的记录） | 旧链接自动重定向 | `curl -fsSL https://keyvalet.dev/install.sh` 可用（待 DNS 生效） |
 | 0.5 | `运营` 占住 npm、crates.io、PyPI 的 `keyvalet` 包名（发布占位版本） | — | ⏸ 2026-10-09 决定暂不占位：三个包名目前都还没人用，优先级不高，先放着；想占的时候 npm 已登录，crates.io/PyPI 还需单独登录 |
 | 0.6 | `运营` D-U-N-S **已完成**；开 Apple Developer Program 组织账号（待办）；开 Stripe 账号（待办——Antom 已配置好但技术选型复盘后改用 Stripe 作为 Team 自助订阅的主要收款渠道，理由见下方说明；Antom 保留配置，以后若做 APAC 场景可用） | 两个账号 | Stripe 可创建 Product；Apple 账号可建 App ID |
 | 0.7 | `开源` 开启 GitHub Private Vulnerability Reporting；加 `CODE_OF_CONDUCT.md`（Contributor Covenant 2.1）；加 issue 模板 4 种与 PR 模板（O 附录 D）；`CONTRIBUTING.md` 加 DCO 与 Rust 规范 | 文件进仓库 | 新建 issue 时出现模板选择 |

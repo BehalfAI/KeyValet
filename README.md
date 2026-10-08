@@ -4,7 +4,7 @@
 
 KeyValet lets Claude Code, Cursor and other AI agents use your API keys and OAuth accounts — without ever seeing them. You approve each credential with Touch ID, KeyValet makes the call, and every use is logged.
 
-[Website](https://keyvalet.dev/) · [Guide](docs/guide.md) · [Security](SECURITY.md) · [简体中文](README.zh-CN.md)
+[Website](https://keyvalet.dev/) · [Guide](site/guide.md) · [Security](SECURITY.md) · [简体中文](README.zh-CN.md)
 
 ## Install
 
@@ -12,7 +12,7 @@ KeyValet lets Claude Code, Cursor and other AI agents use your API keys and OAut
 curl -fsSL https://keyvalet.dev/install.sh | sh
 ```
 
-macOS, Node.js 20+ ([nodejs.org](https://nodejs.org) or nvm) and Xcode Command Line Tools. You'll be asked for your password once. Claude Code is configured automatically; for other MCP clients see the [guide](docs/guide.md#install).
+macOS, Node.js 20+ ([nodejs.org](https://nodejs.org) or nvm) and Xcode Command Line Tools. You'll be asked for your password once. Claude Code is configured automatically; for other MCP clients see the [guide](site/guide.md#install).
 
 ## Use it
 
@@ -41,7 +41,7 @@ OAuth, refresh tokens and private keys stay in KeyValet; the agent only ever get
 
 ## Learn more
 
-- [Guide](docs/guide.md) — concepts, all tools, templates, gateway, CLI
+- [Guide](site/guide.md) — concepts, all tools, templates, gateway, CLI
 - [Security model](SECURITY.md) — what KeyValet guarantees, and what it doesn't
 - [Contributing](CONTRIBUTING.md) · [Code of Conduct](CODE_OF_CONDUCT.md) · [Governance](GOVERNANCE.md) · [Trademark policy](TRADEMARK.md)
 

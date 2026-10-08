@@ -70,7 +70,7 @@
 | 平台层 | `kv-platform` | `Authenticator`（Touch ID）、`Confirmer`（原生确认框）、路径与信任校验 |
 | Claude Code 插件 | `claude-plugin/` | hooks：`UserPromptSubmit`（用户贴了密钥→提示存入）、`PreToolUse`（Write/Edit/MultiEdit/NotebookEdit/Bash 命中密钥→`permissionDecision: ask`）；skills 与 `/keyvalet:*` 命令 |
 | 模板 | `templates/catalog.json`、`n8n-catalog.json` | `CredentialTemplate { id, name, source, kind, fields, inject, test, oauth }` |
-| 官网与文档站 | `docs/index.html`、`docs/guide.md`、`docs/install.sh`（GitHub Pages） | 静态落地页、指南、安装脚本；本文建议迁到 `site/`（§18.6） |
+| 官网与文档站 | `site/index.html`、`site/guide.md`、`site/install.sh`（GitHub Pages） | 静态落地页、指南、安装脚本；2026-10-09 已从 `docs/` 迁出——`docs/` 曾同时是 Pages 发布根目录又放着本次的全部内部规划文档，等于把它们公开发布了，发现后立即迁移（§18.6） |
 
 ### 2.2 本文引入的改动
 
@@ -828,7 +828,7 @@ keyvalet/                         monorepo
   justfile           跨语言任务入口（build、test、release、site）
 ```
 
-现状到目标：`src/`（TS）在迁移期保留；`docs/index.html`、`docs/guide.md`、`docs/install.sh` 迁到 `site/`，`docs/` 只留设计文档；`marketing/` 的文案并入 `site/content/`。
+现状到目标：`src/`（TS）在迁移期保留；`docs/index.html`、`docs/guide.md`、`docs/install.sh` 已迁到 `site/`，`docs/` 现在只留设计文档（这也是 GitHub Pages 的发布路径从 `docs/` 改成 `site/` 的直接原因，见上）；`marketing/` 的文案以后并入 `site/content/`。
 
 ### 18.2 IPC v4
 

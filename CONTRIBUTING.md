@@ -25,7 +25,7 @@ The TypeScript tree under `src/` predates the Rust rewrite and is kept for now; 
 - Never return, log or include in error messages any secret (or a string built from one).
 - Keep the helper's dependency list small; justify any new crate in the PR description.
 - Every security-relevant change needs a regression test.
-- Keep `README.md`, `README.zh-CN.md`, `docs/guide.md`, `docs/guide.zh-CN.md` and `SECURITY.md` in sync with behavior changes.
+- Keep `README.md`, `README.zh-CN.md`, `site/guide.md`, `site/guide.zh-CN.md` and `SECURITY.md` in sync with behavior changes.
 
 ## Sign-off (DCO)
 
