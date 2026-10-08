@@ -1,0 +1,16 @@
+[package]
+name = "kv-hook"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kv-hook"
+path = "src/main.rs"
+
+[dependencies]
+regex = "1"
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

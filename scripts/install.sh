@@ -6,6 +6,7 @@
 #   /usr/local/lib/keyvalet/bin/kv-touchid  Touch ID authentication helper (hardened runtime signature)
 #   /usr/local/lib/keyvalet/bin/kv-mcp      MCP server (runs unprivileged, one process per AI session)
 #   /usr/local/lib/keyvalet/bin/kv-cli      terminal management CLI (runs as root via sudo)
+#   /usr/local/lib/keyvalet/bin/kv-hook     secret-detection hook for AI runtimes (Claude Code, Codex), runs unprivileged
 #   /usr/local/lib/keyvalet/templates/      bundled credential template catalog
 #   /usr/local/bin/keyvalet                 wrapper script that execs kv-cli via sudo
 #   /var/db/keyvalet/                       the encrypted credential vault (0700)
@@ -40,14 +41,14 @@ say "==> 构建（cargo build --release）" "==> Building (cargo build --release
 cd "$SRC_DIR/rust"
 cargo build --release --locked
 BIN_DIR="$SRC_DIR/rust/target/release"
-for b in kv-helper kv-touchid kv-mcp kv-cli; do
+for b in kv-helper kv-touchid kv-mcp kv-cli kv-hook; do
   [ -x "$BIN_DIR/$b" ] || { say "构建产物缺失：$b" "Build artifact missing: $b" >&2; exit 1; }
 done
 
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/bin" "$STAGE/templates"
-cp "$BIN_DIR/kv-helper" "$BIN_DIR/kv-touchid" "$BIN_DIR/kv-mcp" "$BIN_DIR/kv-cli" "$STAGE/bin/"
+cp "$BIN_DIR/kv-helper" "$BIN_DIR/kv-touchid" "$BIN_DIR/kv-mcp" "$BIN_DIR/kv-cli" "$BIN_DIR/kv-hook" "$STAGE/bin/"
 cp -R "$SRC_DIR/templates/." "$STAGE/templates/" 2>/dev/null || true
 # Hardened runtime: processes owned by the same user (including an AI agent) cannot debug or inject into this binary
 codesign -s - -o runtime -f "$STAGE/bin/kv-touchid" >/dev/null
@@ -139,6 +140,29 @@ sudo -k
 if ! /usr/bin/sudo -n -- "$INSTALL_DIR/bin/kv-helper" </dev/null >/dev/null 2>&1; then
   say "⚠️  免密规则未生效：请确认 /etc/sudoers 包含 #includedir /private/etc/sudoers.d" "⚠️  The passwordless sudo rule is not in effect: make sure /etc/sudoers contains #includedir /private/etc/sudoers.d" >&2
   exit 1
+fi
+
+# Codex adapter (best-effort, action-plan 2.4): Codex's hook config format is less battle-tested
+# than Claude Code's, so this only writes a fresh file; an existing one is left untouched and the
+# user is told how to merge it by hand. Never fails the install.
+if [ -d "$HOME/.codex" ] && [ ! -e "$HOME/.codex/hooks.json" ]; then
+  cat > "$HOME/.codex/hooks.json" <<EOF
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit|Bash",
+        "hooks": [
+          { "type": "command", "command": "$INSTALL_DIR/bin/kv-hook tool", "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}
+EOF
+  say "已为 Codex 写入 ~/.codex/hooks.json（密钥检测 hook，未独立核实 Codex 的 hook 行为）" "Wrote ~/.codex/hooks.json for Codex (secret-detection hook; Codex's hook behavior hasn't been independently verified)"
+elif [ -d "$HOME/.codex" ]; then
+  say "检测到已有 ~/.codex/hooks.json，未覆盖；如需启用 KeyValet 的密钥检测，请手动在 PreToolUse 里加一条 command: \"$INSTALL_DIR/bin/kv-hook tool\"" "Found an existing ~/.codex/hooks.json, left untouched; to enable KeyValet's secret detection, manually add a PreToolUse command: \"$INSTALL_DIR/bin/kv-hook tool\""
 fi
 
 echo

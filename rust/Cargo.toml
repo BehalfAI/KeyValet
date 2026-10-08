@@ -12,6 +12,7 @@ members = [
   "crates/kv-helper",
   "crates/kv-mcp",
   "crates/kv-cli",
+  "crates/kv-hook",
 ]
 
 [workspace.package]

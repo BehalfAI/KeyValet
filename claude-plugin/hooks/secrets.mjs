@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 // KeyValet hook for Claude Code: notices secrets so they end up in KeyValet instead of the chat, files or shell.
 //
+// Superseded in production by the Rust port at rust/crates/kv-hook (installed as the kv-hook binary,
+// invoked via run.sh); kept here because src/test/proactive.test.ts still imports it directly as the
+// spec for the detection logic. Port behavior changes to both files, or move the spec test to kv-hook.
+//
 //   secrets.mjs prompt   UserPromptSubmit: the user pasted a key → tell Claude to store it in KeyValet
 //   secrets.mjs tool     PreToolUse (Write/Edit/MultiEdit/NotebookEdit/Bash): a literal key is about to be
 //                        written to a file or a command → ask the user first and point Claude to KeyValet

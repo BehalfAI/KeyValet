@@ -1083,6 +1083,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kv-hook"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "kv-i18n"
 version = "0.1.0"
 dependencies = [
