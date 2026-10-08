@@ -58,7 +58,7 @@
 | # | 任务 | 产出 | 完成标准 |
 | --- | --- | --- | --- |
 | 1.1 | `代码` 在 `rust/crates/kv-core` 新增 `request.rs`：`UseRequest`、JCS 规范化、`digest`（A §7.2）；在 `src/helper/protocols/http.ts` 与 `kv-core/dispatch.rs` 的 HTTP 路径上生成它 | 结构体与单测 | 同一请求两次 digest 相同，改任一字段 digest 不同 |
-| 1.2 | `代码` Touch ID 文案改为四行结构（P 附录 A）：凭据与层级、「agent 说：」用途、真实请求、来源；先用 method + host + path，`summarize` 下周接 | `auth-gate.ts` / `auth_gate.rs` 文案改动 | 在 Claude Code 里发一次请求，弹窗能看到 host 与 path；超长时裁用途不裁请求 |
+| 1.2 | `代码` Touch ID 文案改为四行结构（P 附录 A）：凭据与层级、「agent 说：」用途、真实请求、来源；先用 method + host + path，`summarize` 下周接 | `auth-gate.ts` / `auth_gate.rs` 文案改动 | ⏳ 部分完成：`credential_http_request`/`credential_test` 的 Grant 弹窗现在会在用途前多显示一行「请求：method host/path」（`kv-core/dispatch.rs` 的 `grant_credential` + `kv-mcp/session.rs` 的 `request_value`/`grant`，已过 `cargo fmt`/`clippy -D warnings`/`build`/`test`，新增单测）；还没做的：风险层级标注、「agent 说：」前缀框出用途、`summarize` 人类可读摘要——这些要等策略引擎（见下）落地 |
 | 1.3 | `代码` 审批绑定：审批结果带 digest 与一次性 nonce，执行前复核；nonce 存本地 SQLite（A §7.3） | `kv-core/approval.rs` | 重放同一审批第二次被拒；审批后改 body 被拒 |
 | 1.4 | `代码` 把 `rust/` 工作区提交进 git，CI 跑 `cargo test` 与 clippy | `.github/workflows/rust.yml` | CI 绿 |
 | 1.5 | `市场` 官网改版：Zola 项目 `site/`，首页（主张、GIF 占位、安装命令、三条支撑）、定价页、对比页、安全页；GitHub Pages 源切到 Actions 构建 | `site/` 与 `pages.yml` | keyvalet.dev 显示新站 |
