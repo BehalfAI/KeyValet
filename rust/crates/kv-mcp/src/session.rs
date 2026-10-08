@@ -69,6 +69,9 @@ struct Inner {
     unlock_purpose: Option<String>,
 }
 
+/// A granted credential key plus the request digest (if any) its approval was shown for.
+type GrantCacheEntry = (String, Option<String>);
+
 pub struct HelperSession {
     pub session_id: String,
     ttl: Duration,
@@ -80,9 +83,13 @@ pub struct HelperSession {
     /// Same coalescing trick for `grant()` -- simplified to one global lock rather than per-credential
     /// (concurrent grants for different credentials still end up serialized by the helper's own
     /// cross-process auth lock, so this costs nothing in practice), remembering only the single most
-    /// recently granted key (matches this session's actual usage pattern: one credential at a time).
+    /// recently granted (key, request_digest) pair (matches this session's actual usage pattern: one
+    /// credential at a time). Keying on the digest too, not just the credential, matters in per_use
+    /// mode: two concurrent calls for the same credential but different requests must each raise
+    /// their own Touch ID prompt, not have the second one silently ride the first one's approval --
+    /// see the digest check in `kv-core`'s `consume_grant`.
     grant_lock: Arc<AsyncMutex<()>>,
-    last_granted: Arc<std::sync::Mutex<Option<String>>>,
+    last_granted: Arc<std::sync::Mutex<Option<GrantCacheEntry>>>,
 }
 
 /// A request interface carrying a purpose: tool handlers obtain it via `session.scoped(purpose)`.
@@ -277,10 +284,16 @@ impl HelperSession {
         // For an HTTP-shaped op, show the Touch ID prompt what it's actually about to send
         // (method + host + path -- not the query string, matching how this same call is later
         // audited). Built from the very params this call is sending, not re-derived later, so it
-        // can't drift from the real request; it's still just a display hint, never a cryptographic
-        // binding -- see the comment beside `request_hint` in kv-core's `grant_credential`.
+        // can't drift from the real request; it's still just a display hint, not itself checked --
+        // the actual binding is `request_digest` below.
         let request_hint = matches!(op, "httpRequest" | "httpTest")
             .then(|| http_request_hint(&params))
+            .flatten();
+        // The digest the approval gets bound to server-side (`kv_ipc::request_digest`; see the
+        // comment on `consume_grant` in kv-core). Computed from these same `params`, so -- like
+        // `request_hint` -- it can't drift from the request this call is actually about to send.
+        let request_digest = matches!(op, "httpRequest" | "httpTest")
+            .then(|| kv_ipc::request_digest(&params))
             .flatten();
         match self.send(op, params.clone(), timeout).await {
             Ok(v) => Ok(v),
@@ -293,25 +306,35 @@ impl HelperSession {
                 let Some((ty, name)) = key.trim().split_once('/') else {
                     return Err(e);
                 };
-                self.grant(ty, name, unlock_purpose, request_hint.as_deref())
-                    .await?;
+                self.grant(
+                    ty,
+                    name,
+                    unlock_purpose,
+                    request_hint.as_deref(),
+                    request_digest.as_deref(),
+                )
+                .await?;
                 self.send(op, params, timeout).await
             }
         }
     }
 
-    /// Authorizes this session to use a credential (concurrent grants are coalesced into a single
-    /// prompt -- see the `grant_lock` doc comment). `request_hint`: see `request_value`.
+    /// Authorizes this session to use a credential (concurrent grants for the same credential
+    /// *and* the same `request_digest` are coalesced into a single prompt -- see the `grant_lock`
+    /// doc comment; a different digest always gets its own round trip and its own prompt).
+    /// `request_hint`/`request_digest`: see `request_value`.
     pub async fn grant(
         &self,
         ty: &str,
         name: &str,
         purpose: &str,
         request_hint: Option<&str>,
+        request_digest: Option<&str>,
     ) -> Result<Value, SessionError> {
         let key = format!("{ty}/{name}");
+        let cache_key = (key.clone(), request_digest.map(str::to_string));
         let _guard = self.grant_lock.lock().await;
-        if self.last_granted.lock().unwrap().as_deref() == Some(key.as_str()) {
+        if self.last_granted.lock().unwrap().as_ref() == Some(&cache_key) {
             return Ok(serde_json::json!({"granted": key, "already": true}));
         }
         let mut params = Map::new();
@@ -321,8 +344,11 @@ impl HelperSession {
         if let Some(h) = request_hint {
             params.insert("request_hint".into(), Value::String(h.to_string()));
         }
+        if let Some(d) = request_digest {
+            params.insert("request_digest".into(), Value::String(d.to_string()));
+        }
         let r = self.send("grant", params, GRANT_TIMEOUT).await?;
-        *self.last_granted.lock().unwrap() = Some(key);
+        *self.last_granted.lock().unwrap() = Some(cache_key);
         Ok(r)
     }
 

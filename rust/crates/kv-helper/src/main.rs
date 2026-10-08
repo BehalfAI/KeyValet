@@ -182,9 +182,15 @@ async fn authenticate(
         auth.apply_mode(&settings);
         if let Some(h) = &hint {
             if mode == kv_core::settings::GrantMode::PerUse {
+                // This handshake prompt only ever shows the credential name (`scope` above), never
+                // a request_hint -- so it has no request content to bind a digest to. An HTTP-shaped
+                // op that piggybacks on this grant still goes through its own `consume_grant` check
+                // (kv-core/dispatch.rs) with a real digest, which a `None` here can never match: it
+                // falls through to a fresh, properly request-bound Touch ID prompt instead of
+                // silently trusting a "single use" approval that never named what the use was.
                 auth.one_shot
                     .get_or_insert_with(Default::default)
-                    .insert(h.clone());
+                    .insert(h.clone(), None);
             } else {
                 auth.grants.insert(h.clone());
             }

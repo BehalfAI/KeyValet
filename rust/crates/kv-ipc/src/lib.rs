@@ -7,6 +7,9 @@
 
 use serde::{Deserialize, Serialize};
 
+mod request;
+pub use request::request_digest;
+
 pub const PROTOCOL_VERSION: u32 = 3;
 pub const MAX_LINE_BYTES: usize = 1024 * 1024;
 

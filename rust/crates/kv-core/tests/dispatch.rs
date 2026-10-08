@@ -4,7 +4,7 @@
 
 use kv_core::{dispatch, resolve_hint, ClientContext, GrantMode, JsonMap, SessionAuth, Settings};
 use kv_core::{is_loosening, stricter};
-use kv_ipc::{Response, GRANT_REQUIRED_PREFIX};
+use kv_ipc::{request_digest, Response, GRANT_REQUIRED_PREFIX};
 use kv_vault::{SetParams, Vault};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
@@ -419,6 +419,118 @@ async fn per_use_one_touch_id_buys_exactly_one_use() {
             .await
         ),
         "newly created credentials are not auto-authorized in per_use either"
+    );
+}
+
+async fn http_credential(
+    vault: &Vault,
+    auth: &mut SessionAuth<FakeAuth>,
+    confirmer: &PanicConfirmer,
+    server_addr: std::net::SocketAddr,
+) {
+    let set = call(
+        vault,
+        auth,
+        confirmer,
+        "set",
+        json!({
+            "type": "api_key", "name": "svc", "value": "sk-abc",
+            "http": {"inject": {"headers": {"Authorization": "Bearer {{value}}"}}, "allowed_hosts": [server_addr.ip().to_string()]},
+        }),
+    )
+    .await;
+    assert!(is_ok(&set), "{:?}", error_of(&set));
+}
+
+#[tokio::test]
+async fn per_use_grant_matching_the_exact_request_executes_it_exactly_once() {
+    let _guard = with_insecure_loopback();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/charge"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let (_tmp, vault) = new_vault();
+    let fake = FakeAuth::new();
+    let mut auth = session_auth(&vault, GrantMode::PerUse, fake.clone());
+    let confirmer = PanicConfirmer;
+    http_credential(&vault, &mut auth, &confirmer, *server.address()).await;
+
+    let req = json!({"type": "api_key", "name": "svc", "method": "POST", "url": format!("http://{}/v1/charge", server.address()), "body": {"amount": 100}});
+    let digest = request_digest(req.as_object().unwrap()).unwrap();
+
+    fake.push(true);
+    assert!(is_ok(
+        &call(
+            &vault,
+            &mut auth,
+            &confirmer,
+            "grant",
+            json!({"type": "api_key", "name": "svc", "request_digest": digest}),
+        )
+        .await
+    ));
+
+    let r = call(&vault, &mut auth, &confirmer, "httpRequest", req.clone()).await;
+    assert!(is_ok(&r), "{:?}", error_of(&r));
+
+    let replay = call(&vault, &mut auth, &confirmer, "httpRequest", req).await;
+    assert!(
+        !is_ok(&replay),
+        "one approval is exactly one use, even for a replay of the identical request"
+    );
+}
+
+#[tokio::test]
+async fn per_use_grant_does_not_cover_a_request_that_differs_from_the_one_it_was_shown_for() {
+    let _guard = with_insecure_loopback();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/charge"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+        .expect(0) // the request that was actually sent must never reach the network unapproved
+        .mount(&server)
+        .await;
+
+    let (_tmp, vault) = new_vault();
+    let fake = FakeAuth::new();
+    let mut auth = session_auth(&vault, GrantMode::PerUse, fake.clone());
+    let confirmer = PanicConfirmer;
+    http_credential(&vault, &mut auth, &confirmer, *server.address()).await;
+
+    let shown = json!({"type": "api_key", "name": "svc", "method": "POST", "url": format!("http://{}/v1/charge", server.address()), "body": {"amount": 100}});
+    let digest = request_digest(shown.as_object().unwrap()).unwrap();
+
+    fake.push(true);
+    assert!(is_ok(
+        &call(
+            &vault,
+            &mut auth,
+            &confirmer,
+            "grant",
+            json!({"type": "api_key", "name": "svc", "request_digest": digest}),
+        )
+        .await
+    ));
+
+    // What actually executes has a different body than what the Touch ID prompt showed.
+    let actually_sent = json!({"type": "api_key", "name": "svc", "method": "POST", "url": format!("http://{}/v1/charge", server.address()), "body": {"amount": 100_000}});
+    let r = call(&vault, &mut auth, &confirmer, "httpRequest", actually_sent).await;
+    assert!(
+        !is_ok(&r),
+        "a request that doesn't match the approved digest must not execute"
+    );
+    assert!(error_of(&r).unwrap().starts_with(GRANT_REQUIRED_PREFIX));
+
+    // The mismatched attempt consumed the one-shot grant; the originally-approved request can't
+    // be replayed against it after the fact either -- a mismatch must not be retriable.
+    let replay_of_shown = call(&vault, &mut auth, &confirmer, "httpRequest", shown).await;
+    assert!(
+        !is_ok(&replay_of_shown),
+        "a consumed grant cannot be reused, even for the exact request it was originally shown for"
     );
 }
 

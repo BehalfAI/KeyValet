@@ -223,7 +223,7 @@ impl Server {
                 )
                 .await?;
                 self.session
-                    .grant(&resolved_type, &norm(name), &a.purpose, None)
+                    .grant(&resolved_type, &norm(name), &a.purpose, None, None)
                     .await?;
             }
             let info: Value = self

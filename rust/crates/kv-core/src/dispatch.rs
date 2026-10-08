@@ -14,7 +14,7 @@ use kv_vault::{
     normalize_name, normalize_type, CredentialRecord, Kind, SetParams, Vault, VaultError,
 };
 use serde_json::{json, Map, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -125,8 +125,12 @@ pub struct SessionAuth<G> {
     pub mode: Option<GrantMode>,
     /// The mode requested by the client (can only tighten it); used to recompute after a settings change.
     pub requested: Option<GrantMode>,
-    /// per_use mode: a single-use grant that has been authenticated but not yet used.
-    pub one_shot: Option<HashSet<String>>,
+    /// per_use mode: a single-use grant that has been authenticated but not yet used, keyed by
+    /// credential. The value is the request digest (§ `kv_ipc::request_digest`) the Touch ID
+    /// prompt was shown for, or `None` for a non-HTTP-shaped op that has nothing to bind to.
+    /// Consuming it (whether the digest matches or not) always removes the entry: a mismatch
+    /// must not be retriable against the same approval, and a match is one-time by definition.
+    pub one_shot: Option<HashMap<String, Option<String>>>,
     /// This session's local gateway. `None` in every test and in the root CLI; the main helper
     /// program sets it once, right after authentication succeeds (mirrors TS's `auth.gateway`).
     pub gateway: Option<Arc<Gateway>>,
@@ -168,7 +172,7 @@ impl<G: AuthorizeGate> SessionAuth<G> {
             Some(GrantMode::PerUse) => {
                 self.grant_all = false;
                 self.grants.clear();
-                self.one_shot = Some(HashSet::new());
+                self.one_shot = Some(HashMap::new());
             }
             Some(GrantMode::PerCredential) => {
                 self.grant_all = false;
@@ -192,9 +196,19 @@ impl<G: AuthorizeGate> SessionAuth<G> {
 
     /// `true` if `key` may be used right now under this session's mode, consuming a one-shot grant
     /// if that's what applies. Mirrors the `GRANT_REQUIRED_OPS` check in TS's `dispatch()`.
-    fn consume_grant(&mut self, key: &str) -> bool {
+    ///
+    /// `current_digest` is the digest of the request about to execute (`None` if it isn't
+    /// HTTP-shaped). In per_use mode this must match the digest the Touch ID prompt was shown
+    /// for, or the grant doesn't count -- it was authorized for a *different* request (e.g. a
+    /// second call that raced in between the prompt and the retry), not this one. Either way the
+    /// one-shot entry is gone after this call: a mismatch can't be retried against, and a match
+    /// is used up.
+    fn consume_grant(&mut self, key: &str, current_digest: Option<&str>) -> bool {
         if self.mode == Some(GrantMode::PerUse) {
-            self.one_shot.get_or_insert_with(HashSet::new).remove(key)
+            match self.one_shot.get_or_insert_with(HashMap::new).remove(key) {
+                Some(approved_digest) => approved_digest.as_deref() == current_digest,
+                None => false,
+            }
         } else {
             self.grant_all || self.grants.contains(key)
         }
@@ -218,12 +232,18 @@ async fn grant_credential<G: AuthorizeGate>(
     }
     let purpose = clean_purpose(get_str(p, "purpose").as_deref()).unwrap_or_default();
     // Set only for an HTTP-shaped call: method + host + path, built by the MCP server from the
-    // same request it's about to send. Not a cryptographic binding -- just a more concrete,
-    // harder-to-fake-sounding line than `purpose` alone. Like `purpose`, it is shown and logged,
-    // never verified against what the helper actually ends up sending; see SECURITY.md.
+    // same request it's about to send. In per_use mode this prompt's approval is bound to
+    // `request_digest` below (checked by `consume_grant`), so the text really does describe what
+    // gets executed; in the other modes (per_credential/session/remember) the credential is
+    // authorized broadly for the rest of the session, so later requests under the same grant are
+    // never shown or checked against this one -- see SECURITY.md.
     let request = get_str(p, "request_hint")
         .map(|h| clip(&h))
         .unwrap_or_default();
+    // The digest (see `kv_ipc::request_digest`) of the exact request this prompt is about to
+    // authorize, computed by the MCP server from the same params it's about to retry with.
+    // `None` for a non-HTTP-shaped op (get/totp/aws/...), which has nothing to bind to.
+    let request_digest = get_str(p, "request_digest");
     let (req_zh, req_en) = if request.is_empty() {
         (String::new(), String::new())
     } else {
@@ -256,8 +276,8 @@ async fn grant_credential<G: AuthorizeGate>(
     auth.authorize(&reason).await.map_err(VaultError)?;
     if per_use {
         auth.one_shot
-            .get_or_insert_with(HashSet::new)
-            .insert(key.clone());
+            .get_or_insert_with(HashMap::new)
+            .insert(key.clone(), request_digest);
     } else {
         auth.grants.insert(key.clone());
     }
@@ -1144,7 +1164,7 @@ pub async fn dispatch<G: AuthorizeGate, C: Confirmer>(
                     return Response::err(id, e.0);
                 }
             };
-            if !a.consume_grant(&key) {
+            if !a.consume_grant(&key, kv_ipc::request_digest(&params).as_deref()) {
                 let message = format!("{}{key}", kv_ipc::GRANT_REQUIRED_PREFIX);
                 audit(false, Some(&message), quiet);
                 return Response::err(id, message);
