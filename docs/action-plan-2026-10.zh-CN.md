@@ -45,7 +45,7 @@
 | 0.6 | `运营` D-U-N-S **已完成**；开 Apple Developer Program 组织账号（待办）；开 Stripe 账号（待办——Antom 已配置好但技术选型复盘后改用 Stripe 作为 Team 自助订阅的主要收款渠道，理由见下方说明；Antom 保留配置，以后若做 APAC 场景可用） | 两个账号 | Stripe 可创建 Product；Apple 账号可建 App ID |
 | 0.7 | `开源` 开启 GitHub Private Vulnerability Reporting；加 `CODE_OF_CONDUCT.md`（Contributor Covenant 2.1）；加 issue 模板 4 种与 PR 模板（O 附录 D）；`CONTRIBUTING.md` 加 DCO 与 Rust 规范 | 文件进仓库 | 新建 issue 时出现模板选择 |
 | 0.8 | `开源` 写 `GOVERNANCE.md`（O 附录 A）与商标政策页（O 附录 B） | 两个文件 | 从 README 链接到它们 |
-| 0.9 | `市场` 写事故复盘第一篇（Nx s1ngularity）和 vs 1Password 对比页初稿 | 两篇 Markdown 放 `site/content/` | 各 1,200 字以内，全部一手来源 |
+| 0.9 | `市场` 写事故复盘第一篇（Nx s1ngularity）和 vs 1Password 对比页初稿 | ✅ `marketing/blog-s1ngularity.md`（含配套 X 长帖）、`marketing/compare-1password.md`——`site/` 还没搭，先放 `marketing/`，等 1.5 做完官网改版再搬进 `site/content/` | 1,057 字 / 886 字，均 < 1,200；来源见各文末 |
 
 ---
 
