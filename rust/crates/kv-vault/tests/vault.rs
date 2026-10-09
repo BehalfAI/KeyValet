@@ -1,7 +1,8 @@
-//! Integration tests mirroring src/test/vault.test.ts's "Vault" describe block -- the existing TS
-//! test suite is the behavioral spec for this port (see the Rust rewrite plan's "测试策略").
-//! Run with KEYVALET_LANG=zh (matching `npm test`'s convention) so error-message assertions against
-//! the Chinese text are deterministic regardless of this machine's locale.
+//! Integration tests mirroring the "Vault" describe block from the original TypeScript
+//! implementation's test suite (now removed, having been superseded by this Rust rewrite -- that
+//! suite was the behavioral spec this port was built against; see the rewrite plan's "Test
+//! Strategy" section). Run with KEYVALET_LANG=zh so error-message assertions against the Chinese
+//! text are deterministic regardless of this machine's locale.
 
 use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Aead, KeyInit};

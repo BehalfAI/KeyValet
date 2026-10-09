@@ -6,7 +6,7 @@
 //! a separate Swift-compiled `touchid` binary with dropped privileges; here it's whatever concrete
 //! `Authenticator` the caller provides (the macOS implementation, in kv-platform, drops privileges via
 //! setuid/seteuid in-process and calls LocalAuthentication directly through objc2 -- see the rewrite
-//! plan's "待决问题" / kv-platform interface).
+//! plan's "Open Questions" / kv-platform interface).
 
 use kv_platform::{AuthOutcome, Authenticator};
 use std::path::{Path, PathBuf};

@@ -1,6 +1,6 @@
 //! Bilingual UI text (English / Simplified Chinese).
 //!
-//! Usage: `t("中文文案", "English text")` -- both variants live side by side at the call site.
+//! Usage: `t("Chinese copy", "English text")` -- both variants live side by side at the call site.
 //! Language resolution (first match wins):
 //!   1. `set_lang()` -- the root helper receives the language from the MCP server in the handshake;
 //!      the CLI receives it via --lang from its wrapper script

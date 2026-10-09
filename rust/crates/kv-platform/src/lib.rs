@@ -1,5 +1,5 @@
 //! Platform interaction traits: the seams every other crate codes against, implemented per-OS
-//! (macOS via objc2, eventually Windows via windows-rs -- see the rewrite plan's "kv-platform 接口").
+//! (macOS via objc2, eventually Windows via windows-rs -- see the rewrite plan's "kv-platform interface").
 //! Also the fixed install paths and filesystem trust checks shared by every binary that runs with
 //! root's authority.
 
