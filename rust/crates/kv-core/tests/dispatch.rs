@@ -1027,3 +1027,41 @@ async fn gateway_open_end_to_end_through_a_real_listening_gateway() {
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.text().await.unwrap(), "pong");
 }
+
+#[tokio::test]
+async fn info_on_a_protocol_credential_includes_its_config() {
+    // Regression test for a real bug found by live-testing credential_imap_test against a real
+    // oauth2 credential: info() for a non-static credential omitted `config` entirely, while
+    // kv-mcp's credential_imap_test and credential_oauth_login's re-authorization path both
+    // deserialize `info.config.*` (provider, client_id, scopes, ...) -- matching the original
+    // TS's `publicView`, which spreads `record.config` into the response under that same key.
+    // Without it, those tools failed outright with "missing field `config`", not just a
+    // less-complete response.
+    let (_tmp, vault) = new_vault();
+    vault
+        .set_protocol(kv_vault::SetProtocolParams {
+            r#type: "oauth2".into(),
+            name: "work".into(),
+            kind: kv_vault::Kind::Oauth2,
+            config: json!({"provider": "google", "client_id": "abc123"}),
+            secrets: Default::default(),
+            description: None,
+            type_description: None,
+            overwrite: false,
+        })
+        .unwrap();
+    let mut auth = SessionAuth::new(FakeAuth::new());
+    let confirmer = PanicConfirmer;
+    let r = call(
+        &vault,
+        &mut auth,
+        &confirmer,
+        "info",
+        json!({"type": "oauth2", "name": "work"}),
+    )
+    .await;
+    assert!(is_ok(&r));
+    let v = result_of(r);
+    assert_eq!(v["config"]["provider"], "google");
+    assert_eq!(v["config"]["client_id"], "abc123");
+}

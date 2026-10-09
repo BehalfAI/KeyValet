@@ -499,8 +499,14 @@ fn info(vault: &Vault, p: &JsonMap) -> kv_vault::Result<Value> {
         &get_str(p, "name").unwrap_or_default(),
     )?;
     if record.kind_or_static() != Kind::Static {
-        // Full protocol metadata (publicView in TS) lands with kv-protocols; a minimal, honest subset for now.
-        let mut v = json!({"type": ty, "name": name, "kind": record.kind_or_static(), "description": record.description, "updatedAt": record.updated_at});
+        // Full protocol metadata (publicView in TS, which also adds a `status`/`how_to_use` hint
+        // per kind) lands with kv-protocols; `config` specifically can't wait for that, though --
+        // kv-mcp's credential_imap_test and credential_oauth_login's re-authorization path both
+        // read `info.config.*` (provider, client_id, scopes, ...) for an existing protocol
+        // credential, matching TS's `publicView` spreading `rec.config` into the response under
+        // the same key. Omitting it isn't just an incomplete response: it IS the response these
+        // callers need, so without it they fail outright with a deserialization error.
+        let mut v = json!({"type": ty, "name": name, "kind": record.kind_or_static(), "description": record.description, "updatedAt": record.updated_at, "config": record.config.clone().unwrap_or(json!({}))});
         if let Some(http) = &record.http {
             v.as_object_mut()
                 .unwrap()
