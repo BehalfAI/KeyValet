@@ -112,10 +112,12 @@ $SUDO /bin/sh -eu -c '
   chown -R root:wheel "$INSTALL_DIR.new"
   chmod -R u=rwX,go=rX "$INSTALL_DIR.new"
   chmod 0755 "$INSTALL_DIR.new"/bin/*
+  # Revoke sessions before switching the installed executables and rotating the vault key.
+  /usr/bin/pkill -TERM -x kv-helper || [ "$?" -eq 1 ]
+  /usr/bin/pkill -TERM -u "$SUDO_UID" -x kv-mcp || [ "$?" -eq 1 ]
   rm -rf "$INSTALL_DIR.old"
   if [ -e "$INSTALL_DIR" ]; then mv "$INSTALL_DIR" "$INSTALL_DIR.old"; fi
   mv "$INSTALL_DIR.new" "$INSTALL_DIR"
-  rm -rf "$INSTALL_DIR.old"
 
   mkdir -p "$(dirname "$CLI_LINK")"
   install -o root -g wheel -m 0755 "$STAGE/keyvalet" "$CLI_LINK"
@@ -133,6 +135,12 @@ $SUDO /bin/sh -eu -c '
 
   install -o root -g wheel -m 0440 "$STAGE/sudoers" "$SUDOERS_FILE"
   /usr/sbin/visudo -cq || { rm -f "$SUDOERS_FILE"; say "sudoers 整体校验失败，已撤销规则" "Overall sudoers validation failed; the rule was removed" >&2; exit 1; }
+
+  # macOS supports only hardware-protected vaults. The CLI directly collects the recovery
+  # passphrase from a hidden terminal/native dialog, and never returns it to the installer.
+  say "==> 初始化或迁移 Secure Enclave 凭证库" "==> Initializing or migrating the Secure Enclave vault"
+  "$INSTALL_DIR/bin/kv-cli" --lang "$KV_LANG" setup-enclave
+  rm -rf "$INSTALL_DIR.old"
 ' sh "$INSTALL_DIR" "$VAULT_DIR" "$CLI_LINK" "$STAGE" "$SUDOERS_FILE" "$KV_LANG"
 sudo -k
 
@@ -151,7 +159,7 @@ if [ -d "$HOME/.codex" ] && [ ! -e "$HOME/.codex/hooks.json" ]; then
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Write|Edit|MultiEdit|Bash",
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash",
         "hooks": [
           { "type": "command", "command": "$INSTALL_DIR/bin/kv-hook tool", "timeout": 10 }
         ]
@@ -166,10 +174,12 @@ elif [ -d "$HOME/.codex" ]; then
 fi
 
 # Cursor adapter (action-plan 4.2): native hooks.json schema (not the Claude Code one), gating
-# beforeShellExecution and beforeMCPExecution. Same never-overwrite/never-fail-the-install rule
-# as the Codex block above.
-if [ -d "$HOME/.cursor" ] && [ ! -e "$HOME/.cursor/hooks.json" ]; then
-  cat > "$HOME/.cursor/hooks.json" <<EOF
+# beforeShellExecution, beforeMCPExecution and preToolUse (file-write tools). Same
+# never-overwrite/never-fail-the-install rule as the Codex block above. The sessionStart hook
+# only ships in the plugin bundle below (it points at /keyvalet-* commands the plugin defines).
+if [ -d "$HOME/.cursor" ]; then
+  if [ ! -e "$HOME/.cursor/hooks.json" ]; then
+    cat > "$HOME/.cursor/hooks.json" <<EOF
 {
   "version": 1,
   "hooks": {
@@ -178,13 +188,32 @@ if [ -d "$HOME/.cursor" ] && [ ! -e "$HOME/.cursor/hooks.json" ]; then
     ],
     "beforeMCPExecution": [
       { "command": "$INSTALL_DIR/bin/kv-hook cursor-mcp", "timeout": 10 }
+    ],
+    "preToolUse": [
+      { "command": "$INSTALL_DIR/bin/kv-hook cursor-tool", "timeout": 10,
+        "matcher": "Write|Edit|StrReplace|MultiEdit|Delete|Notebook|Create|Patch" }
     ]
   }
 }
 EOF
-  say "已为 Cursor 写入 ~/.cursor/hooks.json（密钥检测 hook）" "Wrote ~/.cursor/hooks.json for Cursor (secret-detection hook)"
-elif [ -d "$HOME/.cursor" ]; then
-  say "检测到已有 ~/.cursor/hooks.json，未覆盖；如需启用 KeyValet 的密钥检测，请手动加上 beforeShellExecution/beforeMCPExecution，command 用 \"$INSTALL_DIR/bin/kv-hook cursor-shell\" / \"$INSTALL_DIR/bin/kv-hook cursor-mcp\"" "Found an existing ~/.cursor/hooks.json, left untouched; to enable KeyValet's secret detection, manually add beforeShellExecution/beforeMCPExecution entries with command \"$INSTALL_DIR/bin/kv-hook cursor-shell\" / \"$INSTALL_DIR/bin/kv-hook cursor-mcp\""
+    say "已为 Cursor 写入 ~/.cursor/hooks.json（密钥检测 hook）" "Wrote ~/.cursor/hooks.json for Cursor (secret-detection hook)"
+  else
+    say "检测到已有 ~/.cursor/hooks.json，未覆盖；如需启用 KeyValet 的密钥检测，请手动加上 beforeShellExecution/beforeMCPExecution/preToolUse，command 用 \"$INSTALL_DIR/bin/kv-hook cursor-shell\" / \"cursor-mcp\" / \"cursor-tool\"" "Found an existing ~/.cursor/hooks.json, left untouched; to enable KeyValet's secret detection, manually add beforeShellExecution/beforeMCPExecution/preToolUse entries with command \"$INSTALL_DIR/bin/kv-hook cursor-shell\" / \"cursor-mcp\" / \"cursor-tool\""
+  fi
+
+  # Cursor plugin bundle (MCP server, /keyvalet-* commands, the keyvalet skill, hooks, and the
+  # sessionStart context pointer). Copied into ~/.cursor/plugins/local/ -- a copy, not a
+  # symlink, so it survives if this source checkout is removed; re-running install.sh refreshes
+  # it, keeping the plugin and the kv-hook binary versions in lock-step.
+  if [ -d "$SRC_DIR/cursor-plugin" ]; then
+    if rm -rf "$HOME/.cursor/plugins/local/keyvalet" 2>/dev/null \
+      && mkdir -p "$HOME/.cursor/plugins/local" \
+      && cp -R "$SRC_DIR/cursor-plugin" "$HOME/.cursor/plugins/local/keyvalet" 2>/dev/null; then
+      say "已安装 Cursor 插件到 ~/.cursor/plugins/local/keyvalet（重启 Cursor 生效）" "Installed the Cursor plugin to ~/.cursor/plugins/local/keyvalet (restart Cursor to load it)"
+    else
+      say "Cursor 插件复制失败，跳过（不影响安装）；可手动复制 $SRC_DIR/cursor-plugin 到 ~/.cursor/plugins/local/keyvalet" "Failed to copy the Cursor plugin, skipping (install unaffected); copy $SRC_DIR/cursor-plugin to ~/.cursor/plugins/local/keyvalet manually"
+    fi
+  fi
 fi
 
 # Grok Build adapter (action-plan 4.3/4.2): personal hooks live in ~/.grok/hooks/*.json (one of
@@ -212,12 +241,34 @@ elif [ -d "$HOME/.grok" ]; then
   say "检测到已有 ~/.grok/hooks/keyvalet.json，未覆盖" "Found an existing ~/.grok/hooks/keyvalet.json, left untouched"
 fi
 
+# Devin CLI adapter: registers the MCP server when no Devin MCP config exists yet; the secret
+# hook and the /keyvalet:* slash commands come from the devin-plugin/ folder in this repo,
+# which Devin installs as a plugin (printed below). Same never-overwrite/never-fail rule.
+# (Devin also imports keyvalet from ~/.claude.json automatically when Claude Code is set up.)
+if [ -d "$HOME/.config/devin" ]; then
+  if [ ! -e "$HOME/.config/devin/mcp_config.json" ]; then
+    cat > "$HOME/.config/devin/mcp_config.json" <<EOF
+{
+  "mcpServers": {
+    "keyvalet": { "command": "$INSTALL_DIR/bin/kv-mcp" }
+  }
+}
+EOF
+    say "已写入 ~/.config/devin/mcp_config.json（注册 KeyValet MCP server）" "Wrote ~/.config/devin/mcp_config.json (registered the KeyValet MCP server)"
+  else
+    say "检测到已有 ~/.config/devin/mcp_config.json，未改动；手动注册：devin mcp add -s user keyvalet -- $INSTALL_DIR/bin/kv-mcp" "Found an existing ~/.config/devin/mcp_config.json, left untouched; register manually: devin mcp add -s user keyvalet -- $INSTALL_DIR/bin/kv-mcp"
+  fi
+fi
+
 echo
 say "安装完成。" "Installation complete."
 echo
 say "在 Claude Code 中注册（用户级，所有项目可用）：" "Register it in Claude Code (user scope, available in all projects):"
 echo "  claude mcp add keyvalet --scope user -- $INSTALL_DIR/bin/kv-mcp"
 say "（如之前注册过旧名字：claude mcp remove credential --scope user）" "(If you registered it under the old name before: claude mcp remove credential --scope user)"
+echo
+say "在 Devin CLI 中安装插件（含密钥检测 hook 和 /keyvalet:* 命令）：" "Install the plugin in Devin CLI (includes the secret-detection hook and /keyvalet:* commands):"
+echo "  devin plugins install KeyValet/KeyValet#devin-plugin"
 echo
 say "在终端中管理凭证：" "Manage credentials from the terminal:"
 echo "  keyvalet help"

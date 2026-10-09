@@ -221,6 +221,13 @@ fn regex_match(s: &str, pattern: &str) -> bool {
     regex::Regex::new(pattern).unwrap().is_match(s)
 }
 
+/// An AWS error code such as `ExpiredToken` or `AccessDenied`; anything else is dropped.
+fn sts_error_code(text: &str) -> Option<&str> {
+    xml_tag(text, "Code").filter(|c| {
+        !c.is_empty() && c.len() <= 64 && c.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.')
+    })
+}
+
 fn xml_tag<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
     let open = format!("<{tag}>");
     let close = format!("</{tag}>");
@@ -364,14 +371,17 @@ pub async fn aws_credentials(
     ];
     let r = http_request(&sts_url, Method::Post, &send_headers, Some(body)).await?;
     if r.status >= 300 {
-        let detail = format!(
-            "{} {}",
-            xml_tag(&r.text, "Code").unwrap_or(""),
-            xml_tag(&r.text, "Message").unwrap_or_else(|| &r.text[..r.text.len().min(200)])
-        );
+        // Only the status and a well-formed error code: provider messages can echo request
+        // details, and are never needed to act on the error.
+        let code = sts_error_code(&r.text)
+            .map(|c| format!("：{c}"))
+            .unwrap_or_default();
+        let code_en = sts_error_code(&r.text)
+            .map(|c| format!(": {c}"))
+            .unwrap_or_default();
         return Err(VaultError::new(
-            &format!("AWS STS 返回错误（HTTP {}）：{detail}", r.status),
-            &format!("AWS STS returned an error (HTTP {}): {detail}", r.status),
+            &format!("AWS STS 返回错误（HTTP {}）{code}", r.status),
+            &format!("AWS STS returned an error (HTTP {}){code_en}", r.status),
         ));
     }
     let creds = SessionCreds {
@@ -443,6 +453,15 @@ fn out(c: &SessionCreds, cfg: &AwsConfig) -> AwsCredentialsOut {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sts_errors_keep_only_a_well_formed_code() {
+        let body = "<ErrorResponse><Error><Code>SignatureDoesNotMatch</Code><Message>key AKIAEXAMPLE…</Message></Error></ErrorResponse>";
+        assert_eq!(sts_error_code(body), Some("SignatureDoesNotMatch"));
+        assert_eq!(sts_error_code("<Code>bad code; AKIA…</Code>"), None);
+        // Multibyte text without a code must not panic (the old byte slice could).
+        assert_eq!(sts_error_code(&"错误".repeat(150)), None);
+    }
 
     #[test]
     fn validate_rejects_malformed_fields() {

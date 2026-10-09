@@ -3,8 +3,9 @@
 //! (sudoers only allows the helper itself to run passwordlessly); a handshake message (purpose,
 //! source directory, session ID) is sent first, and the helper only starts serving requests
 //! after Touch ID (showing the purpose) succeeds.
-//! Once authenticated, no further authentication is needed for the rest of this session; when
-//! this process exits (session ends) -> the pipe closes -> the helper exits.
+//! Hardware authentication unlocks this session; subsequent credential approvals follow the
+//! configured grant mode. Lock, expiry or helper disconnect revokes pending calls and private
+//! temporary files. Process exit closes the pipe and the helper exits.
 //! Direct port of src/server/session.ts.
 
 use kv_ipc::{
@@ -62,6 +63,7 @@ struct ChildHandle {
 struct Inner {
     child: Option<ChildHandle>,
     ready: bool,
+    generation: u64,
     pending: HashMap<u64, Pending>,
     next_id: u64,
     cooldown_until: Option<SystemTime>,
@@ -69,8 +71,21 @@ struct Inner {
     unlock_purpose: Option<String>,
 }
 
-/// A granted credential key plus the request digest (if any) its approval was shown for.
-type GrantCacheEntry = (String, Option<String>);
+impl Inner {
+    fn revoke(&mut self) {
+        crate::gateway_env::cleanup_gateway_env();
+        self.generation += 1;
+        self.ready = false;
+        self.unlocked_at = None;
+        self.unlock_purpose = None;
+        for (_, pending) in self.pending.drain() {
+            let _ = pending.send(Err(kv_i18n::t(
+                "凭证库已锁定",
+                "Credential vault is locked",
+            )));
+        }
+    }
+}
 
 pub struct HelperSession {
     pub session_id: String,
@@ -80,16 +95,8 @@ pub struct HelperSession {
     /// acquire this performs the real unlock; everyone else blocks here and then sees `ready` already
     /// true once it's their turn (equivalent to TS's single shared in-flight promise).
     unlock_lock: Arc<AsyncMutex<()>>,
-    /// Same coalescing trick for `grant()` -- simplified to one global lock rather than per-credential
-    /// (concurrent grants for different credentials still end up serialized by the helper's own
-    /// cross-process auth lock, so this costs nothing in practice), remembering only the single most
-    /// recently granted (key, request_digest) pair (matches this session's actual usage pattern: one
-    /// credential at a time). Keying on the digest too, not just the credential, matters in per_use
-    /// mode: two concurrent calls for the same credential but different requests must each raise
-    /// their own Touch ID prompt, not have the second one silently ride the first one's approval --
-    /// see the digest check in `kv-core`'s `consume_grant`.
+    /// Serialize approval prompts; the helper decides whether a broad grant already exists.
     grant_lock: Arc<AsyncMutex<()>>,
-    last_granted: Arc<std::sync::Mutex<Option<GrantCacheEntry>>>,
 }
 
 /// A request interface carrying a purpose: tool handlers obtain it via `session.scoped(purpose)`.
@@ -123,62 +130,7 @@ impl Requester<'_> {
     }
 }
 
-/// Field names worth showing in an approval prompt when present at the top level of a JSON
-/// request body, in priority order -- picked to cover the first batch of templates mentioned in
-/// the action plan (OpenAI/Anthropic -> model, GitHub -> repo, Slack -> channel, Stripe -> amount)
-/// without tying this to any specific template: any JSON body with one of these keys benefits,
-/// not just the six named services. Deliberately NOT a per-template declarative rule (the
-/// originally planned design) -- that needs the credential's template id, which isn't available
-/// here without an extra round trip to the vault just to enrich a display string; this plain,
-/// template-agnostic field list gets most of the same user-visible benefit for far less
-/// machinery. Revisit if a real need for per-template precision shows up.
-const SUMMARY_BODY_FIELDS: &[&str] = &["model", "repo", "channel", "amount", "subject", "text"];
-
-/// A short `key=value` built from the first one or two `SUMMARY_BODY_FIELDS` present at the top
-/// level of a JSON object body, e.g. `model=gpt-5` for an OpenAI/Anthropic chat completion body.
-/// String values are truncated and single-lined; nested objects/arrays are skipped (showing e.g.
-/// a whole `messages` array wouldn't fit a prompt and isn't the point -- the field names above
-/// are chosen to be short, identifying values).
-fn summarize_body(body: &Value) -> Option<String> {
-    let obj = body.as_object()?;
-    let parts: Vec<String> = SUMMARY_BODY_FIELDS
-        .iter()
-        .filter_map(|&field| {
-            let v = obj.get(field)?;
-            let shown = match v {
-                Value::String(s) => s.chars().take(40).collect::<String>().replace('\n', " "),
-                Value::Number(n) => n.to_string(),
-                Value::Bool(b) => b.to_string(),
-                _ => return None, // objects/arrays/null: not a short, identifying value
-            };
-            Some(format!("{field}={shown}"))
-        })
-        .take(2)
-        .collect();
-    (!parts.is_empty()).then(|| parts.join(", "))
-}
-
-/// `"METHOD host/path"` for an httpRequest/httpTest op's params, e.g. `"POST api.openai.com/v1/
-/// chat/completions"` -- mirrors `kv_proxy::proxy::describe_target`'s format (not reused directly:
-/// this crate doesn't otherwise depend on kv-proxy, which is the privileged helper's concern, not
-/// the unprivileged MCP server's). Deliberately drops the query string, same as the audit log.
-/// Appends a short `summarize_body` hint (e.g. `· model=gpt-5`) when the body is a JSON object
-/// with a recognized field.
-fn http_request_hint(params: &Map<String, Value>) -> Option<String> {
-    let url = params.get("url")?.as_str()?;
-    let method = params
-        .get("method")
-        .and_then(Value::as_str)
-        .unwrap_or("GET");
-    let u = url::Url::parse(url).ok()?;
-    let mut s = format!("{} {}{}", method.to_uppercase(), u.host_str()?, u.path());
-    if let Some(summary) = params.get("body").and_then(summarize_body) {
-        s.push_str(" · ");
-        s.push_str(&summary);
-    }
-    Some(s.chars().take(300).collect())
-}
-
+/// Random identifier for this MCP process.
 fn gen_session_id() -> String {
     use rand::RngCore;
     let mut bytes = [0u8; 6];
@@ -198,6 +150,7 @@ impl HelperSession {
             inner: Arc::new(AsyncMutex::new(Inner {
                 child: None,
                 ready: false,
+                generation: 0,
                 pending: HashMap::new(),
                 next_id: 1,
                 cooldown_until: None,
@@ -206,7 +159,6 @@ impl HelperSession {
             })),
             unlock_lock: Arc::new(AsyncMutex::new(())),
             grant_lock: Arc::new(AsyncMutex::new(())),
-            last_granted: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -264,15 +216,7 @@ impl HelperSession {
 
     pub async fn lock(&self) {
         let mut inner = self.inner.lock().await;
-        inner.ready = false;
-        inner.unlocked_at = None;
-        inner.unlock_purpose = None;
-        for (_, p) in inner.pending.drain() {
-            let _ = p.send(Err(kv_i18n::t(
-                "凭证库已锁定",
-                "Credential vault is locked",
-            )));
-        }
+        inner.revoke();
         if let Some(mut c) = inner.child.take() {
             let _ = c.stdin.shutdown().await;
             let _ = c.child.start_kill();
@@ -292,20 +236,6 @@ impl HelperSession {
         } else {
             REQUEST_TIMEOUT
         };
-        // For an HTTP-shaped op, show the Touch ID prompt what it's actually about to send
-        // (method + host + path -- not the query string, matching how this same call is later
-        // audited). Built from the very params this call is sending, not re-derived later, so it
-        // can't drift from the real request; it's still just a display hint, not itself checked --
-        // the actual binding is `request_digest` below.
-        let request_hint = matches!(op, "httpRequest" | "httpTest")
-            .then(|| http_request_hint(&params))
-            .flatten();
-        // The digest the approval gets bound to server-side (`kv_ipc::request_digest`; see the
-        // comment on `consume_grant` in kv-core). Computed from these same `params`, so -- like
-        // `request_hint` -- it can't drift from the request this call is actually about to send.
-        let request_digest = matches!(op, "httpRequest" | "httpTest")
-            .then(|| kv_ipc::request_digest(&params))
-            .flatten();
         match self.send(op, params.clone(), timeout).await {
             Ok(v) => Ok(v),
             Err(e) => {
@@ -317,50 +247,34 @@ impl HelperSession {
                 let Some((ty, name)) = key.trim().split_once('/') else {
                     return Err(e);
                 };
-                self.grant(
-                    ty,
-                    name,
-                    unlock_purpose,
-                    request_hint.as_deref(),
-                    request_digest.as_deref(),
-                )
-                .await?;
+                self.grant(ty, name, unlock_purpose, Some(op), Some(&params))
+                    .await?;
                 self.send(op, params, timeout).await
             }
         }
     }
 
-    /// Authorizes this session to use a credential (concurrent grants for the same credential
-    /// *and* the same `request_digest` are coalesced into a single prompt -- see the `grant_lock`
-    /// doc comment; a different digest always gets its own round trip and its own prompt).
-    /// `request_hint`/`request_digest`: see `request_value`.
+    /// Send the complete requested operation; trusted prompt text and binding come from root.
     pub async fn grant(
         &self,
         ty: &str,
         name: &str,
         purpose: &str,
-        request_hint: Option<&str>,
-        request_digest: Option<&str>,
+        operation: Option<&str>,
+        request: Option<&Map<String, Value>>,
     ) -> Result<Value, SessionError> {
-        let key = format!("{ty}/{name}");
-        let cache_key = (key.clone(), request_digest.map(str::to_string));
         let _guard = self.grant_lock.lock().await;
-        if self.last_granted.lock().unwrap().as_ref() == Some(&cache_key) {
-            return Ok(serde_json::json!({"granted": key, "already": true}));
-        }
         let mut params = Map::new();
         params.insert("type".into(), Value::String(ty.to_string()));
         params.insert("name".into(), Value::String(name.to_string()));
         params.insert("purpose".into(), Value::String(purpose.to_string()));
-        if let Some(h) = request_hint {
-            params.insert("request_hint".into(), Value::String(h.to_string()));
+        if let Some(op) = operation {
+            params.insert("operation".into(), Value::String(op.into()));
         }
-        if let Some(d) = request_digest {
-            params.insert("request_digest".into(), Value::String(d.to_string()));
+        if let Some(request) = request {
+            params.insert("request".into(), Value::Object(request.clone()));
         }
-        let r = self.send("grant", params, GRANT_TIMEOUT).await?;
-        *self.last_granted.lock().unwrap() = Some(cache_key);
-        Ok(r)
+        self.send("grant", params, GRANT_TIMEOUT).await
     }
 
     async fn send(
@@ -430,6 +344,7 @@ impl HelperSession {
         purpose_in: &str,
         target: Option<&CredentialTarget>,
     ) -> Result<(), SessionError> {
+        let expected_generation = self.inner.lock().await.generation;
         {
             let inner = self.inner.lock().await;
             if let Some(until) = inner.cooldown_until {
@@ -571,15 +486,24 @@ impl HelperSession {
             }
         }
 
-        {
+        let generation = {
             let mut inner = self.inner.lock().await;
+            if inner.generation != expected_generation {
+                let _ = child.start_kill();
+                return Err(SessionError(kv_i18n::t(
+                    "会话在认证期间已锁定",
+                    "The session was locked during authentication",
+                )));
+            }
+            inner.generation += 1;
+            crate::gateway_env::activate_session_files();
             inner.ready = true;
             inner.unlocked_at = Some(SystemTime::now());
             inner.unlock_purpose = Some(purpose);
             inner.cooldown_until = None;
             inner.child = Some(ChildHandle { stdin, child });
-        }
-        *self.last_granted.lock().unwrap() = None;
+            inner.generation
+        };
 
         // Pump the helper's remaining stdout lines (Responses) to whichever request is waiting.
         let inner = self.inner.clone();
@@ -596,7 +520,11 @@ impl HelperSession {
                     Response::Ok { id, result, .. } => (id, Ok(result)),
                     Response::Err { id, error, .. } => (id, Err(error)),
                 };
-                if let Some(tx) = inner.lock().await.pending.remove(&id) {
+                let mut state = inner.lock().await;
+                if state.generation != generation {
+                    return;
+                }
+                if let Some(tx) = state.pending.remove(&id) {
                     let _ = tx.send(result);
                 }
             }
@@ -604,12 +532,9 @@ impl HelperSession {
             // The helper exited (or the pipe closed) on its own: clear state so the next request
             // re-authenticates rather than hanging forever waiting for a dead child.
             let mut g = inner.lock().await;
-            if g.child.is_some() {
-                g.ready = false;
+            if g.generation == generation && g.child.is_some() {
+                g.revoke();
                 g.child = None;
-                for (_, p) in g.pending.drain() {
-                    let _ = p.send(Err(kv_i18n::t("helper 已退出", "The helper exited")));
-                }
             }
         });
 
@@ -619,9 +544,10 @@ impl HelperSession {
             tokio::spawn(async move {
                 tokio::time::sleep(ttl).await;
                 let mut g = inner2.lock().await;
-                g.ready = false;
-                g.unlocked_at = None;
-                g.unlock_purpose = None;
+                if g.generation != generation {
+                    return;
+                }
+                g.revoke();
                 if let Some(mut c) = g.child.take() {
                     let _ = c.stdin.shutdown().await;
                     let _ = c.child.start_kill();
@@ -669,84 +595,6 @@ fn install_problem() -> Option<String> {
         }
     }
     None
-}
-
-#[cfg(test)]
-mod request_hint_tests {
-    use super::*;
-    use serde_json::json;
-
-    fn params(method: &str, url: &str, body: Option<Value>) -> Map<String, Value> {
-        let mut p = Map::new();
-        p.insert("method".into(), json!(method));
-        p.insert("url".into(), json!(url));
-        if let Some(b) = body {
-            p.insert("body".into(), b);
-        }
-        p
-    }
-
-    #[test]
-    fn plain_request_has_no_summary_suffix() {
-        let p = params("GET", "https://api.openai.com/v1/models", None);
-        assert_eq!(
-            http_request_hint(&p).unwrap(),
-            "GET api.openai.com/v1/models"
-        );
-    }
-
-    #[test]
-    fn openai_style_body_surfaces_the_model() {
-        let p = params(
-            "POST",
-            "https://api.openai.com/v1/chat/completions",
-            Some(json!({"model": "gpt-5", "messages": [{"role": "user", "content": "hi"}]})),
-        );
-        assert_eq!(
-            http_request_hint(&p).unwrap(),
-            "POST api.openai.com/v1/chat/completions · model=gpt-5"
-        );
-    }
-
-    #[test]
-    fn slack_style_body_surfaces_the_channel_not_the_long_text() {
-        let p = params(
-            "POST",
-            "https://slack.com/api/chat.postMessage",
-            Some(json!({"channel": "#general", "text": "deploy finished"})),
-        );
-        let hint = http_request_hint(&p).unwrap();
-        assert!(hint.contains("channel=#general"), "{hint}");
-        assert!(hint.contains("text=deploy finished"), "{hint}");
-    }
-
-    #[test]
-    fn a_long_or_multiline_field_value_is_truncated_and_single_lined() {
-        let body =
-            json!({"subject": "line one\nline two and then a lot more text past forty characters"});
-        let summary = summarize_body(&body).unwrap();
-        assert!(!summary.contains('\n'), "{summary}");
-        assert!(summary.len() < 60, "{summary}");
-    }
-
-    #[test]
-    fn a_body_with_no_recognized_fields_adds_nothing() {
-        let body = json!({"unrelated_field": "value"});
-        assert!(summarize_body(&body).is_none());
-    }
-
-    #[test]
-    fn a_non_object_body_is_ignored_without_panicking() {
-        assert!(summarize_body(&json!("just a string")).is_none());
-        assert!(summarize_body(&json!([1, 2, 3])).is_none());
-    }
-
-    #[test]
-    fn query_credential_http_request_without_url_has_no_hint() {
-        let mut p = Map::new();
-        p.insert("method".into(), json!("GET"));
-        assert!(http_request_hint(&p).is_none());
-    }
 }
 
 #[cfg(test)]

@@ -125,16 +125,28 @@ pub struct SessionAuth<G> {
     pub mode: Option<GrantMode>,
     /// The mode requested by the client (can only tighten it); used to recompute after a settings change.
     pub requested: Option<GrantMode>,
-    /// per_use mode: a single-use grant that has been authenticated but not yet used, keyed by
-    /// credential. The value is the request digest (§ `kv_ipc::request_digest`) the Touch ID
-    /// prompt was shown for, or `None` for a non-HTTP-shaped op that has nothing to bind to.
-    /// Consuming it (whether the digest matches or not) always removes the entry: a mismatch
-    /// must not be retriable against the same approval, and a match is one-time by definition.
-    pub one_shot: Option<HashMap<String, Option<String>>>,
+    /// per_use mode: approvals that have been authenticated but not yet used, keyed by
+    /// credential. Each binds one complete operation and the root-owned credential context, and
+    /// only a request with exactly that binding can use it. Several may be pending per
+    /// credential, so concurrent calls don't overwrite each other's approval.
+    one_shot: HashMap<String, Vec<PendingApproval>>,
     /// This session's local gateway. `None` in every test and in the root CLI; the main helper
     /// program sets it once, right after authentication succeeds (mirrors TS's `auth.gateway`).
     pub gateway: Option<Arc<Gateway>>,
     gate: G,
+}
+
+/// Bounds on pending per-use approvals, so unused approvals can't accumulate in a session.
+const MAX_PENDING_PER_CREDENTIAL: usize = 4;
+const MAX_PENDING_TOTAL: usize = 16;
+/// OAuth device sign-in polls the same device code until the user finishes in the browser; one
+/// approval covers that polling for at most this long (device codes expire sooner in practice).
+const DEVICE_POLL_APPROVAL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+struct PendingApproval {
+    binding: String,
+    /// `None`: used up by the first matching request. `Some`: reusable until then.
+    reusable_until: Option<std::time::Instant>,
 }
 
 /// A snapshot of the fields `settings_view`/audit need, taken by value so it doesn't borrow
@@ -153,7 +165,7 @@ impl<G: AuthorizeGate> SessionAuth<G> {
             grants: HashSet::new(),
             mode: None,
             requested: None,
-            one_shot: None,
+            one_shot: HashMap::new(),
             gateway: None,
             gate,
         }
@@ -167,12 +179,19 @@ impl<G: AuthorizeGate> SessionAuth<G> {
     /// Updates the current session's authorization state per settings (takes effect immediately
     /// after a settings change).
     pub fn apply_mode(&mut self, s: &Settings) {
+        let previous = self.mode;
         self.mode = Some(stricter(s.grant_mode, self.requested));
+        // A gateway issued under an earlier policy must not retain that policy's authority.
+        if previous != self.mode || self.mode == Some(GrantMode::PerUse) {
+            if let Some(gateway) = &self.gateway {
+                gateway.revoke_all();
+            }
+        }
         match self.mode {
             Some(GrantMode::PerUse) => {
                 self.grant_all = false;
                 self.grants.clear();
-                self.one_shot = Some(HashMap::new());
+                self.one_shot.clear();
             }
             Some(GrantMode::PerCredential) => {
                 self.grant_all = false;
@@ -197,31 +216,245 @@ impl<G: AuthorizeGate> SessionAuth<G> {
     /// `true` if `key` may be used right now under this session's mode, consuming a one-shot grant
     /// if that's what applies. Mirrors the `GRANT_REQUIRED_OPS` check in TS's `dispatch()`.
     ///
-    /// `current_digest` is the digest of the request about to execute (`None` if it isn't
-    /// HTTP-shaped). In per_use mode this must match the digest the Touch ID prompt was shown
-    /// for, or the grant doesn't count -- it was authorized for a *different* request (e.g. a
-    /// second call that raced in between the prompt and the retry), not this one. Either way the
-    /// one-shot entry is gone after this call: a mismatch can't be retried against, and a match
-    /// is used up.
-    fn consume_grant(&mut self, key: &str, current_digest: Option<&str>) -> bool {
-        if self.mode == Some(GrantMode::PerUse) {
-            match self.one_shot.get_or_insert_with(HashMap::new).remove(key) {
-                Some(approved_digest) => approved_digest.as_deref() == current_digest,
-                None => false,
+    /// `current_digest` binds the operation about to execute. In per_use mode it must equal the
+    /// binding of an approval shown for exactly this operation; anything else (a different
+    /// request, a changed stored configuration) finds no approval. A one-time approval is used up
+    /// by its match; a different request never consumes or reuses another request's approval.
+    fn consume_grant(&mut self, key: &str, current_digest: &str) -> bool {
+        if self.mode != Some(GrantMode::PerUse) {
+            return self.grant_all || self.grants.contains(key);
+        }
+        let Some(pending) = self.one_shot.get_mut(key) else {
+            return false;
+        };
+        let now = std::time::Instant::now();
+        pending.retain(|a| a.reusable_until.is_none_or(|until| until > now));
+        let found = pending.iter().position(|a| a.binding == current_digest);
+        if let Some(i) = found {
+            if pending[i].reusable_until.is_none() {
+                pending.remove(i);
             }
-        } else {
-            self.grant_all || self.grants.contains(key)
+        }
+        if pending.is_empty() {
+            self.one_shot.remove(key);
+        }
+        found.is_some()
+    }
+
+    fn add_pending(&mut self, key: String, binding: String, op: Op) {
+        let reusable_until =
+            (op == Op::OauthDevicePoll).then(|| std::time::Instant::now() + DEVICE_POLL_APPROVAL);
+        let total: usize = self.one_shot.values().map(Vec::len).sum();
+        if total >= MAX_PENDING_TOTAL {
+            // Drop the oldest approval of the busiest credential rather than grow without bound.
+            if let Some(list) = self.one_shot.values_mut().max_by_key(|l| l.len()) {
+                list.remove(0);
+            }
+            self.one_shot.retain(|_, l| !l.is_empty());
+        }
+        let list = self.one_shot.entry(key).or_default();
+        if list.len() >= MAX_PENDING_PER_CREDENTIAL {
+            list.remove(0);
+        }
+        list.push(PendingApproval {
+            binding,
+            reusable_until,
+        });
+    }
+}
+
+fn safe_error(vault: &Vault, p: &JsonMap, error: String) -> String {
+    let Ok((_, _, record)) = vault.get_record(
+        &get_str(p, "type").unwrap_or_default(),
+        &get_str(p, "name").unwrap_or_default(),
+    ) else {
+        return error;
+    };
+    let mut values: Vec<&str> = record
+        .secrets
+        .as_ref()
+        .map(|secrets| secrets.values().map(String::as_str).collect())
+        .unwrap_or_default();
+    values.push(&record.value);
+    let list = kv_proxy::redact::redaction_list(&values);
+    String::from_utf8_lossy(&kv_proxy::redact::redact(error.as_bytes(), &list)).into_owned()
+}
+
+/// Root-only context binds stored test/configuration changes as well as client parameters.
+fn operation_binding(vault: &Vault, op: Op, p: &JsonMap) -> kv_vault::Result<String> {
+    let (_, _, record) = vault.get_record(
+        &get_str(p, "type").unwrap_or_default(),
+        &get_str(p, "name").unwrap_or_default(),
+    )?;
+    let mut bound = p.clone();
+    bound.insert(
+        "__keyvalet_context".into(),
+        json!({
+            "updated_at": record.updated_at, "generation": record.generation, "http": record.http,
+        }),
+    );
+    Ok(kv_ipc::operation_digest(op.as_str(), &bound))
+}
+
+/// Operations a credential kind can perform. Others are refused before any prompt, so a prompt
+/// never describes something the credential cannot do.
+fn op_fits_kind(op: Op, kind: Kind) -> bool {
+    match op {
+        Op::AccessToken => matches!(
+            kind,
+            Kind::Oauth2 | Kind::GoogleServiceAccount | Kind::GithubApp | Kind::Jwt
+        ),
+        Op::Totp => kind == Kind::Totp,
+        Op::Aws => kind == Kind::Aws,
+        Op::OauthExchange | Op::OauthDeviceStart | Op::OauthDevicePoll => kind == Kind::Oauth2,
+        _ => true,
+    }
+}
+
+/// What a session grant exposes, from the stored record alone. The operation a client names is
+/// deliberately ignored: a direct helper client could omit or misstate it, and the grant covers
+/// every operation the credential supports for the rest of the session anyway.
+fn session_grant_description(record: &CredentialRecord) -> String {
+    match record.kind_or_static() {
+        Kind::Static if record.http.as_ref().is_some_and(|h| h.proxy_only) => kv_i18n::t(
+            "仅代理请求（AI 看不到明文）",
+            "Proxied requests only; value hidden from AI",
+        ),
+        Kind::Static => kv_i18n::t(
+            "可读取明文凭证（AI 可见）",
+            "Can read the plaintext credential (visible to AI)",
+        ),
+        Kind::Totp => kv_i18n::t(
+            "生成一次性验证码（AI 可见）",
+            "Generate one-time codes (visible to AI)",
+        ),
+        Kind::Aws => kv_i18n::t(
+            "获取 AWS 临时凭证或请求签名（AI 可见）",
+            "Get AWS temporary credentials or signatures (visible to AI)",
+        ),
+        _ => kv_i18n::t(
+            "获取访问令牌（AI 可见）",
+            "Get access tokens (visible to AI)",
+        ),
+    }
+}
+
+/// A per-use prompt: the operation plus every client parameter that changes what it does. The
+/// approval is bound to all of them, so what the user approves is what can run.
+fn grant_request_description(
+    op: Op,
+    p: &JsonMap,
+    record: &CredentialRecord,
+) -> kv_vault::Result<String> {
+    if op == Op::HttpRequest {
+        let (method, mut url) = proxy::precheck_request(
+            record,
+            get_str(p, "method").as_deref(),
+            &get_str(p, "url").unwrap_or_default(),
+        )?;
+        let mut query: Vec<(String, String)> = get_str_map(p, "query")
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        query.sort();
+        if !query.is_empty() {
+            url.query_pairs_mut().extend_pairs(query);
+        }
+        let mut headers: Vec<(String, String)> = get_str_map(p, "headers")
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        headers.sort();
+        let body = p.get("body").map(|b| match b {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        });
+        let target = format!("{}{}", url.host_str().unwrap_or_default(), url.path());
+        return Ok(crate::prompt::http_request(
+            &method,
+            &target,
+            url.query(),
+            &headers,
+            body.as_deref(),
+        ));
+    }
+    if op == Op::HttpTest {
+        if let Some(test) = record.http.as_ref().and_then(|h| h.test.as_ref()) {
+            // Never render secret placeholders into authentication prompts.
+            let target = proxy::describe_target(Some(&test.method), &test.url)
+                .unwrap_or_else(|| kv_i18n::t("已保存的验证请求", "saved verification request"));
+            return Ok(kv_i18n::t(
+                &format!("验证凭证 · {target}"),
+                &format!("Test credential · {target}"),
+            ));
         }
     }
+    Ok(match op {
+        Op::Get if record.kind_or_static() == Kind::Static => kv_i18n::t(
+            "读取明文凭证（AI 可见）",
+            "Read plaintext credential (visible to AI)",
+        ),
+        Op::Get => kv_i18n::t(
+            "查看凭证信息（不含秘密）",
+            "View credential info (no secrets)",
+        ),
+        Op::AccessToken => {
+            let mut details = Vec::new();
+            let scopes = str_array(p, "scopes");
+            if !scopes.is_empty() {
+                details.push(format!("scopes: {}", scopes.join(" ")));
+            }
+            let repositories = str_array(p, "repositories");
+            if !repositories.is_empty() {
+                details.push(format!("repos: {}", repositories.join(", ")));
+            }
+            if let Some(permissions) = p.get("permissions").and_then(Value::as_object) {
+                let mut pairs: Vec<String> = permissions
+                    .iter()
+                    .map(|(k, v)| format!("{k}={}", v.as_str().unwrap_or("?")))
+                    .collect();
+                pairs.sort();
+                details.push(format!("permissions: {}", pairs.join(", ")));
+            }
+            crate::prompt::detail_line(&kv_i18n::t("获取访问令牌", "Get an access token"), &details)
+        }
+        Op::Totp => kv_i18n::t("生成一次性验证码", "Generate a one-time code"),
+        Op::Aws => {
+            let details: Vec<String> = get_f64(p, "duration_seconds")
+                .map(|d| {
+                    kv_i18n::t(
+                        &format!("有效期 {} 秒", d as i64),
+                        &format!("valid {} s", d as i64),
+                    )
+                })
+                .into_iter()
+                .collect();
+            crate::prompt::detail_line(
+                &kv_i18n::t(
+                    "获取 AWS 访问凭证或请求签名",
+                    "Get AWS credentials or a request signature",
+                ),
+                &details,
+            )
+        }
+        Op::HttpConfigure => kv_i18n::t("修改代理请求设置", "Change proxy request settings"),
+        Op::HttpTest => kv_i18n::t("验证凭证", "Test credential"),
+        Op::OauthExchange => {
+            kv_i18n::t("交换 OAuth 授权码", "Exchange an OAuth authorization code")
+        }
+        Op::OauthDeviceStart => kv_i18n::t("开始 OAuth 设备登录", "Start OAuth device sign-in"),
+        Op::OauthDevicePoll => kv_i18n::t("完成 OAuth 设备登录", "Complete OAuth device sign-in"),
+        Op::GatewayOpen => kv_i18n::t("开启本地代理网关", "Open local proxy gateway"),
+        _ => op.as_str().to_string(),
+    })
 }
 
 async fn grant_credential<G: AuthorizeGate>(
     vault: &Vault,
     p: &JsonMap,
-    ctx: &ClientContext,
     auth: &mut SessionAuth<G>,
 ) -> kv_vault::Result<Value> {
-    let (ty, name, _) = vault.get_record(
+    let (ty, name, record) = vault.get_record(
         &get_str(p, "type").unwrap_or_default(),
         &get_str(p, "name").unwrap_or_default(),
     )?;
@@ -230,54 +463,59 @@ async fn grant_credential<G: AuthorizeGate>(
     if !per_use && (auth.grant_all || auth.grants.contains(&key)) {
         return Ok(json!({"granted": key, "already": true}));
     }
-    let purpose = clean_purpose(get_str(p, "purpose").as_deref()).unwrap_or_default();
-    // Set only for an HTTP-shaped call: method + host + path, built by the MCP server from the
-    // same request it's about to send. In per_use mode this prompt's approval is bound to
-    // `request_digest` below (checked by `consume_grant`), so the text really does describe what
-    // gets executed; in the other modes (per_credential/session/remember) the credential is
-    // authorized broadly for the rest of the session, so later requests under the same grant are
-    // never shown or checked against this one -- see SECURITY.md.
-    let request = get_str(p, "request_hint")
-        .map(|h| clip(&h))
-        .unwrap_or_default();
-    // The digest (see `kv_ipc::request_digest`) of the exact request this prompt is about to
-    // authorize, computed by the MCP server from the same params it's about to retry with.
-    // `None` for a non-HTTP-shaped op (get/totp/aws/...), which has nothing to bind to.
-    let request_digest = get_str(p, "request_digest");
-    let (req_zh, req_en) = if request.is_empty() {
-        (String::new(), String::new())
-    } else {
-        (
-            format!("请求：{request}\n"),
-            format!("Request: {request}\n"),
-        )
+    // Untrusted clients supply the operation, never its trusted display text or digest.
+    let operation = get_str(p, "operation");
+    let approved_params = p.get("request").and_then(Value::as_object);
+    let binding = match (operation.as_deref(), approved_params) {
+        (Some(operation), Some(request)) => {
+            let op = Op::parse(operation)
+                .filter(Op::grant_required)
+                .ok_or_else(|| VaultError::new("授权操作无效", "Invalid grant operation"))?;
+            let request_key = cred_key(
+                &get_str(request, "type").unwrap_or_default(),
+                &get_str(request, "name").unwrap_or_default(),
+            )?;
+            if request_key != key {
+                return Err(VaultError::new(
+                    "授权请求的凭证不匹配",
+                    "Grant request credential mismatch",
+                ));
+            }
+            if !op_fits_kind(op, record.kind_or_static()) {
+                return Err(VaultError::new(
+                    "该操作不适用于这种凭证",
+                    "This operation does not apply to this kind of credential",
+                ));
+            }
+            if per_use && op == Op::GatewayOpen {
+                return Err(VaultError::new("每次授权模式不支持可复用网关，请使用 credential_http_request", "Reusable gateways are unavailable in per-use mode; use credential_http_request"));
+            }
+            // Per-use prompts describe (and bind) the exact operation; session prompts describe
+            // the record's exposure instead, whatever operation prompted the grant.
+            let description = if per_use {
+                grant_request_description(op, request, &record)?
+            } else {
+                session_grant_description(&record)
+            };
+            Some((operation_binding(vault, op, request)?, op, description))
+        }
+        (None, None) if !per_use => None,
+        _ => {
+            return Err(VaultError::new(
+                "每次授权必须提供完整操作和请求",
+                "A complete operation and request are required for per-use approval",
+            ))
+        }
     };
-    let where_ = kv_i18n::t(
-        &format!(
-            "{req_zh}目的：{purpose}\n来源目录（agent 提供）：{}",
-            ctx.cwd.as_deref().unwrap_or("未知")
-        ),
-        &format!(
-            "{req_en}Purpose: {purpose}\nWorking directory (reported by agent): {}",
-            ctx.cwd.as_deref().unwrap_or("unknown")
-        ),
-    );
-    let reason = if per_use {
-        kv_i18n::t(
-            &format!("授权本次使用凭证（仅此一次）：{key}\n{where_}"),
-            &format!("Authorize a single use of credential: {key}\n{where_}"),
-        )
-    } else {
-        kv_i18n::t(
-            &format!("授权本次 AI 会话使用凭证：{key}\n{where_}"),
-            &format!("Authorize this AI session to use credential: {key}\n{where_}"),
-        )
+    let description = match &binding {
+        Some((_, _, description)) => description.clone(),
+        None => session_grant_description(&record),
     };
+    let reason = crate::prompt::credential_grant(&key, per_use, Some(&description));
     auth.authorize(&reason).await.map_err(VaultError)?;
     if per_use {
-        auth.one_shot
-            .get_or_insert_with(HashMap::new)
-            .insert(key.clone(), request_digest);
+        let (binding, op, _) = binding.expect("per-use requires a request");
+        auth.add_pending(key.clone(), binding, op);
     } else {
         auth.grants.insert(key.clone());
     }
@@ -321,21 +559,20 @@ fn describe_settings(s: &Settings) -> String {
         )
     };
     match s.grant_mode {
-        GrantMode::PerUse => kv_i18n::t(
-            "每次使用凭证都要 Touch ID",
-            "Touch ID for every use of a credential",
-        ),
+        GrantMode::PerUse => {
+            kv_i18n::t("每次使用凭证单独授权", "Approve every use of a credential")
+        }
         GrantMode::PerCredential => kv_i18n::t(
-            "每个会话中，每个凭证按一次 Touch ID",
-            "Touch ID once per credential per session",
+            "每个凭证单独授权，本会话内有效",
+            "Approve each credential for this session",
         ),
         GrantMode::PerSession => kv_i18n::t(
-            "每个会话按一次 Touch ID，之后可使用全部凭证",
-            "Touch ID once per session, then all credentials",
+            "本会话可使用全部凭证，新会话需解锁",
+            "Allow all credentials for this session; unlock each new session",
         ),
         GrantMode::Remember => kv_i18n::t(
-            &format!("按一次 Touch ID，{hours}内所有会话都不再需要认证"),
-            &format!("Touch ID once, then no authentication for any session for {hours}"),
+            &format!("记住全部凭证授权（{hours}），新会话仍需解锁"),
+            &format!("Remember all credential approvals ({hours}); unlock each new session"),
         ),
     }
 }
@@ -420,18 +657,7 @@ async fn settings_op<G: AuthorizeGate, C: Confirmer>(
     }
 
     if is_loosening(&current, &next) {
-        let purpose = clean_purpose(get_str(p, "purpose").as_deref()).unwrap_or_default();
-        let truncated = clip(&purpose);
-        let msg = kv_i18n::t(
-            &format!(
-                "修改 KeyValet 授权设置为：{}\n目的：{truncated}",
-                describe_settings(&next)
-            ),
-            &format!(
-                "Change KeyValet authorization to: {}\nPurpose: {truncated}",
-                describe_settings(&next)
-            ),
-        );
+        let msg = crate::prompt::settings_change(&describe_settings(&next));
         let approved = match auth.as_deref() {
             Some(a) => a.authorize(&msg).await.is_ok(),
             None => {
@@ -878,6 +1104,12 @@ async fn gateway_open_op<G: AuthorizeGate>(
     p: &JsonMap,
     auth: Option<&SessionAuth<G>>,
 ) -> kv_vault::Result<Value> {
+    if auth.is_some_and(|a| a.mode == Some(GrantMode::PerUse)) {
+        return Err(VaultError::new(
+            "每次授权模式不支持可复用网关，请使用 credential_http_request",
+            "Reusable gateways are unavailable in per-use mode; use credential_http_request",
+        ));
+    }
     let (ty, name, record) = vault.get_record(
         &get_str(p, "type").unwrap_or_default(),
         &get_str(p, "name").unwrap_or_default(),
@@ -975,13 +1207,17 @@ async fn run<G: AuthorizeGate, C: Confirmer>(
             None => Ok(
                 json!({"granted": cred_key(&get_str(p, "type").unwrap_or_default(), &get_str(p, "name").unwrap_or_default())?, "already": true}),
             ),
-            Some(a) => grant_credential(vault, p, ctx, a).await,
+            Some(a) => grant_credential(vault, p, a).await,
         },
         Op::Settings => settings_op(vault, p, auth, confirmer).await,
-        Op::SessionInfo => Ok(settings_view(
-            &read_settings(&vault.dir),
-            auth.as_deref().map(SessionAuth::snapshot).as_ref(),
-        )),
+        Op::SessionInfo => {
+            let mut view = settings_view(
+                &read_settings(&vault.dir),
+                auth.as_deref().map(SessionAuth::snapshot).as_ref(),
+            );
+            view["vault_protection"] = serde_json::to_value(vault.protection()?)?;
+            Ok(view)
+        }
         Op::AuditQuery => Ok(audit_query(vault, p, ctx)),
         Op::SetupProtocol => {
             if get_bool(p, "overwrite") {
@@ -1168,6 +1404,17 @@ pub async fn dispatch<G: AuthorizeGate, C: Confirmer>(
         audit(false, Some(&message), quiet);
         return Response::err(id, message);
     }
+    if let Some(a) = auth.as_deref_mut() {
+        // A mode tightened elsewhere (the terminal CLI, another session) applies to this live
+        // session from its next request, revoking gateway tokens like a local change would.
+        // Loosening still needs this session's own authenticated settings change.
+        if let Some(current) = a.mode {
+            let latest = read_settings(&vault.dir);
+            if stricter(current, Some(stricter(latest.grant_mode, a.requested))) != current {
+                a.apply_mode(&latest);
+            }
+        }
+    }
     if op.grant_required() {
         if let Some(a) = auth.as_deref_mut() {
             let key = match cred_key(
@@ -1180,7 +1427,15 @@ pub async fn dispatch<G: AuthorizeGate, C: Confirmer>(
                     return Response::err(id, e.0);
                 }
             };
-            if !a.consume_grant(&key, kv_ipc::request_digest(&params).as_deref()) {
+            let binding = match operation_binding(vault, op, &params) {
+                Ok(binding) => binding,
+                Err(e) => {
+                    let message = safe_error(vault, &params, e.0);
+                    audit(false, Some(&message), quiet);
+                    return Response::err(id, message);
+                }
+            };
+            if !a.consume_grant(&key, &binding) {
                 let message = format!("{}{key}", kv_ipc::GRANT_REQUIRED_PREFIX);
                 audit(false, Some(&message), quiet);
                 return Response::err(id, message);
@@ -1206,8 +1461,76 @@ pub async fn dispatch<G: AuthorizeGate, C: Confirmer>(
             Response::ok(id, result)
         }
         Err(e) => {
-            audit(false, Some(&e.0), quiet);
-            Response::err(id, e.0)
+            let error = safe_error(vault, &params, e.0);
+            audit(false, Some(&error), quiet);
+            Response::err(id, error)
         }
+    }
+}
+
+#[cfg(test)]
+mod pending_approval_tests {
+    use super::*;
+
+    struct NoGate;
+    impl AuthorizeGate for NoGate {
+        async fn authorize(&self, _reason: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn per_use() -> SessionAuth<NoGate> {
+        let mut auth = SessionAuth::new(NoGate);
+        auth.mode = Some(GrantMode::PerUse);
+        auth
+    }
+
+    #[test]
+    fn one_time_approvals_match_exactly_once_and_are_bounded() {
+        let mut auth = per_use();
+        auth.add_pending("api_key/a".into(), "b1".into(), Op::HttpRequest);
+        assert!(!auth.consume_grant("api_key/a", "other"));
+        assert!(auth.consume_grant("api_key/a", "b1"));
+        assert!(!auth.consume_grant("api_key/a", "b1"));
+        for i in 0..10 {
+            auth.add_pending("api_key/a".into(), format!("x{i}"), Op::HttpRequest);
+        }
+        assert_eq!(auth.one_shot["api_key/a"].len(), MAX_PENDING_PER_CREDENTIAL);
+        assert!(
+            !auth.consume_grant("api_key/a", "x0"),
+            "oldest dropped first"
+        );
+        assert!(auth.consume_grant("api_key/a", "x9"));
+        for i in 0..40 {
+            auth.add_pending(format!("api_key/k{i}"), "b".into(), Op::Get);
+        }
+        let total: usize = auth.one_shot.values().map(Vec::len).sum();
+        assert!(total <= MAX_PENDING_TOTAL);
+    }
+
+    #[test]
+    fn a_device_poll_approval_covers_repeated_polls_until_it_expires() {
+        let mut auth = per_use();
+        auth.add_pending("oauth2/work".into(), "poll".into(), Op::OauthDevicePoll);
+        for _ in 0..3 {
+            assert!(auth.consume_grant("oauth2/work", "poll"));
+        }
+        assert!(!auth.consume_grant("oauth2/work", "other-device-code"));
+        auth.one_shot.get_mut("oauth2/work").unwrap()[0].reusable_until =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        assert!(!auth.consume_grant("oauth2/work", "poll"));
+        assert!(auth.one_shot.is_empty());
+    }
+
+    #[test]
+    fn a_policy_change_discards_pending_approvals() {
+        let mut auth = per_use();
+        auth.add_pending("api_key/a".into(), "b1".into(), Op::Get);
+        auth.apply_mode(&Settings {
+            grant_mode: GrantMode::PerUse,
+            remember_hours: 8.0,
+            remember_until: None,
+        });
+        assert!(!auth.consume_grant("api_key/a", "b1"));
     }
 }

@@ -1,10 +1,11 @@
 # KeyValet 战略方案：调研汇总、最终架构与商业模式
 
 - 日期：2026-10-07
+- 决策更新：2026-10-09，平台支持与密钥保护按[产品 §1.4](product-2026-10.zh-CN.md#14-平台支持与密钥保护)执行：Mac 硬件保护先行，Linux / CI 下一阶段优先，Windows 按需求排期，云端隔离执行先做 AWS。
 - 作者：Guang（调研与整理由 Claude 协助）
 - 状态：决策已定，见 §1.3；数据截至 2026-10-07。第三版（2026-10-08）按整体 review 改为「独立开发者版本」：Free + Team 先行，手机阶段 3，enclave 与远程 MCP 阶段 4；第二版（10-07）对第一版的「未核实清单」逐项复核，已核实项去掉了标记并改为官方数字；仍标 [未核实] 的内容没有在一手来源上确认，见 §15.2 和 §15.3
 - 注意：`docs/` 目录由 GitHub Pages 对外发布，本文含定价与财务假设，提交前请确认是否要公开
-- 配套：技术架构见 `docs/architecture-2026-10.zh-CN.md`（阶段 0–3，首批运行时 Claude Code、Codex、Cursor、Grok）；产品规划见 `docs/product-2026-10.zh-CN.md`；营销规划见 `docs/marketing-2026-10.zh-CN.md`；开源规划见 `docs/opensource-2026-10.zh-CN.md`；执行版行动指南见 `docs/action-plan-2026-10.zh-CN.md`
+- 配套：技术架构见 `docs/architecture-2026-10.md`（阶段 0–3，首批运行时 Claude Code、Codex、Cursor、Grok）；产品规划见 `docs/product-2026-10.zh-CN.md`；营销规划见 `docs/marketing-2026-10.zh-CN.md`；开源规划见 `docs/opensource-2026-10.zh-CN.md`；执行版行动指南见 `docs/action-plan-2026-10.zh-CN.md`
 
 ## 目录
 
@@ -638,6 +639,8 @@ trait SecretSource {
 
 顺序原则：先做能收费的，再做手机，最后做 enclave。每阶段有门槛，不达标不进下一阶段。
 
+2026-10-09 补充决策：macOS Secure Enclave 本地保护现在推进，不等待 Team 或云端执行；本地硬件保护属于基础安全能力，不以 Free / Team 区分。Linux / CI 优先做调用与身份接入，TPM 可选，远程执行依赖配对与 relay。Windows 原生 TPM + Hello 支持按明确用户需求排期，不承诺原阶段 4 的固定月份。云端隔离执行随设备离线 / 无人值守需求推进，首个方案为 AWS Nitro Enclaves + KMS，BYO-KMS 默认；可作为承担部署与运维成本的付费能力。VBS Enclaves、Linux SGX、Azure / GCP 当前只预留接口。技术保证及兼容、恢复要求见产品 §1.4 与架构 §8.0。
+
 ```
 月  0   1        4             8               14                      24
     │───│────────│─────────────│───────────────│───────────────────────│
@@ -652,11 +655,11 @@ trait SecretSource {
 
 | 阶段 | 月份 | 交付物 | 门槛 |
 | --- | --- | --- | --- |
-| 0 发布 | 0–1 | 按 `marketing/launch-plan.md` 发 v0.1；审批弹窗显示 method/host/path 并绑定请求摘要；工具 annotations；hooks 复用到 Codex，Cursor 适配，Grok 核实后 MCP 接入；SDK 升级到 2026-07-28 规范；`keyvalet scan`；商标检索；启动海外主体注册；官网改版（定价页、对比页、安全页） | 发布完成，首批反馈 |
-| 1 策略与 Linux | 1–4 | 策略引擎 v1（风险分级、host/method 规则、预算、`.keyvalet/policy.yaml`）；grant 范围明确化；模板 `summarize`；Linux helper（系统用户 + Unix socket，TPM2 可选，TTY 仅 Quick）；`keyvalet hooks install --all`；审计哈希链；能力令牌（Mac 签发，CI 使用） | 1 万安装；有 ≥3 条凭据的周活占比 ≥ 20%；每周活审批次数与拒绝率有数据 |
+| 0 发布 | 0–1 | macOS Secure Enclave 本地主密钥保护验证与显式迁移（P §1.4）；按 `marketing/launch-plan.md` 发 v0.1；审批弹窗显示 method/host/path 并绑定请求摘要；工具 annotations；hooks 复用到 Codex，Cursor 适配，Grok 核实后 MCP 接入；SDK 升级到 2026-07-28 规范；`keyvalet scan`；商标检索；启动海外主体注册；官网改版（定价页、对比页、安全页） | 发布完成，首批反馈 |
+| 1 策略与 Linux | 1–4 | 策略引擎 v1（风险分级、host/method 规则、预算、`.keyvalet/policy.yaml`）；grant 范围明确化；模板 `summarize`；Linux / CI 调用与身份接入、本地 helper 兼容路径（系统用户 + Unix socket，TPM2 可选，TTY 仅 Quick；P §1.4）；`keyvalet hooks install --all`；审计哈希链；能力令牌（Mac 签发，CI 使用） | 1 万安装；有 ≥3 条凭据的周活占比 ≥ 20%；每周活审批次数与拒绝率有数据 |
 | 2 relay + Team v1 收费 | 4–8 | 自建 relay（Docker，官方实例美国托管，无推送）；`kv-relay-client` 用户态进程；密文同步与 vault v2；Team v1（邮箱账号、成员、共享凭据 Mac 对 Mac 包裹、org 策略、审计导出、GitHub OIDC CI 身份）；Team Web 控制台 v1；Stripe；透明代理 opt-in（会话 token、CA 在 helper）；1Password 与 Infisical 后端；10 家设计合作伙伴 | 第 6 个月 3 家付费团队；D30 留存 ≥ 25%；`proxy_only` 占比 ≥ 60% |
 | 3 iPhone 与 Team 完整版 | 8–14 | iPhone App 上架（两级审批、配对、NSE、App Attest）；推送网关；控制台「浏览器作为设备」；`remote-phone` Approver；审批路由到 owner、N-of-M；Linux / CI 手机强审批；OIDC SSO（Ory Hydra）；Team 完整版定价；第一次第三方安全审计 | 20 家付费团队；周活 8,000；第 9 个月融资复盘 |
-| 4 CI 离线执行、远程 MCP、Enterprise | 14–24 | Nitro 执行端（BYO-KMS 优先，托管 KMS 带信任声明）、可复现 EIF、客户端固定 PCR 允许列表；远程 MCP 端点（Hydra 作 AS）；Enterprise 自托管 Terraform；SCIM；Okta Cross-App Access；Vault / OpenBao 后端；SOC 2 Type I；Android App 与 Windows 审批端；凭据轮换；标准参与（MCP ext-auth 扩展；user-mediated delivery 草案只跟踪） | 5 家企业合同，或附加项收入 ≥ 5 万美元/年 |
+| 4 CI 离线执行、远程 MCP、Enterprise | 14–24 | AWS Nitro 执行端（BYO-KMS 优先，托管 KMS 带信任声明）、可复现 EIF、客户端固定 PCR 允许列表；远程 MCP 端点（Hydra 作 AS）；Enterprise 自托管 Terraform；SCIM；Okta Cross-App Access；Vault / OpenBao 后端；SOC 2 Type I；Android App；Windows TPM + Hello 本地客户端按明确需求另行排期；凭据轮换；标准参与（MCP ext-auth 扩展；user-mediated delivery 草案只跟踪） | 5 家企业合同，或附加项收入 ≥ 5 万美元/年 |
 
 ---
 

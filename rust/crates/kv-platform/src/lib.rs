@@ -4,9 +4,13 @@
 //! root's authority.
 
 #[cfg(target_os = "macos")]
+pub mod enclave;
+#[cfg(target_os = "macos")]
 pub mod macos;
 pub mod paths;
 pub mod trust;
+#[cfg(unix)]
+pub mod user;
 
 /// The thing that actually shows a biometric (or password-fallback) prompt to the user and reports
 /// whether they approved it.

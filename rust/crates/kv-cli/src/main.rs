@@ -17,6 +17,15 @@ fn fatal(msg: &str) -> ! {
 fn usage() -> String {
     kv_i18n::t(
         "用法：keyvalet <命令>\n\n\
+        \u{20}\u{20}setup-enclave                      初始化或迁移到 macOS 必需的硬件保护\n\
+        \u{20}\u{20}protection                         查看主密钥保护方式（无需 Touch ID）\n\
+        \u{20}\u{20}enclave-test                       两次认证验证硬件密钥，不修改凭证库\n\
+        \u{20}\u{20}migrate-to-enclave                 启用 Secure Enclave，设置独立恢复口令\n\
+        \u{20}\u{20}recover-vault                      用恢复口令重新绑定本机硬件密钥\n\
+        \u{20}\u{20}finish-enclave-migration           认证后清理中断迁移遗留的文件密钥\n\
+        \u{20}\u{20}rotate-recovery                    更换凭证库密钥与恢复口令（并启用设备绑定）\n\
+        \u{20}\u{20}recovery-check                     用恢复口令验证可解密（不用硬件、不修改、不输出值）\n\
+        \u{20}\u{20}recovery-read <types|list|get> …   应急：Secure Enclave 不可用时用恢复口令只读访问\n\
         \u{20}\u{20}types                              列出凭证类型\n\
         \u{20}\u{20}list [type]                        列出凭证（不含值）\n\
         \u{20}\u{20}get <type> <name>                  输出凭证值（协议凭证输出完整配置和秘密）\n\
@@ -33,6 +42,15 @@ fn usage() -> String {
         \u{20}\u{20}scan [--report-only]               在常见配置文件（.env、~/.claude.json 等）里找可能的密钥，弹窗勾选后导入并从原文件移除（备份在 <file>.bak-keyvalet）；加 --report-only 只报告不改动\n\
         \u{20}\u{20}\u{20}\u{20}\u{20}\u{20}--report-only                  只扫描和报告，不弹窗、不导入、不改动任何文件",
         "Usage: keyvalet <command>\n\n\
+        \u{20}\u{20}setup-enclave                      Initialize or migrate to required macOS hardware protection\n\
+        \u{20}\u{20}protection                         Show master-key protection (no Touch ID)\n\
+        \u{20}\u{20}enclave-test                       Verify hardware key with two prompts; vault unchanged\n\
+        \u{20}\u{20}migrate-to-enclave                 Enable Secure Enclave and set a recovery passphrase\n\
+        \u{20}\u{20}recover-vault                      Rebind the vault to this Mac with the recovery passphrase\n\
+        \u{20}\u{20}finish-enclave-migration           Authenticate and remove a leftover file key\n\
+        \u{20}\u{20}rotate-recovery                    Rotate the vault key and recovery passphrase (adds device binding)\n\
+        \u{20}\u{20}recovery-check                     Verify the recovery passphrase decrypts (no hardware, no changes, no values)\n\
+        \u{20}\u{20}recovery-read <types|list|get> …   Emergency read-only access with the recovery passphrase if Secure Enclave is unusable\n\
         \u{20}\u{20}types                              List credential types\n\
         \u{20}\u{20}list [type]                        List credentials (without values)\n\
         \u{20}\u{20}get <type> <name>                  Print a credential value (protocol credentials print full config and secrets)\n\
@@ -158,6 +176,13 @@ fn audited<T>(
 
 fn main() {
     unsafe { libc::umask(0o077) };
+    unsafe {
+        let limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        libc::setrlimit(libc::RLIMIT_CORE, &limit);
+    }
     let self_path = std::env::current_exe().unwrap_or_default();
     if let Err(e) = verify_root_environment(&self_path, std::path::Path::new(CLI_BIN), &[]) {
         fatal(&e);
@@ -184,13 +209,54 @@ fn main() {
         }
         _ => {}
     }
-    let cmd = cmd.unwrap();
+    let mut cmd = cmd.unwrap();
+    let mut args = args;
 
     let vault = Vault::new(VAULT_DIR);
-    if let Err(e) = vault.init() {
-        fatal(&e.0);
+    // `recovery-read <cmd> ...` runs one read-only command after opening the vault with the
+    // recovery passphrase instead of Secure Enclave; the vault rejects writes in that state.
+    let recovery_read = cmd == "recovery-read";
+    if recovery_read {
+        if !matches!(
+            args.first().map(String::as_str),
+            Some("types" | "list" | "get")
+        ) {
+            fatal(&kv_i18n::t(
+                "用法：recovery-read <types|list [type]|get <type> <name>>",
+                "Usage: recovery-read <types|list [type]|get <type> <name>>",
+            ));
+        }
+        cmd = args.remove(0);
     }
-    let client = json!({"client": "keyvalet-cli", "user": std::env::var("SUDO_USER").ok()});
+    let mut client = json!({"client": "keyvalet-cli", "user": std::env::var("SUDO_USER").ok()});
+    if recovery_read {
+        client["access"] = json!("recovery_passphrase_read_only");
+        let password = enter_recovery_password();
+        let count = audited(&vault, "recoveryUnlock", Map::new(), &client, || {
+            vault.open_recovery_read_only(&password)
+        });
+        eprintln!(
+            "{}",
+            kv_i18n::t(
+                &format!("已用恢复口令只读打开凭证库（{count} 条凭证）；不会修改凭证库"),
+                &format!("Opened the vault read-only with the recovery passphrase ({count} credentials); no changes will be made")
+            )
+        );
+    } else {
+        if enclave_command(&cmd, &args, &vault, &client) {
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        let initialized = vault.init_with_provider(
+            &kv_platform::enclave::EnclaveMasterKeyProvider,
+            &kv_core::prompt::terminal_unlock(&cmd),
+        );
+        #[cfg(not(target_os = "macos"))]
+        let initialized = vault.init_legacy();
+        if let Err(e) = initialized {
+            fatal(&e.0);
+        }
+    }
 
     match cmd.as_str() {
         "types" => {
@@ -469,6 +535,401 @@ fn main() {
     }
 }
 
+fn recovery_password(confirm: bool) -> zeroize::Zeroizing<String> {
+    let prompt = kv_i18n::t(
+        "输入独立的恢复长口令（12–1024 字节，建议六个以上随机单词）。请离线保管；换机恢复需要它，持有口令与 vault 密文可绕过硬件解密：",
+        "Enter a separate recovery passphrase (12–1024 bytes; preferably six or more random words). Keep it offline for device recovery; the passphrase and encrypted vault can decrypt without the hardware: ");
+    let mut retry = String::new();
+    loop {
+        let password = read_recovery_secret(&format!("{retry}{prompt}"));
+        if let Err(error) = kv_vault::WrappedMasterKey::validate_password(&password) {
+            retry = format!("{}\n\n", error.0);
+            continue;
+        }
+        if confirm {
+            let again = read_recovery_secret(&kv_i18n::t(
+                "再输入一次恢复口令确认：",
+                "Enter the recovery passphrase again to confirm: ",
+            ));
+            if *password != *again {
+                retry = format!(
+                    "{}\n\n",
+                    kv_i18n::t(
+                        "两次输入不一致，请重新输入。",
+                        "The entries do not match; please try again."
+                    )
+                );
+                continue;
+            }
+        }
+        return password;
+    }
+}
+
+/// Opening an existing recovery wrapper: no strength rules or confirmation, a wrong passphrase
+/// simply fails to decrypt.
+fn enter_recovery_password() -> zeroize::Zeroizing<String> {
+    read_recovery_secret(&kv_i18n::t(
+        "输入凭证库的恢复口令：",
+        "Enter the vault's recovery passphrase: ",
+    ))
+}
+
+fn read_recovery_secret(prompt: &str) -> zeroize::Zeroizing<String> {
+    let failed = || -> ! {
+        fatal(&kv_i18n::t(
+            "恢复口令输入已取消或失败",
+            "Recovery passphrase entry cancelled or failed",
+        ))
+    };
+    if std::io::stdin().is_terminal() {
+        return zeroize::Zeroizing::new(
+            rpassword::prompt_password(prompt).unwrap_or_else(|_| failed()),
+        );
+    }
+    // Only fixed, localized prompts reach this dialog. Passwords return directly to the root
+    // CLI through a private pipe; never through an agent, argv, environment or temporary file.
+    let (uid, gid) = kv_platform::user::invoking_user().unwrap_or_else(|| failed());
+    use std::os::unix::process::CommandExt;
+    let script = r#"on run argv
+      set r to display dialog (item 1 of argv) with title "KeyValet · Recovery" default answer "" with hidden answer buttons {item 2 of argv, item 3 of argv} default button 2 cancel button 1 with icon caution giving up after 180
+      if gave up of r then error number -128
+      return text returned of r
+    end run"#;
+    let mut command = std::process::Command::new(kv_platform::paths::OSASCRIPT_BIN);
+    command
+        .args([
+            "-e",
+            script,
+            "--",
+            prompt,
+            &kv_i18n::t("取消", "Cancel"),
+            &kv_i18n::t("确认", "Confirm"),
+        ])
+        .current_dir("/")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    // Not `uid`/`gid`: on macOS that sequence leaves the child with effective gid 0 (wheel).
+    unsafe {
+        command.pre_exec(kv_platform::user::drop_to(uid, gid));
+    }
+    let mut child = command.spawn().unwrap_or_else(|_| failed());
+    // A fixed zeroizing buffer, not `output()`: a growing Vec leaves unzeroed passphrase copies.
+    let mut buf = zeroize::Zeroizing::new([0u8; 1027]);
+    let mut len = 0;
+    {
+        use std::io::Read;
+        let mut stdout = child.stdout.take().unwrap();
+        while len < buf.len() {
+            match stdout.read(&mut buf[len..]) {
+                Ok(0) => break,
+                Ok(n) => len += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+    }
+    let status = child.wait().unwrap_or_else(|_| failed());
+    if !status.success() || len > 1026 {
+        failed();
+    }
+    let text = std::str::from_utf8(&buf[..len]).unwrap_or_else(|_| failed());
+    zeroize::Zeroizing::new(text.strip_suffix('\n').unwrap_or(text).to_owned())
+}
+
+fn require_no_helper_sessions() {
+    // Older helper versions cannot detect a rotation. Never migrate while any helper is alive.
+    // Helpers just asked to stop (e.g. by the installer) get a few seconds to exit.
+    for attempt in 0..25 {
+        match std::process::Command::new("/usr/bin/pgrep")
+            .args(["-x", "kv-helper"])
+            .output()
+        {
+            Ok(output) if output.status.code() == Some(1) => return,
+            Ok(output) if output.status.code() == Some(0) && attempt < 24 => {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            _ => break,
+        }
+    }
+    fatal(&kv_i18n::t(
+        "请先关闭所有 KeyValet / AI 会话，再迁移或恢复",
+        "Close all KeyValet / AI sessions before migration or recovery",
+    ))
+}
+
+/// Prints a warning when the device binding key's Time Machine exclusion can't be confirmed
+/// (`tmutil isexcluded` failed, reported `[Included]`, or the file is missing).
+fn warn_if_binding_exclusion_unconfirmed(vault: &Vault) {
+    if matches!(vault.binding_backup_exclusion(), Ok(Some(false))) {
+        println!(
+            "{}",
+            kv_i18n::t(
+                "警告：未能确认设备绑定密钥已排除在 Time Machine 备份之外；请用 sudo tmutil isexcluded 检查 /var/db/keyvalet 下的 device-binding-*.key。第三方备份工具不遵守这一排除。",
+                "Warning: could not confirm the device binding key is excluded from Time Machine; check /var/db/keyvalet/device-binding-*.key with sudo tmutil isexcluded. Third-party backup tools do not honor this exclusion."
+            )
+        );
+    }
+}
+
+fn enclave_command(cmd: &str, args: &[String], vault: &Vault, client: &Value) -> bool {
+    if cmd == "protection" {
+        let status = vault.protection().unwrap_or_else(|e| fatal(&e.0));
+        let mut view = serde_json::to_value(&status).unwrap();
+        view["binding_excluded_from_backups"] =
+            json!(vault.binding_backup_exclusion().unwrap_or(None));
+        println!("{}", serde_json::to_string_pretty(&view).unwrap());
+        return true;
+    }
+    if cmd == "recovery-check" {
+        if !args.is_empty() {
+            fatal(&kv_i18n::t(
+                "此命令不接受参数；口令不得放入命令行",
+                "This command takes no arguments; never put passphrases on the command line",
+            ));
+        }
+        let password = enter_recovery_password();
+        let count = audited(vault, cmd, Map::new(), client, || {
+            vault.open_recovery_read_only(&password)
+        });
+        println!(
+            "{}",
+            kv_i18n::t(
+                &format!("恢复口令有效：可解密 {count} 条凭证；未使用硬件，未修改凭证库"),
+                &format!("Recovery passphrase verified: {count} credentials decrypt; no hardware used, vault unchanged")
+            )
+        );
+        return true;
+    }
+    if !matches!(
+        cmd,
+        "setup-enclave"
+            | "enclave-test"
+            | "migrate-to-enclave"
+            | "recover-vault"
+            | "rotate-recovery"
+            | "finish-enclave-migration"
+    ) {
+        return false;
+    }
+    if !args.is_empty() {
+        fatal(&kv_i18n::t(
+            "此命令不接受参数；口令不得放入命令行",
+            "This command takes no arguments; never put passphrases on the command line",
+        ));
+    }
+    #[cfg(not(target_os = "macos"))]
+    fatal(&kv_i18n::t(
+        "Secure Enclave 仅支持 macOS",
+        "Secure Enclave requires macOS",
+    ));
+    #[cfg(target_os = "macos")]
+    {
+        use kv_vault::MasterKeyProvider;
+        let provider = kv_platform::enclave::EnclaveMasterKeyProvider;
+        let reason = match cmd {
+            "enclave-test" => kv_i18n::t("验证硬件保护（1/2）", "verify hardware protection (1/2)"),
+            "recover-vault" => kv_i18n::t(
+                "恢复凭证库并更换硬件保护密钥",
+                "recover your credential vault with a new hardware key",
+            ),
+            "finish-enclave-migration" => kv_i18n::t(
+                "完成凭证库迁移并移除旧文件密钥",
+                "finish vault migration and remove the old file key",
+            ),
+            "rotate-recovery" => kv_i18n::t(
+                "更换凭证库密钥与恢复口令",
+                "rotate your vault key and recovery passphrase",
+            ),
+            _ => kv_i18n::t(
+                "为凭证库启用硬件保护",
+                "enable hardware protection for your credential vault",
+            ),
+        };
+        match cmd {
+            "enclave-test" => {
+                let created = provider.create(&reason).unwrap_or_else(|e| fatal(&e.0));
+                let restored = provider
+                    .unlock(
+                        &created.metadata,
+                        &kv_i18n::t("验证硬件保护（2/2）", "verify hardware protection (2/2)"),
+                    )
+                    .unwrap_or_else(|e| fatal(&e.0));
+                if *created.key != *restored {
+                    fatal(&kv_i18n::t(
+                        "硬件密钥验证失败",
+                        "Hardware key verification failed",
+                    ));
+                }
+                println!(
+                    "{}",
+                    kv_i18n::t(
+                        "Secure Enclave 验证成功；未修改凭证库",
+                        "Secure Enclave verification passed; vault unchanged"
+                    )
+                );
+            }
+            "setup-enclave" | "migrate-to-enclave" => {
+                let status = vault.protection().unwrap_or_else(|e| fatal(&e.0));
+                if status.provider == "secure_enclave" {
+                    if status.legacy_key_present {
+                        vault
+                            .init_with_provider(
+                                &provider,
+                                &kv_i18n::t(
+                                    "完成凭证库迁移并移除旧文件密钥",
+                                    "finish vault migration and remove the old file key",
+                                ),
+                            )
+                            .unwrap_or_else(|e| fatal(&e.0));
+                        audited(
+                            vault,
+                            "finish-enclave-migration",
+                            Map::new(),
+                            client,
+                            || vault.remove_legacy_key(),
+                        );
+                    }
+                    println!(
+                        "{}",
+                        kv_i18n::t(
+                            "Secure Enclave 已配置",
+                            "Secure Enclave is already configured"
+                        )
+                    );
+                    if !status.device_binding {
+                        println!(
+                            "{}",
+                            kv_i18n::t(
+                                "建议运行 keyvalet rotate-recovery：为凭证库加上设备绑定，使 vault 文件副本单靠一次系统认证无法解密，并同时更换恢复口令。",
+                                "Recommended: run keyvalet rotate-recovery to add device binding (so a copy of the vault file can't be decrypted with one system prompt alone) and set a new recovery passphrase."
+                            )
+                        );
+                    }
+                    if status.migration_backup_present {
+                        println!(
+                            "{}",
+                            kv_i18n::t(
+                                "建议运行 keyvalet rotate-recovery：凭证库目录里还留着迁移时的加密快照 vault.migration-backup.enc，它仍可用迁移时的恢复口令解密；轮换后会删除它。",
+                                "Recommended: run keyvalet rotate-recovery. The vault directory still holds the encrypted migration snapshot vault.migration-backup.enc, which still opens with the recovery passphrase used at migration; rotation removes it."
+                            )
+                        );
+                    }
+                    warn_if_binding_exclusion_unconfirmed(vault);
+                    return true;
+                }
+                require_no_helper_sessions();
+                // Find a missing or mismatched legacy key before asking for a passphrase.
+                if status.provider != "uninitialized" {
+                    vault.init_legacy().unwrap_or_else(|e| fatal(&e.0));
+                }
+                let password = recovery_password(true);
+                require_no_helper_sessions();
+                if status.provider == "uninitialized" {
+                    audited(vault, cmd, Map::new(), client, || {
+                        vault.initialize_enclave(&provider, &password, &reason)
+                    });
+                    println!(
+                        "{}",
+                        kv_i18n::t(
+                            "Secure Enclave 凭证库初始化完成",
+                            "Secure Enclave vault initialized"
+                        )
+                    );
+                } else {
+                    audited(vault, cmd, Map::new(), client, || {
+                        vault.migrate_to_enclave(&provider, &password, &reason)
+                    });
+                    println!(
+                        "{}",
+                        kv_i18n::t("已迁移至 Secure Enclave", "Migrated to Secure Enclave")
+                    );
+                }
+                warn_if_binding_exclusion_unconfirmed(vault);
+            }
+            "recover-vault" => {
+                let status = vault.protection().unwrap_or_else(|e| fatal(&e.0));
+                if status.provider != "secure_enclave" {
+                    fatal(&kv_i18n::t(
+                        "此凭证库没有硬件恢复信息；请先把备份的 vault.enc 放回凭证库目录",
+                        "This vault has no hardware recovery information; restore the backed-up vault.enc to the vault directory first",
+                    ));
+                }
+                require_no_helper_sessions();
+                let password = enter_recovery_password();
+                let message = kv_i18n::t("使用恢复口令恢复凭证库，并绑定本机新的 Secure Enclave 密钥？这会使原会话失效。",
+                    "Recover the vault with your passphrase and bind it to a new Secure Enclave key on this Mac? Existing sessions will be invalidated.");
+                if !confirm_yes_no(
+                    &message,
+                    &kv_i18n::t("恢复", "Recover"),
+                    &kv_i18n::t("取消", "Cancel"),
+                ) {
+                    return true;
+                }
+                require_no_helper_sessions();
+                audited(vault, cmd, Map::new(), client, || {
+                    vault.recover_enclave(&provider, &password, &reason)
+                });
+                println!(
+                    "{}",
+                    kv_i18n::t(
+                        "恢复成功，已绑定本机的新硬件密钥",
+                        "Recovered and bound to a new hardware key on this Mac"
+                    )
+                );
+                warn_if_binding_exclusion_unconfirmed(vault);
+            }
+            "rotate-recovery" => {
+                let status = vault.protection().unwrap_or_else(|e| fatal(&e.0));
+                if status.provider != "secure_enclave" {
+                    fatal(&kv_i18n::t(
+                        "尚未启用 Secure Enclave；请先运行 keyvalet setup-enclave",
+                        "Secure Enclave is not enabled; run keyvalet setup-enclave first",
+                    ));
+                }
+                require_no_helper_sessions();
+                vault
+                    .init_with_provider(
+                        &provider,
+                        &kv_i18n::t(
+                            "解锁凭证库以更换密钥",
+                            "unlock your vault to rotate its key",
+                        ),
+                    )
+                    .unwrap_or_else(|e| fatal(&e.0));
+                let password = recovery_password(true);
+                require_no_helper_sessions();
+                audited(vault, cmd, Map::new(), client, || {
+                    vault.rotate_enclave(&provider, &password, &reason)
+                });
+                println!(
+                    "{}",
+                    kv_i18n::t(
+                        "已更换硬件密钥、凭证库密钥和恢复口令，并启用设备绑定。旧口令不能再解密当前凭证库，但旧的 vault 备份仍可用旧口令解密。",
+                        "Rotated the hardware key, vault key and recovery passphrase, with device binding. The old passphrase no longer decrypts the current vault; older vault backups still decrypt with it."
+                    )
+                );
+                warn_if_binding_exclusion_unconfirmed(vault);
+            }
+            "finish-enclave-migration" => {
+                vault
+                    .init_with_provider(&provider, &reason)
+                    .unwrap_or_else(|e| fatal(&e.0));
+                audited(vault, cmd, Map::new(), client, || vault.remove_legacy_key());
+                println!(
+                    "{}",
+                    kv_i18n::t("迁移清理完成", "Migration cleanup completed")
+                );
+            }
+            _ => unreachable!(),
+        }
+        true
+    }
+}
+
 /// The invoking (non-root) user's home directory -- `$HOME` is reset to root's own under `sudo`
 /// (no `-E` in the `keyvalet` wrapper), so dotfiles like `~/.claude.json` have to be found via
 /// `SUDO_USER` instead. `dscl` is the authoritative source (handles a non-default home
@@ -700,18 +1161,6 @@ fn rewrite_content(content: &str, replacements: &[(usize, String, String)]) -> S
     out
 }
 
-/// `None` if `SUDO_UID` is `0`, matching `kv_platform::macos`'s `invoking_user` -- there's no
-/// real non-root user to drop privileges to in that case (e.g. kv-cli invoked via `sudo -u root
-/// sudo ...`), so the caller should refuse rather than running osascript as root itself.
-fn sudo_invoking_user() -> Option<(u32, u32)> {
-    let uid: u32 = std::env::var("SUDO_UID").ok()?.parse().ok()?;
-    let gid: u32 = std::env::var("SUDO_GID").ok()?.parse().ok()?;
-    if uid == 0 {
-        return None;
-    }
-    Some((uid, gid))
-}
-
 fn escape_applescript_string(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -724,16 +1173,18 @@ fn escape_applescript_string(s: &str) -> String {
 /// `None` means the dialog couldn't even be attempted (no `SUDO_UID`/`SUDO_GID` -- e.g. kv-cli
 /// invoked as literal root, not via `sudo` -- or `osascript` itself failed to run).
 fn run_osascript_as_user(script: &str, args: &[&str]) -> Option<(i32, String)> {
-    let (uid, gid) = sudo_invoking_user()?;
+    let (uid, gid) = kv_platform::user::invoking_user()?;
     use std::os::unix::process::CommandExt;
     let mut cmd = std::process::Command::new(kv_platform::paths::OSASCRIPT_BIN);
     cmd.arg("-e").arg(script).arg("--").args(args);
-    cmd.uid(uid)
-        .gid(gid)
-        .current_dir("/")
+    cmd.current_dir("/")
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .stdin(std::process::Stdio::null());
+    // Not `uid`/`gid`: on macOS that sequence leaves the child with effective gid 0 (wheel).
+    unsafe {
+        cmd.pre_exec(kv_platform::user::drop_to(uid, gid));
+    }
     let out = cmd.output().ok()?;
     Some((
         out.status.code().unwrap_or(-1),
@@ -1181,7 +1632,17 @@ mod scan_tests {
         // directory it creates -- an already-existing one (the tempdir root) keeps whatever
         // permissions the OS gave it and fails the "not group/world readable" check.
         let vault = kv_vault::Vault::new(dir.path().join("vault"));
-        vault.init().unwrap();
+        vault.prepare().unwrap();
+        if !vault.dir.join("master.key").exists() {
+            // Explicit legacy fixture: production code never creates this file.
+            std::fs::write(vault.dir.join("master.key"), [7u8; 32]).unwrap();
+            std::fs::set_permissions(
+                vault.dir.join("master.key"),
+                <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+            )
+            .unwrap();
+        }
+        vault.init_legacy().unwrap();
         vault
             .set(kv_vault::SetParams {
                 r#type: "openai".into(),

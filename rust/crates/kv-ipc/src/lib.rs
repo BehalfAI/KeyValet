@@ -8,9 +8,9 @@
 use serde::{Deserialize, Serialize};
 
 mod request;
-pub use request::request_digest;
+pub use request::{operation_digest, request_digest};
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 pub const MAX_LINE_BYTES: usize = 1024 * 1024;
 
 /// Prefix the helper returns for a "needs authorization" error, followed by type/name.
@@ -283,15 +283,26 @@ pub enum ReadyMessage {
     },
 }
 
-/// Purpose text: strip control characters, collapse whitespace, cap the length. `None` if too short
-/// after cleaning (the TS version requires at least 2 characters).
+/// Invisible direction and format characters (bidi overrides and isolates, zero-width marks, BOM)
+/// that can reorder or hide text in dialogs without being visible themselves.
+pub fn is_invisible_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2069}' | '\u{feff}'
+    )
+}
+
+/// Purpose text: strip control and invisible format characters, collapse whitespace, cap the
+/// length. `None` if too short after cleaning (the TS version requires at least 2 characters).
 pub fn clean_purpose(v: Option<&str>) -> Option<String> {
     let v = v?;
     let mut out = String::with_capacity(v.len());
     let mut last_was_space = false;
     for c in v.chars() {
-        let is_control = matches!(c, '\u{0000}'..='\u{001f}' | '\u{007f}');
-        let is_space = is_control || c.is_whitespace();
+        if is_invisible_format(c) {
+            continue;
+        }
+        let is_space = c.is_control() || c.is_whitespace();
         if is_space {
             if !last_was_space {
                 out.push(' ');
@@ -314,6 +325,18 @@ pub fn clean_purpose(v: Option<&str>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn purpose_drops_invisible_direction_and_c1_controls() {
+        let cleaned = clean_purpose(Some(
+            "Read\u{202e}gnp.exe\u{202c} file\u{2066}x\u{2069}\u{200b}\u{0085}now",
+        ))
+        .unwrap();
+        assert_eq!(cleaned, "Readgnp.exe filex now");
+        assert!(!cleaned
+            .chars()
+            .any(|c| c.is_control() || is_invisible_format(c)));
+    }
 
     #[test]
     fn op_round_trips_through_its_wire_string() {

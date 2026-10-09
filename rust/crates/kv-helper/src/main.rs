@@ -32,6 +32,20 @@ fn fatal(msg: &str) -> ! {
 
 type Gate = TouchIdSessionGate<TouchIdAuthenticator>;
 
+struct HardwareUnlock<'a>(&'a Vault);
+
+impl kv_platform::Authenticator for HardwareUnlock<'_> {
+    async fn authenticate(&self, reason: &str, _deny_label: &str) -> kv_platform::AuthOutcome {
+        match self
+            .0
+            .init_with_provider(&kv_platform::enclave::EnclaveMasterKeyProvider, reason)
+        {
+            Ok(()) => kv_platform::AuthOutcome::Approved,
+            Err(e) => kv_platform::AuthOutcome::Error(e.0),
+        }
+    }
+}
+
 fn clip(s: &str, n: usize) -> String {
     s.chars()
         .filter(|c| !matches!(c, '\u{0000}'..='\u{001f}' | '\u{007f}'))
@@ -45,7 +59,7 @@ async fn send(out: &AsyncMutex<tokio::io::Stdout>, value: &Value) {
     let _ = out.lock().await.write_all(&line).await;
 }
 
-/// Handles the handshake line: authenticates (Touch ID, unless a `remember` window is active), then
+/// Handles the handshake: every session authenticates the hardware key before reading the vault.
 /// reports readiness. Exits the process directly on protocol errors or a rejected handshake, mirroring
 /// the TS version's `fatal`/`reject`.
 async fn authenticate(
@@ -113,6 +127,13 @@ async fn authenticate(
         );
     };
 
+    let protection = vault
+        .protection()
+        .unwrap_or_else(|e| reject(e.0, vault, ctx));
+    if protection.provider != "secure_enclave" {
+        reject(kv_i18n::t("macOS 已停用文件密钥模式；请运行 keyvalet setup-enclave 初始化或迁移", "File-key mode has been removed on macOS; run keyvalet setup-enclave to initialize or migrate"), vault, ctx);
+    }
+
     let settings = read_settings(std::path::Path::new(VAULT_DIR));
     auth.requested = msg.requested_mode.as_deref().and_then(parse_mode);
     let mode = stricter(settings.grant_mode, auth.requested);
@@ -123,97 +144,32 @@ async fn authenticate(
     let remembered =
         mode == kv_core::settings::GrantMode::Remember && remember_active(&settings, now);
 
-    let hint = if !remembered
-        && matches!(
-            mode,
-            kv_core::settings::GrantMode::PerCredential | kv_core::settings::GrantMode::PerUse
-        ) {
-        kv_core::resolve_hint(vault, msg.credential.as_ref())
-    } else {
-        None
-    };
-
-    if !remembered {
-        let hours = if settings.remember_hours == 0.0 {
-            kv_i18n::t("永久", "forever")
-        } else {
-            kv_i18n::t(
-                &format!("{} 小时", settings.remember_hours),
-                &format!("{} hours", settings.remember_hours),
-            )
-        };
-        let scope = match mode {
-            kv_core::settings::GrantMode::Remember => kv_i18n::t(
-                &format!("解锁 KeyValet，并在{hours}内记住（期间所有 AI 会话无需再认证）"),
-                &format!("Unlock KeyValet and remember it for {hours} (no authentication for any AI session meanwhile)"),
-            ),
-            kv_core::settings::GrantMode::PerSession => kv_i18n::t("解锁 KeyValet 凭证库（本会话可使用全部凭证）", "Unlock the KeyValet vault (this session can use all credentials)"),
-            kv_core::settings::GrantMode::PerUse if hint.is_some() => kv_i18n::t(&format!("授权本次使用凭证（仅此一次）：{}", hint.as_deref().unwrap()), &format!("Authorize a single use of credential: {}", hint.as_deref().unwrap())),
-            kv_core::settings::GrantMode::PerCredential if hint.is_some() => kv_i18n::t(&format!("授权本次 AI 会话使用凭证：{}", hint.as_deref().unwrap()), &format!("Authorize this AI session to use credential: {}", hint.as_deref().unwrap())),
-            _ => kv_i18n::t(
-                "打开 KeyValet 凭证库会话（仅可查看列表；使用具体凭证时需再次授权）",
-                "Open a KeyValet vault session (list only; using a specific credential requires further authorization)",
-            ),
-        };
-        let reason = kv_i18n::t(
-            &format!(
-                "{scope}\n目的：{purpose}\n来源目录（agent 提供）：{}",
-                ctx.cwd
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("未知")
-            ),
-            &format!(
-                "{scope}\nPurpose: {purpose}\nWorking directory (reported by agent): {}",
-                ctx.cwd
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("unknown")
-            ),
-        );
-        if let Err(error) = auth.authorize(&reason).await {
+    // Hardware unlock cannot inspect credentials before authentication, so this prompt only
+    // grants the vault session. Credential-specific authorization follows the existing policy.
+    {
+        let reason = kv_core::prompt::session_unlock(mode);
+        let authorization = kv_core::auth_gate::touch_id_gate(
+            &vault.dir,
+            &reason,
+            &kv_i18n::t("取消", "Cancel"),
+            &HardwareUnlock(vault),
+        )
+        .await;
+        if let Err(error) = authorization {
             reject(error, vault, ctx);
         }
-        if mode == kv_core::settings::GrantMode::Remember {
+        if mode == kv_core::settings::GrantMode::Remember && !remembered {
             let mut next = settings.clone();
             next.remember_until = Some(remember_until(settings.remember_hours, now));
             let _ = kv_core::write_settings(std::path::Path::new(VAULT_DIR), &next);
         }
         auth.apply_mode(&settings);
-        if let Some(h) = &hint {
-            if mode == kv_core::settings::GrantMode::PerUse {
-                // This handshake prompt only ever shows the credential name (`scope` above), never
-                // a request_hint -- so it has no request content to bind a digest to. An HTTP-shaped
-                // op that piggybacks on this grant still goes through its own `consume_grant` check
-                // (kv-core/dispatch.rs) with a real digest, which a `None` here can never match: it
-                // falls through to a fresh, properly request-bound Touch ID prompt instead of
-                // silently trusting a "single use" approval that never named what the use was.
-                auth.one_shot
-                    .get_or_insert_with(Default::default)
-                    .insert(h.clone(), None);
-            } else {
-                auth.grants.insert(h.clone());
-            }
-        }
         let mut entry = Map::new();
         entry.insert("op".into(), json!("unlock"));
         entry.insert("ok".into(), json!(true));
         entry.insert("purpose".into(), json!(purpose));
         entry.insert("grant_mode".into(), json!(mode.as_str()));
-        if let Some(h) = &hint {
-            entry.insert("granted".into(), json!(h));
-        }
-        entry.insert("session".into(), json!(ctx.session));
-        entry.insert("client".into(), serde_json::to_value(&*ctx).unwrap());
-        let _ = vault.audit(entry);
-    } else {
-        auth.apply_mode(&settings);
-        let mut entry = Map::new();
-        entry.insert("op".into(), json!("unlock"));
-        entry.insert("ok".into(), json!(true));
-        entry.insert("purpose".into(), json!(purpose));
-        entry.insert("grant_mode".into(), json!(mode.as_str()));
-        entry.insert("remembered".into(), json!(true));
+        entry.insert("vault_protection".into(), json!(protection.provider));
         entry.insert("session".into(), json!(ctx.session));
         entry.insert("client".into(), serde_json::to_value(&*ctx).unwrap());
         let _ = vault.audit(entry);
@@ -251,7 +207,7 @@ async fn main() {
     }
 
     let vault = Arc::new(Vault::new(VAULT_DIR));
-    if let Err(e) = vault.init() {
+    if let Err(e) = vault.prepare() {
         fatal(&kv_i18n::t(
             &format!("凭证库初始化失败：{}", e.0),
             &format!("Vault initialization failed: {}", e.0),

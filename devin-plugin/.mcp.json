@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "keyvalet": {
+      "command": "/usr/local/lib/keyvalet/bin/kv-mcp"
+    }
+  }
+}

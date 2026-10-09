@@ -1,12 +1,8 @@
-//! Canonical digest of the HTTP-shaped fields of a request. Used to cryptographically bind a
+//! Canonical digests of complete credential operations. Used to cryptographically bind a
 //! Touch ID approval to the exact request it was shown for, not just to the credential's name.
 //!
-//! Lives in `kv-ipc` (not `kv-core`) because both sides of the privilege boundary need the same
-//! function: `kv-mcp` computes it client-side from the request it's about to retry, attaches it
-//! to the `grant` call; `kv-core::dispatch` recomputes it server-side from the request that's
-//! actually about to execute and rejects a mismatch. Identical logic on both sides, not just
-//! identical output, is the point -- a second implementation that merely agrees today is a second
-//! place for the two to quietly drift apart later.
+//! The helper computes approved and executed bindings independently from complete request data.
+//! No client-supplied digest or display string participates in authorization.
 
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -41,18 +37,24 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// `None` if `p` has no `url` field -- i.e. this isn't an HTTP-shaped request (`get`/`totp`/`aws`/
-/// etc. have nothing here to bind to; grant checks for those fall back to the credential name
-/// alone, as before this existed).
+/// Bind every credential operation to its complete parameters. Purpose is a display-only claim;
+/// all other fields, including unknown fields, remain part of the approved request.
+pub fn operation_digest(op: &str, p: &Map<String, Value>) -> String {
+    let mut params = p.clone();
+    params.remove("purpose");
+    let canon = canonicalize(&serde_json::json!({"op": op, "params": params}));
+    let bytes = serde_json::to_vec(&canon).expect("serializing a Value never fails");
+    hex(&Sha256::digest(&bytes))
+}
+
+/// Legacy HTTP digest, retained for compatibility tests only. Authorization uses operation_digest.
 pub fn request_digest(p: &Map<String, Value>) -> Option<String> {
     p.get("url")?;
     let subset: Map<String, Value> = DIGESTED_FIELDS
         .iter()
         .filter_map(|&field| p.get(field).map(|v| (field.to_string(), v.clone())))
         .collect();
-    let canon = canonicalize(&Value::Object(subset));
-    let bytes = serde_json::to_vec(&canon).expect("serializing a Value never fails");
-    Some(hex(&Sha256::digest(&bytes)))
+    Some(operation_digest("httpRequest", &subset))
 }
 
 #[cfg(test)]
@@ -124,5 +126,19 @@ mod tests {
         p.insert("type".into(), json!("totp"));
         p.insert("name".into(), json!("default"));
         assert_eq!(request_digest(&p), None);
+    }
+    #[test]
+    fn operation_and_non_http_parameters_are_bound() {
+        let p = params("GET", "https://x/y", Value::Null);
+        assert_ne!(
+            operation_digest("httpRequest", &p),
+            operation_digest("get", &p)
+        );
+        let a = serde_json::json!({"type": "aws", "name": "default", "duration_seconds": 900});
+        let b = serde_json::json!({"type": "aws", "name": "default", "duration_seconds": 3600});
+        assert_ne!(
+            operation_digest("aws", a.as_object().unwrap()),
+            operation_digest("aws", b.as_object().unwrap())
+        );
     }
 }

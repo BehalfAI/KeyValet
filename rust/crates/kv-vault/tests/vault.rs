@@ -20,7 +20,17 @@ fn new_vault() -> (tempfile::TempDir, Vault) {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("vault");
     let vault = Vault::new(&dir);
-    vault.init().unwrap();
+    vault.prepare().unwrap();
+    if !vault.dir.join("master.key").exists() {
+        // Explicit legacy fixture: production code never creates this file.
+        std::fs::write(vault.dir.join("master.key"), [7u8; 32]).unwrap();
+        std::fs::set_permissions(
+            vault.dir.join("master.key"),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+        )
+        .unwrap();
+    }
+    vault.init_legacy().unwrap();
     (tmp, vault)
 }
 
@@ -164,10 +174,10 @@ fn refuses_to_operate_when_permissions_are_too_broad() {
     let dir = tmp.path().join("vault");
     let key_path = dir.join("master.key");
     std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o644)).unwrap();
-    assert!(matches!(Vault::new(&dir).init(), Err(VaultError(m)) if m.contains("权限过宽")));
+    assert!(matches!(Vault::new(&dir).init_legacy(), Err(VaultError(m)) if m.contains("权限过宽")));
     std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-    assert!(matches!(Vault::new(&dir).init(), Err(VaultError(m)) if m.contains("权限过宽")));
+    assert!(matches!(Vault::new(&dir).init_legacy(), Err(VaultError(m)) if m.contains("权限过宽")));
     let _ = vault;
 }
 
@@ -181,7 +191,7 @@ fn a_symlinked_key_file_is_rejected() {
     std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
     std::fs::remove_file(&key_path).unwrap();
     std::os::unix::fs::symlink(&real, &key_path).unwrap();
-    assert!(matches!(Vault::new(&dir).init(), Err(VaultError(m)) if m.contains("符号链接")));
+    assert!(matches!(Vault::new(&dir).init_legacy(), Err(VaultError(m)) if m.contains("符号链接")));
     let _ = vault;
 }
 
@@ -269,7 +279,7 @@ fn compatible_with_data_encrypted_before_the_rename() {
     std::fs::set_permissions(&data_path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
     let reopened = Vault::new(&dir);
-    reopened.init().unwrap();
+    reopened.init_legacy().unwrap();
     assert_eq!(
         reopened.get("api_key", "old").unwrap().value,
         "legacy-secret"
@@ -311,7 +321,7 @@ fn multiple_instances_read_and_write_the_same_vault() {
     let (tmp, vault) = new_vault();
     let dir = tmp.path().join("vault");
     let other = Vault::new(&dir);
-    other.init().unwrap();
+    other.init_legacy().unwrap();
     set(&vault, "api_key", "a", "1");
     set(&other, "api_key", "b", "2");
     assert_eq!(vault.list(None).unwrap().len(), 2);

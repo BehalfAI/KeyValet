@@ -39,17 +39,20 @@ pub fn norm(s: &str) -> String {
     s.trim().to_lowercase()
 }
 
-/// Required purpose string: shown in the Touch ID prompt (when unlocking is needed) and recorded
-/// in the audit log.
+/// Required purpose string: recorded in the audit log. The root helper builds the Touch ID text
+/// itself (credential and scope), so the purpose is not shown there.
 pub fn purpose_desc() -> String {
     kv_i18n::t(
-        "本次操作的目的（必填）：需要解锁时会显示在 Touch ID 弹窗中，并记入审计日志。例如\u{201c}读取订单 #6 的测试邮件\u{201d}",
-        "Purpose of this operation (required): shown in the Touch ID prompt when unlocking is needed, and recorded in the audit log. E.g. \"Read the test email for order #6\"",
+        "本次操作的目的（必填）：记入审计日志（Touch ID 弹窗只显示凭证与授权范围，不显示此文字）。例如\u{201c}读取订单 #6 的测试邮件\u{201d}",
+        "Purpose of this operation (required): recorded in the audit log (the Touch ID prompt shows the credential and scope, not this text). E.g. \"Read the test email for order #6\"",
     )
 }
 
 pub fn optional_purpose_desc() -> String {
-    kv_i18n::t("本次操作的目的（可选）：需要解锁时显示在 Touch ID 弹窗中", "Purpose of this operation (optional): shown in the Touch ID prompt when unlocking is needed")
+    kv_i18n::t(
+        "本次操作的目的（可选）：记入审计日志",
+        "Purpose of this operation (optional): recorded in the audit log",
+    )
 }
 
 pub fn type_field_desc() -> String {

@@ -1,7 +1,7 @@
 # KeyValet 开源规划（阶段 0 到阶段 3）
 
 - 日期：2026-10-08
-- 配套：`docs/strategy-2026-10.zh-CN.md`（商业模式）、`docs/architecture-2026-10.zh-CN.md`（单仓库布局）、`docs/marketing-2026-10.zh-CN.md`（社区渠道）、现有 `CONTRIBUTING.md`、`SECURITY.md`、`LICENSE`（Apache-2.0）、`NOTICE`
+- 配套：`docs/strategy-2026-10.zh-CN.md`（商业模式）、`docs/architecture-2026-10.md`（单仓库布局）、`docs/marketing-2026-10.zh-CN.md`（社区渠道）、现有 `CONTRIBUTING.md`、`SECURITY.md`、`LICENSE`（Apache-2.0）、`NOTICE`
 - 现状：仓库 `KeyValet/KeyValet`（已从 BehalfAI 迁移），11 次提交，单一维护者；有 `CONTRIBUTING.md`（Setup、Ground rules、Templates、Localization、Reporting security issues）、`SECURITY.md`、`.github/workflows/test.yml` 与 `pages.yml`；没有 CODE_OF_CONDUCT、GOVERNANCE、issue/PR 模板、DCO、依赖许可检查、签名发布
 
 ## 目录

@@ -6,9 +6,13 @@ license.workspace = true
 
 [dependencies]
 kv-i18n = { path = "../kv-i18n" }
+kv-vault = { path = "../kv-vault" }
+serde_json = "1"
+zeroize = "1"
 libc = "0.2"
 tokio = { version = "1", features = ["process", "time"] }
 
 [dev-dependencies]
+base64 = "0.22"
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros", "process", "time"] }

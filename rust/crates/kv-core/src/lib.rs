@@ -3,6 +3,7 @@
 
 pub mod auth_gate;
 pub mod dispatch;
+pub mod prompt;
 pub mod settings;
 
 pub use auth_gate::{cooldown_remaining, touch_id_gate, GateResult};

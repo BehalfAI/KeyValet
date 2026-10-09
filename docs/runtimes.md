@@ -8,20 +8,25 @@ user-facing docs.
 | --- | --- | --- | --- | --- |
 | Claude Code | Yes (reference implementation) | Yes (`UserPromptSubmit`, `PreToolUse`) | `prompt`, `tool` | High — this is the primary target, exercised directly every session. |
 | Codex | Yes | Best-effort: `~/.codex/hooks.json`, `PreToolUse` | `tool` (same Claude Code JSON shape, reused as-is) | Low — written to the assumption that Codex's hook config is "the same JSON structure" as Claude Code's (architecture doc §5.2's words); not independently verified against a real Codex install this round. If wrong, Codex just ignores the file; doesn't break the install. |
-| Cursor | Yes | Yes, native — `beforeShellExecution`/`beforeMCPExecution` (`.cursor/hooks.json`) | `cursor-shell`, `cursor-mcp` | Medium-high — contract confirmed from cursor.com/docs/hooks and independent writeups: stdout JSON `{permission, user_message, agent_message}`, exit 2 as an equivalent shortcut for deny, `beforeReadFile` is observe-only (can't deny), `"ask"` is in the schema but not enforced. Not run against a real Cursor install. |
-| Grok Build | Yes, native (`grok mcp add`, namespaced `server__tool`) | Yes, native — only `PreToolUse` can block (`~/.grok/hooks/*.json`) | `grok-tool` | Low-medium — docs.x.ai/build/features/hooks gives the config shape (same `hooks.PreToolUse[].hooks[]` structure as Claude Code's `hooks.json`); independent 2026-10 field reports say Grok reads Claude Code's hook *config* for compatibility but does not parse the nested `hookSpecificOutput.permissionDecision` *output* — an unrecognized decision is silently treated as absent (allow). Grok's actual contract is exit code (0 = allow, 2 = deny), which `grok-tool` uses; it also prints a secondary `{"decision": "deny", "reason": ...}` JSON some docs describe, in case that's read too. Input field casing (`tool_name`/`tool_input` vs `toolName`/`toolInput`) wasn't consistently confirmed across sources, so both are accepted. Not run against a real Grok Build install. |
+| Cursor | Yes — plugin `cursor-plugin/mcp.json`, `cursor mcp add`, or `~/.cursor/mcp.json` | Yes, native — plugin `cursor-plugin/hooks/hooks.json` and/or `~/.cursor/hooks.json`: `beforeShellExecution`, `beforeMCPExecution`, `preToolUse` (file-write tools via matcher), `sessionStart` (context pointer) | `cursor-shell`, `cursor-mcp`, `cursor-tool`, `cursor-session` | Medium-high — contract confirmed from cursor.com/docs/hooks: stdout JSON `{permission, user_message, agent_message}`, exit 2 = deny, `ask` accepted but not enforced so it is never emitted. `beforeMCPExecution` carries `mcp_server_name` — keyvalet's own calls (`credential_set` & co. legitimately carry secrets) are exempted on it. `tool_input` is a JSON-encoded string per docs, parsed-or-scanned regardless of actual shape. The full plugin bundle (commands `/keyvalet-*`, `keyvalet` skill, hooks, MCP) installs to `~/.cursor/plugins/local/keyvalet`. Not run against a live Cursor session. Caveats: `beforeMCPExecution` doesn't run in cloud agents (Cursor's own deferral); `beforeSubmitPrompt` exists but is block-only (no context injection), so the prompt-side nudge isn't possible — a pasted key in the message relies on the skill/sessionStart context. |
+| Grok Build | Yes, native (`grok mcp add`, namespaced `server__tool`) | Yes, native — only `PreToolUse` can block (`~/.grok/hooks/*.json`) | `grok-tool` | Low-medium — docs.x.ai/build/features/hooks gives the config shape (same `hooks.PreToolUse[].hooks[]` structure as Claude Code's `hooks.json`); independent 2026-10 field reports say Grok reads Claude Code's hook *config* for compatibility but does not parse the nested `hookSpecificOutput.permissionDecision` *output* — an unrecognized decision is silently treated as absent (allow). Grok's actual contract is exit code (0 = allow, 2 = deny), which `grok-tool` uses; it also prints a secondary `{"decision": "deny", "reason": ...}` JSON some docs describe, in case that's read too. Input field casing (`tool_name`/`tool_input` vs `toolName`/`toolInput`) wasn't consistently confirmed across sources, so both are accepted. The matcher is `.*` — every tool incl. MCP calls, so keyvalet's own tools (`keyvalet__credential_set` & co.) are exempted by server/tool name. Not run against a real Grok Build install. |
+| Devin CLI | Yes — `.mcp.json` in `devin-plugin/`, `devin mcp add`, or auto-imported from `~/.claude.json` when Claude Code is configured | Yes, native — plugin `hooks.json` (`UserPromptSubmit`, `PreToolUse`); project/user equivalents are `.devin/hooks.v1.json` and the `"hooks"` key in `config.json` | `prompt`, `devin-tool` | Medium — contract from Devin CLI's own docs (stdin `tool_name`/`tool_input`, stdout `{"decision": "approve"\|"block", "reason"}`, `hookSpecificOutput.additionalContext`; exit 2 also blocks). `devin-tool` is exercised against Devin-shaped payloads in unit tests but hasn't been watched end-to-end in a live session. Devin's decision vocabulary has no "ask" (approve/block only), so a flag blocks — same trade-off as Cursor. Devin documents plugin hooks as best-effort/fail-open, i.e. a hook failure just skips the check. Tool names are Devin's own (`exec`, `write`, `edit`, `apply_patch`, `notebook_edit`, `write_to_process`, plus MCP calls in either shape: the `mcp_call_tool` builtin or the namespaced `mcp__<server>__<tool>`); calls on the `keyvalet` server are exempt in both shapes since `credential_set`'s `value` legitimately carries a secret. `exec` scans `env` values too. |
 
-## Why Cursor and Grok don't just reuse Claude Code's hook output
+## Why Cursor, Grok and Devin don't just reuse Claude Code's hook output
 
-Both runtimes can *load* a hook registered the Claude Code way (`.claude/settings.json` or, for
-Grok, apparently similar), which might suggest zero new code is needed. In practice neither
-*enforces* Claude Code's decision format when it does:
+All three runtimes can *load* a hook registered the Claude Code way (`.claude/settings.json` or,
+for Grok, apparently similar; Devin imports `.claude/settings*.json` too), which might suggest
+zero new code is needed. In practice none of them *enforces* Claude Code's decision format when
+it does:
 
 - Cursor's schema is a different shape entirely (`permission`/`user_message`/`agent_message`) and
   doesn't enforce `"ask"`.
 - Grok reads the config but field reports say it ignores `hookSpecificOutput.permissionDecision`
   specifically, falling back to "no decision understood = allow" -- which would make KeyValet's
   hook silently inert on Grok if it only ever spoke Claude Code's dialect.
+- Devin *does* parse `hookSpecificOutput.additionalContext` (its documented context-injection
+  channel), but its documented decision vocabulary is only `approve`/`block` — `permissionDecision`
+  is a Claude-ism it doesn't read, so `tool` mode's "ask" would silently allow there as well.
 
 So each gets its own `kv-hook` mode speaking its native contract, sharing the same detection core
 (`detect`, `tool_reason`, the returned-secret exact-match check) rather than reusing `handle`'s
@@ -29,8 +34,9 @@ Claude-Code-shaped output.
 
 ## What's still open
 
-- None of the three non-Claude-Code adapters have been run against a real install of that
-  runtime -- everything above is built from documentation and independent testing writeups, not
+- None of the four non-Claude-Code adapters have been run against a real install of that
+  runtime end-to-end (Devin's is exercised against its documented payload shapes in unit tests)
+  -- everything above is built from documentation and independent testing writeups, not
   from watching it work. If you hit a runtime where KeyValet's hook isn't firing or isn't being
   obeyed, that's the first thing to check.
 - Grok's tool-name vocabulary for its own built-in tools (editing, shell) isn't confirmed to match

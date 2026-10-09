@@ -102,10 +102,10 @@ pub async fn http_request(
     if let Some(b) = body {
         req = req.body(b);
     }
-    let res = req.send().await.map_err(|e| {
+    let res = req.send().await.map_err(|_| {
         VaultError::new(
-            &format!("请求 {host} 失败：{e}"),
-            &format!("Request to {host} failed: {e}"),
+            &format!("请求 {host} 失败"),
+            &format!("Request to {host} failed"),
         )
     })?;
     let status = res.status().as_u16();
@@ -125,10 +125,10 @@ pub async fn read_limited(
     let mut stream = res.bytes_stream();
     let mut out = Vec::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| {
+        let chunk = chunk.map_err(|_| {
             VaultError::new(
-                &format!("{host} 的响应读取失败：{e}"),
-                &format!("Failed to read the response from {host}: {e}"),
+                &format!("{host} 的响应读取失败"),
+                &format!("Failed to read the response from {host}"),
             )
         })?;
         out.extend_from_slice(&chunk);
@@ -155,35 +155,32 @@ pub async fn post_form(
     http_request(url, Method::Post, &headers, Some(body)).await
 }
 
-/// The remote error message may echo back part of the request content, so truncate it before
-/// returning it to the agent.
+/// Provider diagnostics can contain client secrets, refresh tokens, assertions or their encodings.
+/// Return only HTTP status and a fixed OAuth error code; never return untrusted diagnostic text.
 pub fn remote_error(host: &str, r: &HttpResult) -> VaultError {
-    let o = obj(r);
-    let err = o.get("error");
-    let desc = o.get("error_description").or_else(|| o.get("message"));
-    let err_part = match err {
-        Some(Value::String(s)) => Some(s.clone()),
-        Some(v) => Some(v.to_string()),
-        None => None,
-    };
-    let desc_part = match desc {
-        Some(Value::String(s)) => Some(s.clone()),
-        _ => None,
-    };
-    let detail: String = [err_part, desc_part]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(": ");
-    let body = if detail.is_empty() {
-        r.text.clone()
-    } else {
-        detail
-    };
-    let truncated: String = body.chars().take(300).collect();
+    const CODES: &[&str] = &[
+        "invalid_request",
+        "invalid_client",
+        "invalid_grant",
+        "unauthorized_client",
+        "unsupported_grant_type",
+        "invalid_scope",
+        "access_denied",
+        "server_error",
+        "temporarily_unavailable",
+        "authorization_pending",
+        "slow_down",
+        "expired_token",
+    ];
+    let code = r
+        .json
+        .get("error")
+        .and_then(Value::as_str)
+        .filter(|code| CODES.contains(code));
+    let detail = code.map(|code| format!(": {code}")).unwrap_or_default();
     VaultError::new(
-        &format!("{host} 返回错误（HTTP {}）：{truncated}", r.status),
-        &format!("{host} returned an error (HTTP {}): {truncated}", r.status),
+        &format!("{host} 返回错误（HTTP {}）{detail}；已隐藏上游诊断内容以保护凭证", r.status),
+        &format!("{host} returned an error (HTTP {}){detail}; upstream diagnostics were omitted to protect credentials", r.status),
     )
 }
 
@@ -208,5 +205,23 @@ mod tests {
     #[test]
     fn rejects_userinfo_in_the_url() {
         assert!(assert_https_url("https://user:pass@example.com/a", "url").is_err());
+    }
+
+    #[test]
+    fn remote_errors_omit_plain_and_encoded_credentials() {
+        let diagnostics = "synthetic-secret c3ludGhldGljLXNlY3JldA== synthetic%2Dsecret";
+        for code in ["invalid_client", diagnostics] {
+            let response = HttpResult {
+                status: 400,
+                text: diagnostics.into(),
+                json: serde_json::json!({"error": code, "error_description": diagnostics, "message": diagnostics}),
+            };
+            let error = remote_error("example.com", &response).0;
+            assert!(error.contains("400"));
+            assert_eq!(error.contains("invalid_client"), code == "invalid_client");
+            for sensitive in diagnostics.split_whitespace() {
+                assert!(!error.contains(sensitive));
+            }
+        }
     }
 }

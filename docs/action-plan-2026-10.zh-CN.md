@@ -1,6 +1,7 @@
 # KeyValet 行动指南：从今天到第 24 个月
 
 - 日期：2026-10-08
+- 决策更新：2026-10-09，平台支持与密钥保护顺序已确认，见[产品 §1.4](product-2026-10.zh-CN.md#14-平台支持与密钥保护)及架构 §8.0；macOS 首版、安装整合与本机真实 vault 迁移已完成，其他平台按后续阶段推进。
 - 用法：这是五份规划文档（战略、产品、架构、营销、开源）的执行版。每一条都写明做什么、产出是什么、怎么算完成。按顺序做，遇到门槛先复盘再往下走。
 - 时间假设：一个人，每周约 40 小时投入 KeyValet（其余时间自由职业），其中约 8 小时营销与社区。
 - 章节索引：战略 S、产品 P、架构 A、营销 M、开源 O，例如「A §7.6」指架构文档第 7.6 节。
@@ -58,19 +59,52 @@
 
 | # | 任务 | 产出 | 完成标准 |
 | --- | --- | --- | --- |
-| 1.1 | `代码` 在 `rust/crates/kv-core` 新增 `request.rs`：`UseRequest`、JCS 规范化、`digest`（A §7.2）；在 `src/helper/protocols/http.ts` 与 `kv-core/dispatch.rs` 的 HTTP 路径上生成它 | ✅ 已完成（位置和形态与原计划不同，原因见下）：`request_digest(p) -> Option<String>` 落在 `kv-ipc`（不是 `kv-core`），因为两端（`kv-mcp` 客户端算一次、`kv-core::dispatch` 服务端再算一次核对）都要用同一份逻辑，而 `kv-mcp` 不链接、也不应该链接 `kv-core`（那是特权边界）；是一个纯函数，不是 `UseRequest` 结构体——这些参数已经是 `&Map<String, Value>`，没必要再包一层结构体。JCS 规范化只做了「递归排序 object key」这一条规则（`serde_json` 的数字/字符串序列化已经和 JCS 一致，不需要再处理）。覆盖字段：`method`/`url`/`query`/`headers`/`body`；没有 `url` 字段（非 HTTP 形态的操作，如 `get`/`totp`/`aws`）时返回 `None`。6 个单测 | `cargo test -p kv-ipc`：同一请求两次 digest 相同；body 字段顺序不同 digest 相同；改 method/url/body 任一字段 digest 不同；非 HTTP 形态操作没有 digest |
-| 1.2 | `代码` Touch ID 文案改为四行结构（P 附录 A）：凭据与层级、「agent 说：」用途、真实请求、来源；先用 method + host + path，`summarize` 下周接 | ⏳ 部分完成：`credential_http_request`/`credential_test` 的 Grant 弹窗现在会在用途前多显示一行「请求：method host/path」（`kv-core/dispatch.rs` 的 `grant_credential` + `kv-mcp/session.rs` 的 `request_value`/`grant`，已过 `cargo fmt`/`clippy -D warnings`/`build`/`test`，新增单测），2.1 又把这一行加上了 `summarize` 字段摘要。还没做的：风险层级标注、「agent 说：」前缀框出用途——这些要等策略引擎（见下）落地 | Touch ID 弹窗能看到「请求：...」这一行，且字段准确 |
-| 1.3 | `代码` 审批绑定：审批结果带 digest 与一次性 nonce，执行前复核；nonce 存本地 SQLite（A §7.3） | ✅ 已完成（简化版，位置与原计划不同）：落在 `kv-core/dispatch.rs`（不是单独的 `approval.rs`），而且没有用 SQLite 存 nonce——一次性授权的消费本来就只发生在同一个 helper 进程、同一个会话的内存里（`SessionAuth::one_shot`，这次改成 `HashMap<凭据键, Option<digest>>`），同一进程内存已经是「nonce」该有的一次性语义，SQLite 只在需要跨进程重启存活时才有意义，这里不需要。`per_use` 模式下：`grant` 时把 `kv-mcp` 算好的 `request_digest` 存进去；真正执行请求时 `consume_grant` 重新算一遍当前请求的 digest 比对，不管匹配与否都会把这个一次性授权删掉（防止「猜中为止」的重试）。顺带修了一个真实的并发漏洞：`kv-mcp` 原来按「凭据名」合并并发 grant 调用（`last_granted` 缓存），同一凭据的两个并发请求里，后到的那个会白捡前一个的 Touch ID 批准，哪怕内容完全不同——现在缓存键改成「凭据名 + request_digest」，内容不同就必须单独弹一次。`per_credential`/`per_session`/`remember` 模式故意不做这个绑定：那几种模式本来就是「批准一次，这个会话全程可用」，跟这里要解决的「一次批准只对应一次请求」不是一回事。3 个新单测（`kv-core/tests/dispatch.rs`：请求匹配时一次性执行、请求不匹配时拒绝执行且不能重放、重放同一个已批准请求也被拒绝） | `cargo test -p kv-core`：改 body 后执行被拒且从未打到 mock 服务器；重放原始请求也被拒；`SECURITY.md` 第 10 条与「stated purpose is unverified」一条已同步更新 |
+| 1.1 | `代码` 操作与请求摘要绑定（A §7.2） | ✅ 2026-10-09 安全修订：`kv-ipc::operation_digest` 递归排序 object key，摘要包含操作名及全部执行参数（只排除不影响执行的 purpose）；root helper 另加入凭证版本、已保存的 HTTP / 验证配置。客户端不能指定受信摘要；旧 HTTP-only `request_digest` 仅保留兼容测试 | 修改操作、请求字段或 root 配置都会使单次批准失效；`kv-ipc` 与 `kv-core` 回归测试通过 |
+| 1.2 | `代码` Touch ID 显示凭证、真实操作与 agent 自述用途、来源（P 附录 A） | ⏳ root helper 已直接从完整待授权操作生成 method / host / path，验证工具从 root 保存的配置生成；明文读取等也显示具体动作。`kv-core::prompt` 将用途和来源标为 agent 自述并清除换行、控制符、双向文本控制；风险分级仍待策略引擎 | 伪造客户端展示提示不能替换 root 的请求行；用途显示为非验证声明 |
+| 1.3 | `代码` 批准绑定与一次性消费（A §7.3） | ✅ 2026-10-09 安全修订：`SessionAuth::one_shot` 保存 root 计算的完整操作摘要，执行时复核，匹配或不匹配都会消费；非 HTTP 操作同样绑定。MCP 不再缓存批准；并发请求串行请求授权。其他授权模式保持已声明的凭证 / 会话范围。IPC 升至 v4，旧客户端不被默默接受 | 替换 HTTP 请求、跨操作明文读取、重放批准及更改已保存验证配置均被拒绝；攻击回归测试通过 |
 | 1.4 | `代码` 把 `rust/` 工作区提交进 git，CI 跑 `cargo test` 与 clippy | ✅ 早就做了：10-07 那次「Rewrite KeyValet in Rust」commit 已经把整个工作区提交，CI 的 `rust` job（`.github/workflows/test.yml`）本来就在跑 `fmt --check`/`clippy -D warnings`/`build`/`test` 四件套 | CI 绿 |
 | 1.5 | `市场` 官网改版：Zola 项目 `site/`，首页（主张、GIF 占位、安装命令、三条支撑）、定价页、对比页、安全页；GitHub Pages 源切到 Actions 构建 | ⏳ 部分完成，且走了不同的路：10-09 把原来混在 `docs/` 里的站点文件（`index.html`/`guide.md`/`install.sh` 等）迁到新的 `site/` 目录——这是因为发现 `docs/` 同时是发布根目录又放着内部规划文档，财务假设等内容被公开发布了，必须马上拆开（见上方事故记录）。顺带把发布方式从 GitHub Pages 换成了 Cloudflare Pages（CI 用 `cloudflare/wrangler-action`，一次性项目创建和域名绑定已手动做完）。**还没做的**：Zola 本身、定价页、对比页（内容已经在 `marketing/compare-1password.md` 写好，还没搬上站）、安全页、GIF、三条支撑的首屏文案——现在 `site/` 里还是旧的 `index.html`，不是这一项原本设想的改版 | keyvalet.dev 已经在用 Cloudflare Pages，证书有效；真正的"改版"（内容、设计）还没做 |
+| 1.6 | `代码` macOS Secure Enclave 本地主密钥保护：先做不接触真实 vault 的可行性 spike，再迁移旧 vault 并停用文件密钥模式；保护状态、禁止降级、换机与恢复一并落地（P §1.4、A §8.0） | ✅ 首版与安装整合完成：CryptoKit 加密表示 + `userPresence`；`MasterKeyProvider`、保护状态、初始化 / 迁移、Argon2id 恢复与崩溃清理 CLI；原子提交与旧会话失效；macOS 只支持硬件 vault，安装器隐藏收集恢复口令后完成设置。永久 Keychain 项目受 entitlement 限制，因此采用不创建 Keychain 项目的加密表示；详见 A §8.0 | 本机 arm64 / macOS 26.5.1，普通用户跨进程派生通过；root 在用户 GUI 会话下临时 vault 迁移、再次解锁、恢复通过；全工作区测试通过。真实 vault 迁移与安装验收记录另附。T2、无指纹密码回退、跨 OS 更新仍待发布矩阵验证；文案明确派生 AES 密钥进入 helper 内存的边界 |
+
+### 2026-10-09 本机安装与迁移验收
+
+- 在本机 macOS 26.5.1 / arm64 上安装最新 Rust release 二进制；`kv-touchid` 的 ad-hoc hardened-runtime 签名验证通过，其余四个安装产物与本机构建一致。
+- `/var/db/keyvalet` 的真实 vault 已完成主密钥轮换与 Secure Enclave 迁移，生成 `vault.migration-backup.enc` 加密快照；旧 `master.key` 和旧安装目录已删除。恢复口令由用户在本机隐藏输入框中输入两次；长度无效或不一致时可重输，口令不经过代理输出。
+- 最新 root helper 通过一次新的硬件认证开启会话，成功读取 **6 条凭证**的列表，仅输出数量；`sessionInfo.vault_protection` 确认 `provider: secure_enclave`、`hardware_required: true`、`recovery_configured: true`、`legacy_key_present: false`。没有读取或输出凭证值。
+- `cargo fmt --all -- --check`、全工作区 Clippy（`-D warnings`）、locked build、locked test 均通过：279 项测试通过，1 项交互硬件测试按默认规则跳过；独立临时 vault 的硬件迁移、解锁与恢复此前已验证。真实 vault 本次只做迁移和新会话解锁，T2、无指纹密码回退、跨机 / 跨 OS 更新仍待发布矩阵验证。
+
+### 2026-10-09 获取与使用凭证的安全修复验收
+
+- 已修复四类问题：原始结果的隐式明文缓存、信任客户端授权展示 / 摘要造成的操作替换、可复用网关绕过每次批准、上游 OAuth 诊断泄漏秘密至响应或审计。具体边界见 [SECURITY.md](../SECURITY.md)。
+- 原始结果不额外落盘；主动导出采用私有目录描述符、排他创建与拒绝符号链接。锁定、超时、helper 断开即删除文件并阻止迟到写入；后续启动清理旧缓存及已退出进程留下的文件。会话代次隔离旧 reader / timer，避免旧会话撤销新会话。
+- `per_use` 必须提供完整操作，由 root 生成提示与绑定；不支持可复用网关，改用逐次 `credential_http_request`。有效授权模式变更撤销已发网关令牌。OAuth 错误只返回状态和固定代码，响应与审计写入前再次脱敏。
+- 全工作区 fmt、Clippy（warnings 为错误）、locked build、locked test 通过：280 个测试通过、0 失败、1 个交互硬件测试按规则跳过；另有 3 个 Node 回退 hook 安全回归测试通过。认证弹窗超时后子进程会终止，其回归测试一并通过。
+- 本机安装最新 release，安装权限和 hardened-runtime 签名验证通过；当前 Codex 会话原生 MCP 已重载。通过原生 `credential_test` 验证 Cloudflare 保存的只读 GET，返回 HTTP 200；密钥未返回给 agent。6 条凭证完整保留，保护状态为 `secure_enclave`、强制硬件、恢复已配置、旧文件密钥不存在；验收后已锁定，私有临时目录为空。
+- 此次部署为本机安装与当前会话 MCP 更新；未提交、推送或发布公共版本。已返回调用方的秘密无法追溯撤回，任意格式 hook 检测和已批准期间的 root 内存攻击边界仍按安全文档说明。
+
+### 2026-10-09 平台方案复核与 macOS 应急恢复
+
+- 安全文档的修正：SE 加密表示只绑定设备，不绑定 KeyValet 签名（Apple DTS 2026-05 更正），被攻破的 root 可随时自行发起派生；Apple 不支持在 `launchd` daemon 中使用 SE，Mac helper 迁到 Unix socket 前须把 SE 操作移到每用户 LaunchAgent。见 A §8.0、§13、§20。
+- 代码：新增 `keyvalet recovery-check` 与 `recovery-read <types|list|get>`，SE 不可用时用恢复口令只读访问；vault 句柄只读，写入与删除旧密钥均被拒绝，审计标记 `recovery_passphrase_read_only`，helper 不接受该模式。新增 2 项 vault 测试。
+- 规划文档修正：Nitro 证明文档 `public_key` 改为 RSA（KMS `Recipient` 只支持 `RSAES_OAEP_SHA_256`），HPKE P-256 公钥放入 `user_data`；新增 KMS key policy 模板（去掉账号级 `kms:*`、缺少证明即 Deny、禁止 `ReEncrypt*`）；enclave 不再以 relay 时间为准；c7g.large 只能给 enclave 1 个 vCPU。Linux TPM 无用户在场、Windows Hello 为 RSA-2048 且 session 0 无法弹窗，见 A §8.1、§11。
+- fmt、Clippy（`-D warnings`）、locked build、locked test 通过：283 项测试通过、0 失败、1 项交互硬件测试按规则跳过。新 CLI 命令须以 root 身份运行，尚未在真实 vault 上验证。
+
+### 2026-10-09 安全复审修复
+
+- 授权弹窗：会话授权的说明改由 root 根据凭证记录生成，非 proxy_only 的静态凭证一律提示「可读取明文（AI 可见）」，客户端填写或省略的 operation 不再影响弹窗；与凭证种类不符的操作、不支持的方法和不在允许列表的 URL 在弹窗前拒绝。逐次授权显示查询参数、请求头、请求体摘要、scopes / 权限和 AWS 有效期。
+- 逐次授权：同一凭证可并存多个待用批准（每凭证 4 个、每会话 16 个），并发请求不再互相覆盖；设备码登录的轮询批准在 30 分钟内可复用。终端或其他会话收紧授权模式后，正在运行的会话在下一次请求时生效并撤销网关令牌；撤销会中断正在进行的网关流式响应（以错误结束，而不是正常结束）。
+- vault：新增设备绑定（root-only `device-binding.key` 参与 HKDF，不进 Time Machine），vault 副本单靠一次获批弹窗无法解密；新增 `keyvalet rotate-recovery` 同时更换硬件密钥、主密钥与恢复口令。`setup-enclave` 在提示输入口令前先检查旧文件密钥，`recover-vault` 先检查恢复信息；会话检查会等待正在退出的 helper 最多 5 秒；恢复口令和硬件派生密钥改用固定的清零缓冲区读取，`kv-touchid` 直接写管道。
+- MCP 与导出文件：`/keyvalet:lock` 即使清除 remember 失败也先锁定；stdin 关闭时同步完成锁定与清理；导出文件按 PID 加进程启动时间标记，PID 复用不再导致残留；旧命名格式的导出会被清理；HOME 为符号链接时可用；过长的文件名会被截短。
+- 其他：AWS STS 错误只返回状态与格式合法的错误码（也修掉了多字节截断导致的 panic）；purpose 去除 bidi / 零宽 / C1 控制字符；MCP 工具说明不再声称弹窗显示 purpose。
+- fmt、Clippy（`-D warnings`）、locked test 通过：299 项测试通过、0 失败、1 项交互硬件测试按规则跳过。真实 vault 仍为未绑定状态，需在终端运行 `keyvalet rotate-recovery` 启用设备绑定；新二进制尚未安装。
 
 ### 第 2 周
 
 | # | 任务 | 产出 | 完成标准 |
 | --- | --- | --- | --- |
-| 2.1 | `代码` 模板 `summarize` 规则：先写 OpenAI、Anthropic、GitHub、Stripe、AWS、Slack 六个（P §8） | ✅ 已完成（简化版）：没有做按模板的声明式 `summarize` 规则，而是在 `kv-mcp/src/session.rs` 加了一个与模板无关的 `summarize_body`——请求体顶层如果有 `model`/`repo`/`channel`/`amount`/`subject`/`text` 字段就取前两个显示出来，覆盖 OpenAI/Anthropic（model）、GitHub（repo）、Slack（channel）、Stripe（amount）等，不需要为每条凭据的模板单独定义规则，也不需要多一次 vault 往返去解析模板，覆盖面比原计划六个服务更广。7 个新单测（`request_hint_tests`） | Touch ID 弹窗的 Request 行显示 `POST api.openai.com/v1/chat/completions · model=gpt-5`；`cargo test` 验证 |
+| 2.1 | `代码` 模板 `summarize` 规则：先写 OpenAI、Anthropic、GitHub、Stripe、AWS、Slack 六个（P §8） | ⏳ 安全修订后待重做：已删除由 MCP 客户端生成的请求展示与 body 摘要，当前 root 只显示 method / host / path 并绑定完整参数。后续摘要应由 root 按安全字段白名单生成，避免展示秘密或接受伪造文案 | root 生成摘要、展示安全字段且测试覆盖敏感字段；当前不宣称字段摘要已完成 |
 | 2.2 | `代码` 全部 MCP 工具加 annotations（A §5.1） | ✅ 已完成：13 个工具标了注解——`credential_status/list/list_types/get/audit_log/templates` 标 `readOnlyHint`，`delete/delete_type` 标 `destructiveHint`，`http_request/gateway` 标 `openWorldHint`，`test/imap_test/graph_mail_test` 同时标 `readOnlyHint`+`openWorldHint`；其余（`set`、`configure_http`、各 `setup_*`、`oauth_login` 等）不打注解，按 MCP 规范默认当作"可能有副作用"处理，没有强行分类。新增 4 个单测（`kv-mcp/src/tools/basic.rs` 的 `annotation_tests`） | `credential_list` 等在 Claude Code 中不再触发写操作级权限提示；`cargo test` 验证注解值 |
-| 2.3 | `代码` `kv-hook` 二进制 + Claude Code 适配器，替换 `claude-plugin/hooks/secrets.mjs` 的逻辑；`run.sh` 只做转发（A §5.2） | ✅ 已完成：新 crate `rust/crates/kv-hook`（无网络、无 vault 访问，纯函数 + CLI），完整复刻 `secrets.mjs` 的检测逻辑（29 个厂商正则、通用提示词识别、已返回密钥的精确匹配、masking），18 个单测全过；`run.sh` 改为优先调用装好的 `kv-hook` 二进制，只有它不存在时才回退到 node+`secrets.mjs`（给还没升级的旧安装用）；`install.sh` 把 `kv-hook` 加入构建与安装产物列表。`secrets.mjs` 本体保留——`src/test/proactive.test.ts` 还直接 import 它作检测逻辑的基准测试，行为没有改动，只加了一行注释说明它现在是基准实现而非生产路径。附带发现并修复了一个隐藏 bug：改之前 `run.sh` 第一条路径指向 `/usr/local/lib/keyvalet/bin/node`，但 Rust 重写后的 `install.sh` 从未装过这个 node 二进制，现网安装其实一直是靠『系统上有没有装 node』硬决定这个 hook 是否生效。没有做架构文档 §5.2 描述的完整 `RuntimeAdapter` trait / `--runtime --event` 抽象（manifest 驱动的多运行时适配器）——那是更大的后续工作，这次先落地 Claude Code 这一条垂直路径 | `cargo test -p kv-hook` 18 个测试通过；手动跑 3 个场景（prompt 命中、tool 命中、无害 Bash 放行）输出与原 `secrets.mjs` 一致 |
+| 2.3 | `代码` `kv-hook` 二进制与 Claude Code 适配器（A §5.2） | ✅ Rust hook 已部署；`run.sh` 优先调用安装的二进制，缺失时回退 Node。2026-10-09 安全修订：两条路径均移除读取已返回凭证明文缓存的精确匹配，只保留厂商格式、提示词识别与掩码；不创建或读取 `.redact`。任意无已知格式的字符串可能无法识别 | Rust hook 回归通过；Node 回退的缓存忽略、密钥格式识别及安全命令放行 3 个测试通过 |
 | 2.4 | `代码` Codex 适配器（同一 JSON 结构，目标 `~/.codex/hooks.json`） | ⏳ 最佳努力版：`install.sh` 在 `~/.codex` 目录存在且还没有 `~/.codex/hooks.json` 时写入一份指向 `kv-hook tool` 的 `PreToolUse` 配置（JSON 结构与 Claude Code 的 `hooks.json` 一致，按架构文档 §5.2 的假设）；该文件已存在则不覆盖，只打印一行手动合并提示。Codex 的 hook 配置格式本次没有独立核实（没有真实 Codex 环境可测），标记为未验证——如果格式不对，最坏情况是 Codex 忽略这个文件，不会导致安装失败 | 有 `~/.codex` 目录但没有 `hooks.json` 时，`install.sh` 跑完后文件出现；真实 Codex 环境里的行为验证留给下次有 Codex 可用时做 |
 | 2.5 | `市场` 录 60 秒演示（`marketing/demo-script.md`）；GIF 进 README 顶部；社交预览图 | GIF + MP4 | README 首屏可见 |
 | 2.6 | `市场` 按 `marketing/*.md` 定稿 Show HN、X 长帖、Reddit、Product Hunt 文案；附录 B 的质疑回答写成 FAQ 草稿 | 文案定稿 | 另一个人读一遍无歧义 |
@@ -121,7 +155,7 @@
 
 | # | 任务 | 产出 | 完成标准 |
 | --- | --- | --- | --- |
-| 6.1 | `代码` Linux helper：系统用户 `keyvalet`、systemd 服务、Unix socket + peer-uid、TPM2 可选、软件密钥回退并警告（A §8.1、§16） | `install.sh` Linux 分支 | Ubuntu 22.04 与 Debian 12 上 J1 可完成 |
+| 6.1 | `代码` Linux / CI 调用与身份接入、本地 helper 兼容路径：系统用户 `keyvalet`、systemd 服务、Unix socket + peer-uid；TPM2 可选，软件保护明确显示，已启用硬件后失败不静默降级；远程执行按配对 / relay 前置条件推进（P §1.4、A §8.0、§9） | `install.sh` Linux 分支及接入示例 | Ubuntu 22.04 与 Debian 12 上 J1 可完成；无 TPM 可用；硬件访问失败不改用文件密钥；远程路径不把长期凭证交给 runner |
 | 6.2 | `代码` TTY Approver（仅 T0/T1）；无 GUI 时自动选用 | `kv-core/approvers/tty.rs` | T2 在无手机的 Linux 上被拒并说明 |
 | 6.3 | `代码` `keyvalet hooks install --all`：检测四个运行时，幂等写入 | CLI | 卸载可逆 |
 | 6.4 | `代码` 审计哈希链 + `keyvalet audit export/verify`（A §12） | `kv-audit` | 篡改一条后 `verify` 报错 |
@@ -233,9 +267,9 @@
 
 | 季度 | 代码 | 运营与市场 |
 | --- | --- | --- |
-| 第 15–17 月 | `kv-enclave`：Rust 核心跑在 Nitro；可复现 EIF；PCR0 随客户端发布；iOS 与 Mac 端证明验证（A §11）；BYO-KMS 路径；托管 KMS 信任声明进产品 | 找 3 家有 CI 离线需求的付费团队试用；Terraform 文档 |
+| 第 15–17 月 | 首个云端隔离执行方案仅做 AWS Nitro Enclaves + KMS：`kv-enclave` 的授权、解密、凭证使用及 TLS 均留在 enclave；可复现 EIF；PCR0 随客户端发布；iOS 与 Mac 端证明验证（A §11）；BYO-KMS 默认；托管 KMS 信任声明进产品 | 找 3 家有 CI 离线 / 无人值守需求的付费团队试用；Terraform 文档 |
 | 第 18–20 月 | 远程 MCP 端点（Hydra 作 AS、PRM、CIMD）（A §10.4）；ChatGPT 与 Claude App 接入测试；Android App（StrongBox） | Enterprise 自托管 Terraform 发布；SOC 2 Type I 启动；第一份企业合同 |
-| 第 21–24 月 | SCIM；Okta Cross-App Access；Vault/OpenBao 后端；Windows 审批端；macOS 菜单栏（可选） | SOC 2 Type I 完成；参与 MCP ext-auth 讨论；第 24 个月结局评估（§9） |
+| 第 21–24 月 | SCIM；Okta Cross-App Access；Vault/OpenBao 后端；macOS 菜单栏（可选）；Windows TPM + Hello 本地客户端仅在明确需求后另行排期，当前不承诺本季度交付 | SOC 2 Type I 完成；参与 MCP ext-auth 讨论；第 24 个月结局评估（§9） |
 
 ---
 

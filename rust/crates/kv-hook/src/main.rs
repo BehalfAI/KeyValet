@@ -11,13 +11,16 @@
 //! For `grok-tool` (Grok Build), a deny is the exit code, not the JSON -- `exit(2)` on a hit,
 //! falling through to the default "print nothing, exit 0" otherwise, which is also Grok's own
 //! allow case -- see the module doc comment in `lib.rs`.
+//!
+//! `devin-tool` (Devin CLI) shares the `prompt`/`tool` fail-open convention: no output means
+//! proceed; a hit prints Devin's native `{"decision": "block", "reason"}` shape.
 
 use std::io::Read;
 
 const CURSOR_ALLOW: &str = r#"{"permission":"allow"}"#;
 
 fn is_cursor_mode(mode: &str) -> bool {
-    matches!(mode, "cursor-shell" | "cursor-mcp")
+    matches!(mode, "cursor-shell" | "cursor-mcp" | "cursor-tool")
 }
 
 fn main() {
@@ -53,10 +56,17 @@ fn main() {
     match mode.as_str() {
         "cursor-shell" => print!("{}", kv_hook::handle_cursor_shell(&input)),
         "cursor-mcp" => print!("{}", kv_hook::handle_cursor_mcp(&input)),
+        "cursor-tool" => print!("{}", kv_hook::handle_cursor_tool(&input)),
+        "cursor-session" => print!("{}", kv_hook::handle_cursor_session()),
         "grok-tool" => {
             if let Some(out) = kv_hook::handle_grok_tool(&input) {
                 print!("{out}");
                 std::process::exit(2);
+            }
+        }
+        "devin-tool" => {
+            if let Some(out) = kv_hook::handle_devin_tool(&input) {
+                print!("{out}");
             }
         }
         _ => {

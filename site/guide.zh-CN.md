@@ -13,7 +13,7 @@ KeyValet 是一个运行在 macOS 本机的「AI agent 凭证代理」。Claude 
 - 保存 API key、密码、token；支持 OAuth 2.0、Google 服务账号、GitHub App、JWT、TOTP、AWS STS 等协议。协议凭证的长期秘密永不离开 root 进程，agent 只能拿到短期 token；
 - **代理调用**：由 KeyValet 把凭证注入请求并发出，agent 只拿到响应，全程看不到 key；
 - **本地网关**：SDK、脚本这类不能走 MCP 的程序，可以把 base URL 指向 KeyValet 的会话网关。支持流式输出，程序拿不到真实 key；
-- 默认**按凭证授权**：每个凭证单独按一次 Touch ID，弹窗写明是哪个凭证、做什么用；没有指纹时，系统认证框会改为要求输入登录密码；
+- 默认**按凭证授权**：每个凭证单独按一次 Touch ID，弹窗写明凭证和授权范围；没有指纹时，系统认证框会改为要求输入登录密码；
 - session 结束，授权随之失效；
 - 每次读取、使用、修改凭证都必须说明目的，并记入审计日志，agent 可以查询；
 - 没有你本人的 Touch ID 或登录密码，任何人（包括 AI agent 和你自己的其他进程）都读不到凭证。
@@ -23,15 +23,15 @@ KeyValet 是一个运行在 macOS 本机的「AI agent 凭证代理」。Claude 
 | 机制 | 作用 |
 |---|---|
 | 凭证库 `/var/db/keyvalet/` 属于 root:wheel，权限 0700 | 普通用户进程无法读取 |
-| AES-256-GCM 加密，主密钥单独存于 root-only 的 `master.key` | 磁盘上没有明文；篡改会被检测到 |
+| AES-256-GCM 加密；macOS 必须使用 Secure Enclave，旧 `master.key` 只用于迁移 | 新 vault 不生成文件密钥；迁移后删除旧密钥，每个新会话认证，恢复口令是独立解密路径 |
 | sudoers 规则只允许免密运行 root helper 本身（参数必须完全一致） | 不再需要输入 sudo 密码，且这条规则不能用来运行其他任何东西 |
-| root helper 启动后必须先通过 Touch ID（设备所有者认证）才提供服务 | agent 可以启动 helper，但无法替你按指纹；Touch ID 弹窗中显示本次目的 |
-| Touch ID 程序由 root helper 降权为你的用户身份运行；程序归 root 所有、强化运行时签名 | 指纹能正常送达（root 身份下无法使用指纹）；同用户进程无法篡改、调试或注入；结果以退出码直接返回 root 进程 |
+| root helper 启动后必须先通过 Touch ID（设备所有者认证）才提供服务 | agent 可以启动 helper，但无法替你按指纹；Touch ID 弹窗中显示解锁范围 |
+| Touch ID 程序由 root helper 降权为你的用户身份运行；程序归 root 所有、强化运行时签名 | 指纹能送达用户会话；常规授权以退出码返回，硬件解锁通过匿名管道返回派生 AES 密钥 |
 | 认证失败后的 30 秒冷却记录在 root-only 目录；同一时间只允许一个认证弹窗 | 即使绕过 MCP server 直接启动 helper，也无法反复弹窗 |
 | 默认按凭证授权（`per_credential`） | 一次 Touch ID 只授权一个凭证，符合最小权限原则 |
 | 覆盖、删除凭证，以及放宽授权模式，都由 **root helper** 弹窗确认 | 不依赖 MCP server；绕过 server 直接驱动 helper 也必须经你确认 |
 | root helper 只通过 sudo 子进程管道通信 | 只有发起认证的那个 session 能用；MCP 进程退出后管道关闭，helper 随即退出 |
-| 代码和 node 安装到 root-owned 的 `/usr/local/lib/keyvalet/` | agent 无法篡改将以 root 身份运行的代码；helper 启动时会自检，不满足条件就拒绝运行 |
+| 代码以 root-owned 形式安装到 `/usr/local/lib/keyvalet/` | agent 无法篡改将以 root 身份运行的代码；helper 启动时会自检，不满足条件就拒绝运行 |
 | 覆盖、删除凭证会弹窗确认；写入时可省略 value，由原生输入框输入 | 防止误删；密钥可以不经过 LLM 上下文 |
 | 认证失败或取消后冷却 30 秒 | 防止 agent 反复弹窗 |
 | 审计日志 `/var/db/keyvalet/audit.log` | 记录每次操作（不记录凭证值） |
@@ -47,15 +47,15 @@ KeyValet 是一个运行在 macOS 本机的「AI agent 凭证代理」。Claude 
 
 **边界（请知悉）：**
 
-- 解锁后，这个 session 中的 agent 能读取**所有**凭证。只在你信任的会话里解锁。
+- 解锁后，agent 能使用本会话获准的凭证；`per_session` 和 `remember` 模式覆盖全部凭证。只在你信任的会话里解锁。
 - 读取到的凭证值会进入该 agent 的上下文，因此也会发给模型服务商。
-- 本工具防不住已经以你的用户身份运行、并且你主动配合的恶意程序。例如，你被诱导按下了它触发的 Touch ID。所以要看清 Touch ID 弹窗里显示的目的、请求和来源目录。
-- `purpose` 由 agent 填写，「请求」那一行由 MCP 服务端根据即将发出的调用生成；两者都只是展示和记入审计，不会跟后续实际发生的调用做加密绑定，无法自动验证真实性。
+- 本工具防不住已经以你的用户身份运行、并且你主动配合的恶意程序。例如，你被诱导按下了它触发的 Touch ID。所以要看清弹窗中的凭证和授权范围，以及逐次授权或明文读取时显示的操作；来源目录和完整用途可在审计中查看。
+- `purpose` 是 agent 的自述；真实操作由 root helper 根据完整请求生成。`per_use` 授权绑定完整操作和凭证配置，一次授权只能执行一次匹配的操作；其他模式按相应的凭证授权范围生效。
 
 ## 安装
 
 
-需要 Node ≥ 20（推荐使用 nvm 或官方安装包。安装脚本会拒绝依赖用户可写动态库的 Homebrew node），以及 Swift 编译器（`xcode-select --install`）。
+需要 Rust 工具链（`cargo`，来自 [rustup.rs](https://rustup.rs)）构建二进制，以及 Swift 编译器（`xcode-select --install`）编译 Secure Enclave helper。
 
 安装会写入 `/etc/sudoers.d/keyvalet`，只允许你免密运行凭证库 helper。写入前后都会用 `visudo` 校验，卸载时会删除。
 
@@ -68,7 +68,7 @@ curl -fsSL https://keyvalet.dev/install.sh | sh
 - 升级：重跑同一条命令，凭证库不受影响；
 - 卸载：`curl -fsSL https://keyvalet.dev/install.sh | sh -s -- --uninstall`；
 - 从源码安装：克隆仓库后运行 `./scripts/install.sh`；
-- 没有 Claude Code 的话，手动注册：命令为 `/usr/local/lib/keyvalet/bin/node`，参数为 `/usr/local/lib/keyvalet/app/dist/server/index.js`。
+- 没有 Claude Code 的话，手动注册：`claude mcp add keyvalet --scope user -- /usr/local/lib/keyvalet/bin/kv-mcp`。Cursor 用户：安装器会把插件复制到 `~/.cursor/plugins/local/keyvalet`（重启 Cursor 生效），含 MCP server、密钥检测 hook 和 `/keyvalet-*` 命令；其他客户端加一个命令为 `/usr/local/lib/keyvalet/bin/kv-mcp` 的 stdio server。
 
 ## 协议凭证
 
@@ -197,7 +197,7 @@ credential_configure_http {
 ### 流式响应与本地网关
 
 - `credential_http_request` 会完整接收流式（SSE）响应，并在 `stream.text` 里返回从大模型增量拼出的完整文本。支持 OpenAI（Chat Completions 和 Responses）、Anthropic、Gemini 的格式。
-- `credential_gateway` 为程序开通本会话专属的本地网关：`http://127.0.0.1:<端口>/<令牌>/<域名>/<路径>` → `https://<域名>/<路径>`。
+- `credential_gateway` 为程序开通本会话专属的本地网关：`http://127.0.0.1:<端口>/<域名>/<路径>` → `https://<域名>/<路径>`。
   - 网关会去掉程序自己带的认证头，注入真实凭证；只发往白名单域名，不跟随重定向；
   - 响应边转发边脱敏：只扣留「可能是秘密开头」的那几个字节，所以流式输出几乎没有延迟；
   - 令牌按凭证、按会话随机生成；只接受访问 `127.0.0.1` / `localhost` 的请求（防 DNS 重绑定）；每次请求都会记入审计；
@@ -218,14 +218,14 @@ OPENAI_BASE_URL=http://127.0.0.1:52011/<令牌>/api.openai.com/v1 OPENAI_API_KEY
 | `per_use` | 每次使用凭证都按 |
 | `per_credential`（**默认**） | 每个会话中，每个凭证按一次；本会话新建的凭证自动获得授权 |
 | `per_session` | 每个会话按一次，之后可用全部凭证 |
-| `remember` | 按一次，之后 `remember_hours` 小时内**所有会话**都不用再按（默认 8 小时；`0` 表示永久） |
+| `remember` | 凭证授权记住 `remember_hours` 小时（默认 8；`0` 表示永久）；Secure Enclave 每个新会话仍需认证 |
 
-查看凭证列表、搜索模板、查看审计日志这类操作，任何模式下都不需要按 Touch ID。
+会话解锁后，查看凭证列表和审计日志无需额外的凭证授权；搜索模板无需开启 vault 会话。每个新会话都要认证解锁 Secure Enclave，`remember` 有效期也不能跳过。
 
-**在 Claude Code 里用 `/` 命令修改**（一行安装会自动装好插件）：
+**在 Claude Code、Cursor 或 Devin 里用 `/` 命令修改**（Claude Code：一行安装会自动装好插件；Cursor：安装器复制到 `~/.cursor/plugins/local/`，命令写作 `/keyvalet-mode` 等；Devin CLI：`devin plugins install KeyValet/KeyValet#devin-plugin`）：
 
 ```text
-/keyvalet:mode remember 8      # 按一次，记住 8 小时
+/keyvalet:mode remember 8      # 凭证授权记住 8 小时；每个新会话仍需认证
 /keyvalet:mode per-use         # 最严格：每次都按
 /keyvalet:status               # 当前模式、记住到何时、本会话已授权的凭证
 /keyvalet:lock                 # 立即锁定，并清除“记住”状态
@@ -237,24 +237,27 @@ OPENAI_BASE_URL=http://127.0.0.1:52011/<令牌>/api.openai.com/v1 OPENAI_API_KEY
 
 - 模式保存在 root 专属的 `/var/db/keyvalet/settings.json`。**放宽**（更宽松的模式，或更长的记住时长）必须按 **Touch ID** 确认，而不是一个能被脚本点击的确认框，所以 agent 无法自己放宽。收紧立即生效。修改对当前会话也立即生效。
 - 客户端只能**收严**：比如给 Codex 注册时加上 `KEYVALET_GRANT_MODE=per_use`，最终生效的是全局设置和客户端设置中更严格的那个。
-- `remember` 模式下，有效期内本机任何进程都能直接使用你的凭证，不会弹出提示。不过秘密依然看不到，每次使用照常记录。想提前结束，用 `/keyvalet:lock`。
+- `remember` 模式下，已解锁的会话在有效期内使用凭证无需继续认证。每个新会话仍需认证硬件密钥。想提前结束，用 `/keyvalet:lock`。
 - 在终端里：`keyvalet grant-mode remember 8`、`keyvalet grant-mode forget`。
 
-## 让 Claude Code 主动维护凭证库（插件）
+## 让 agent 主动维护凭证库（Claude Code / Cursor / Devin 插件）
 
-装好插件后，Claude Code 会替你维护凭证库：
+装好插件后，agent 会替你维护凭证库：
 
-- **在对话里贴了密钥**（“这是我的 Stripe key：sk_live_…”），Claude 会用对应模板把它存进 KeyValet，之后通过代理或网关使用，而不是写进 `.env`。`UserPromptSubmit` hook 能识别约 25 种密钥格式（OpenAI、Anthropic、GitHub、AWS、Stripe、Slack、Google 等），只把掩码后的预览告诉 Claude。
+- **在对话里贴了密钥**（“这是我的 Stripe key：sk_live_…”），agent 会用对应模板把它存进 KeyValet，之后通过代理或网关使用，而不是写进 `.env`。`UserPromptSubmit` hook 能识别约 25 种密钥格式（OpenAI、Anthropic、GitHub、AWS、Stripe、Slack、Google 等），只把掩码后的预览告诉 agent。
 - **更推荐 `/keyvalet:add openai`**：在 KeyValet 的私密弹窗里输入密钥，它不会经过对话，也不会进入模型服务商的日志。
-- **要把明文密钥写进文件或命令行时**，`PreToolUse` hook 会先请你确认，并提示 Claude 改用 KeyValet。这一步也会精确匹配本会话里 KeyValet 自己刚刚返回过的值（`credential_get`、`credential_totp_code`、`credential_access_token`、`credential_aws_credentials`）——不止是认得出格式的密钥，像授权码、应用密码这种没有固定前缀的值，只要是 KeyValet 亲手交出来的，一样会被拦下来。
-- 发现 `.env` 或配置文件里的密钥时，Claude 会提议迁移到 KeyValet；已存的密钥失效（401/403）时，会提议替换。
+- **要把明文密钥写进文件或命令行时**，`PreToolUse` hook 会介入并提示 agent 改用 KeyValet——Claude Code 里是先请你确认，Cursor 和 Devin 里（hook 协议没有「询问」）会直接拦截这次调用。hook 只做格式识别，不保存已返回密码的明文或匹配缓存；没有可识别格式的任意字符串可能无法识别。
+- 发现 `.env` 或配置文件里的密钥时，agent 会提议迁移到 KeyValet；已存的密钥失效（401/403）时，会提议替换。
 
-如需关闭这些 hook，在 Claude Code 的运行环境中设置 `KEYVALET_HOOKS=off`。
+Cursor 有官方插件（`cursor-plugin/`，安装器复制到 `~/.cursor/plugins/local/`）：相同的命令（写作 `/keyvalet-add` 等）、`sessionStart`/`preToolUse`/`beforeShellExecution`/`beforeMCPExecution` hook 和 `keyvalet` MCP server。Devin CLI 也有同款插件（`devin plugins install KeyValet/KeyValet#devin-plugin`）：相同的 `/keyvalet:*` 命令、`UserPromptSubmit`/`PreToolUse` hook 和 `keyvalet` MCP server，都在 `devin-plugin/` 目录里。
+
+如需关闭这些 hook，在 agent 的运行环境中设置 `KEYVALET_HOOKS=off`。
 
 ## 目的（purpose）与审计
 
 - 读取凭证（`credential_get`）、获取 token、TOTP 码或 AWS 临时凭证、测试邮箱、写入、修改、删除凭证，以及解锁（`credential_unlock`），都**必须**传 `purpose`；
-- 需要解锁时，`purpose` 会显示在 Touch ID 弹窗中，如「目的：读取订单 #6 的测试邮件」；`credential_http_request`/`credential_test` 还会多显示一行「请求：」（method、host、path，不含查询参数），由即将发出的那次调用生成；
+- 会话授权弹窗显示凭证和这次授权实际放开的能力，由 root helper 根据凭证记录生成，例如「使用 openai（本会话）/ 可读取明文凭证（AI 可见）」；proxy_only 凭证显示「仅代理请求（AI 看不到明文）」。会话解锁只显示凭证库的授权范围。弹窗不显示 purpose，来源目录和完整用途放在审计日志中；
+- 会话授权允许在该会话中使用凭证，不限于某条 HTTP 请求。逐次授权显示真实操作及其绑定的全部参数：`credential_http_request` 显示 method、host、path、查询参数、agent 设置的请求头和请求体摘要，获取令牌显示 scopes / 仓库 / 权限，AWS 显示有效期；均由 root helper 根据完整操作生成，agent 的展示文案不能替换。不支持的方法、不在允许列表的域名、与凭证种类不符的操作在弹窗前就被拒绝；
 - 每条操作都写入审计日志，记录时间、会话 ID、操作、凭证、种类、目的、结果、来源目录，**不含任何凭证值**；
 - root helper 会再检查一次：缺少 `purpose` 的读取或修改请求一律拒绝；
 - 用 `credential_audit_log` 查询，可按本会话（`this_session_only`）、凭证、操作、起始时间过滤。
@@ -301,7 +304,33 @@ keyvalet audit 20
 keyvalet grant-mode all                       # 切换授权范围（per-credential / all）
 ```
 
-每条命令都会以 `sudo -k` 运行，也就是每次都要输入密码。这是给你本人在终端里用的，不经过 Touch ID。
+每条命令都会以 `sudo -k` 运行，也就是每次都要输入密码。访问 vault 的命令还需要系统认证来解锁 Secure Enclave 密钥。
+
+### Secure Enclave 主密钥
+
+Secure Enclave 是 macOS 唯一支持的 vault 模式（Apple silicon 或支持的 T2 Mac）。安装时运行 `setup-enclave`：新 vault 直接使用硬件保护；旧文件密钥 vault 在隐藏输入恢复口令后迁移。硬件不可用或取消设置时，正常操作不可用，不提供软件回退。通过 CryptoKit 保存设备绑定的加密密钥表示，使用 `userPresence` ACL：macOS 在硬件密钥操作时校验 Touch ID 或设备密码；没有明文硬件私钥文件，也无需创建 Keychain 项目。
+
+从已登录 Mac 的图形会话运行。无图形会话 / SSH 上下文可能无法认证；硬件失败不会启用软件回退。本机验证使用 Apple silicon 与 macOS 26.5.1；T2 硬件、未录入指纹时的密码回退仍需分别做设备验证。
+
+```sh
+keyvalet protection             # provider、hardware_required、recovery_configured、legacy_key_present
+keyvalet enclave-test           # 两次系统认证，临时密钥，不修改 vault
+keyvalet setup-enclave          # 初始化或迁移；隐藏输入两次恢复口令、两次系统认证
+keyvalet migrate-to-enclave     # setup-enclave 的别名
+keyvalet rotate-recovery        # 更换硬件密钥、凭证库密钥与恢复口令，并启用设备绑定
+keyvalet recovery-check         # 验证恢复口令；不用硬件、不修改、不输出值
+keyvalet recovery-read list     # 应急：用恢复口令只读访问（types / list / get）
+```
+
+设置独立的强恢复口令，建议至少六个随机选择的单词，离线保管。允许 12–1024 字节，但长度不代表强度。无终端时用本机隐藏输入框，口令经私有管道直接交给 root CLI，不进入 agent、命令行参数、环境变量或文件。恢复包裹使用 Argon2id（64 MiB、三轮、单并行度）和 AES-256-GCM。**拥有 vault 密文和恢复口令的人无需原 Mac 或 Touch ID 就能解密**；弱口令可被离线猜测。
+
+安装器在替换程序与迁移前结束已有 KeyValet helper / MCP 会话；手动运行设置时需先关闭这些会话。迁移先验证新硬件密钥能在独立子进程中重新载入，再更换 AES 主密钥，把新密文与密钥元数据一起原子提交，最后删除 `master.key`。`vault.migration-backup.enc` 是迁移时的凭证快照，已使用新密钥和恢复口令加密；已有备份不会覆盖。若迁移失败后留下不完整备份，而 `protection` 仍显示 `migration_required`，保留完好的 `vault.enc` 和 `master.key`，移走不完整备份后重试。`uninitialized` 表示未完成设置，这两种状态都不能正常使用 vault。崩溃后若显示 `secure_enclave` 且 `legacy_key_present: true`，运行 `keyvalet finish-enclave-migration`，认证后清理遗留文件密钥；再次设置也会在认证后执行该清理。旧版 KeyValet 无法读取迁移后的 vault。
+
+用管理员权限备份**最新**的 `/var/db/keyvalet/vault.enc`，其中包括加密密钥表示和恢复包裹。每份副本都只能让 root 读取，或放进加密归档。本版本设置或轮换过的 vault 带设备绑定：密钥还依赖 `/var/db/keyvalet/device-binding.key`，该文件只有 root 可读且不进 Time Machine，所以单有 `vault.enc` 副本，一次获批的系统弹窗也无法解密。不要把 `device-binding.key` 和 vault 放在同一份备份里。若 `keyvalet protection` 显示 `device_binding: false`，运行一次 `keyvalet rotate-recovery`。在同一台 Mac 上恢复 `vault.enc` 时，只要绑定文件还在就能直接使用；否则用 `keyvalet recover-vault`。设置可另外备份。换机时安装 KeyValet，将 `vault.enc` 恢复到 root 所有、`0700` 的 vault 目录，文件为 root 所有、`0600`，关闭所有会话后执行 `keyvalet recover-vault`。隐藏输入恢复口令，在新 Mac 创建并验证新硬件密钥，重新加密 vault。需要回到迁移时快照时，把 `vault.migration-backup.enc` 替代 `vault.enc` 再恢复；其中只有迁移当时的数据。设备访问能力与恢复口令同时丢失时无法恢复。
+
+设置完成后运行一次 `keyvalet recovery-check`，之后不确定口令时也可以再运行：它在 root CLI 中用恢复口令解密，只显示凭证条数。若本机 Secure Enclave 无法使用（例如系统更新后认证失败），vault 不会回退到文件密钥。此时可用 `keyvalet recovery-read types|list|get <type> <name>` 以恢复口令读取凭证：写入会被拒绝，helper 与 AI 会话无法使用该模式，每次使用都记入审计。要恢复正常使用，在 Secure Enclave 正常的 Mac 上运行 `keyvalet recover-vault`。恢复口令可能泄露时运行 `keyvalet rotate-recovery`：硬件解锁后同时更换硬件密钥、凭证库密钥和口令，旧口令不能再打开当前凭证库（旧备份仍可用旧口令打开）。
+
+硬件私钥不可导出；复制当前 vault 文件后，旧文件密钥也无法解密新密文。但派生 AES 密钥和凭证明文仍会进入普通进程内存。加密密钥表示绑定的是这台 Mac 的 Secure Enclave，而不是 KeyValet：被攻破的 root 无需等待解锁，可以自己发起派生、使用任意认证文案，获批一次即取得 AES 主密钥（设备绑定挡不住 root，因为 root 能读取绑定文件）；也可以在获准解锁期间截获密钥或明文。截获 AES 主密钥后，轮换前仍可离线解密。出现意料之外的系统认证弹窗时要警惕。历史 `master.key` 副本加历史 vault 备份仍可解密，删除文件不保证抹除 APFS 快照或 SSD 残留。详见 [SECURITY.md](../SECURITY.md)。
 
 ## 开发
 
@@ -309,3 +338,9 @@ keyvalet grant-mode all                       # 切换授权范围（per-credent
 cd rust
 cargo test --workspace --locked   # 在临时目录中以普通用户身份测试凭证库与各协议（本地模拟服务端 + RFC/AWS 官方测试向量），不需要 root
 ```
+
+### 获取与使用密码的安全边界
+
+`per_use` 授权由 root helper 根据完整操作生成提示并计算绑定，包含操作类型、参数和已保存的凭证配置。更换操作、参数或验证配置，以及重复使用批准，都会拒绝。该模式不开放可复用网关；有效授权模式变更会撤销现有网关令牌。
+
+原始工具结果不额外落盘。主动导出的密码文件和网关环境文件使用私有目录及 0600 权限，拒绝符号链接；锁定、超时或 helper 退出即删除。异常退出后的文件会在下次 MCP 启动时清理。已经返回给调用方的密码无法撤回。OAuth 错误只返回状态及固定错误代码，不返回可能包含长期秘密的上游诊断。

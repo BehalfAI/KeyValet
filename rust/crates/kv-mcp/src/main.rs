@@ -29,7 +29,7 @@ impl ServerHandler for Server {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("keyvalet", env!("CARGO_PKG_VERSION")))
             .with_instructions(kv_i18n::t(
-                "KeyValet：本地凭证代理。使用凭证时弹出 Touch ID 认证（显示本次目的）。\n\
+                "KeyValet：本地凭证代理。使用凭证时弹出 Touch ID 认证（显示凭证与授权范围）。\n\
                 读取凭证、获取 token、修改凭证等工具都必须传 purpose 说明本次目的（具体、真实，如\u{201c}调用 OpenAI 生成摘要\u{201d}），\
                 会写入审计日志；用 credential_audit_log 可查询操作记录。\n\
                 先用 credential_list 查看有哪些凭证（kind 字段表示种类）：\n\
@@ -46,7 +46,7 @@ impl ServerHandler for Server {
                 但如果用户已经在对话中给出了 API key、token、密码等秘密，请主动把它存进 KeyValet（credential_set 传 value，能匹配模板时带上 template），\
                 而不是写进 .env、配置文件、命令行或记忆；之后通过代理或网关使用它。\n\
                 不要把读取到的凭证值回显给用户或写入文件/日志，除非用户明确要求。",
-                "KeyValet: a local credential broker. Using a credential triggers Touch ID authentication (showing the stated purpose).\n\
+                "KeyValet: a local credential broker. Using a credential triggers Touch ID authentication (showing the credential and scope).\n\
                 Tools that read credentials, fetch tokens or modify credentials all require purpose describing this specific use (concrete and truthful, e.g. \"Call OpenAI to generate a summary\"); \
                 it is written to the audit log, which you can query with credential_audit_log.\n\
                 Start with credential_list to see which credentials exist (the kind field gives the category):\n\
@@ -69,6 +69,15 @@ impl ServerHandler for Server {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    unsafe {
+        libc::umask(0o077);
+        let limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        libc::setrlimit(libc::RLIMIT_CORE, &limit);
+    }
+    gateway_env::purge_legacy_records();
     // Both the `ring` and `aws-lc-rs` crypto provider features end up enabled in this binary
     // (kv-mcp's own rustls dependency asks for `ring` directly -- used by mail.rs's manual
     // ClientConfig::builder() for IMAP -- while reqwest/hyper-rustls's transitive rustls
@@ -92,17 +101,11 @@ async fn main() -> anyhow::Result<()> {
     // Lock and exit immediately when the session ends (the client closes stdin or sends a signal).
     // Otherwise the sudo child process's pipe keeps this process alive, leaving the unlocked root
     // helper lingering too.
-    let shutdown = {
-        let session = session.clone();
-        move || {
-            let session = session.clone();
-            tokio::spawn(async move {
-                session.lock().await; // End the root helper immediately (security-sensitive, don't wait)
-                gateway_env::cleanup_gateway_env();
-                std::process::exit(0);
-            });
-        }
-    };
+    async fn shutdown(session: Arc<session::HelperSession>) -> ! {
+        session.lock().await; // End the root helper immediately (security-sensitive, don't wait)
+        gateway_env::cleanup_gateway_env();
+        std::process::exit(0);
+    }
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
@@ -112,19 +115,23 @@ async fn main() -> anyhow::Result<()> {
             SignalKind::hangup(),
         ] {
             if let Ok(mut sig) = signal(kind) {
-                let shutdown = shutdown.clone();
+                let session = session.clone();
                 tokio::spawn(async move {
                     sig.recv().await;
-                    shutdown();
+                    shutdown(session).await;
                 });
             }
         }
     }
 
     let service = server.serve(rmcp::transport::stdio()).await?;
-    service.waiting().await?;
-    shutdown();
-    Ok(())
+    let waited = service.waiting().await;
+    // Run cleanup to completion here: a task spawned now might never be polled before the
+    // runtime shuts down, leaving exported files behind.
+    if let Err(e) = waited {
+        eprintln!("keyvalet-mcp: {e}");
+    }
+    shutdown(session).await
 }
 
 #[cfg(test)]

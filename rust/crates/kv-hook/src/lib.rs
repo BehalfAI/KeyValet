@@ -2,7 +2,7 @@
 //! they end up in KeyValet instead of the chat, files or shell.
 //!
 //! Direct port of `claude-plugin/hooks/secrets.mjs`, which this binary replaces as the thing the
-//! Claude Code plugin (and, best-effort, Codex) actually invokes. Five modes:
+//! Claude Code plugin (and, best-effort, Codex) actually invokes. The modes:
 //!
 //!   kv-hook prompt         UserPromptSubmit: the user pasted a key -> tell the agent to store it
 //!                          in KeyValet.
@@ -11,7 +11,12 @@
 //!                          point the agent to KeyValet.
 //!   kv-hook cursor-shell   Cursor `beforeShellExecution`.
 //!   kv-hook cursor-mcp     Cursor `beforeMCPExecution`.
+//!   kv-hook cursor-tool    Cursor `preToolUse` (file-write tools; the dedicated events only
+//!                          cover shell commands and MCP calls, not agent file edits).
+//!   kv-hook cursor-session Cursor `sessionStart` (injects a pointer to the KeyValet flow into
+//!                          the session's initial context).
 //!   kv-hook grok-tool      Grok Build `PreToolUse`.
+//!   kv-hook devin-tool     Devin CLI `PreToolUse`.
 //!
 //! Cursor and Grok each get their own mode(s), not a translation of `prompt`/`tool`'s output,
 //! because neither speaks Claude Code's `hookSpecificOutput` shape even though both can *load*
@@ -29,19 +34,22 @@
 //!   parse the nested `hookSpecificOutput.permissionDecision` *output* -- an unrecognized
 //!   decision is silently treated as absent, i.e. allow. Its actual contract is exit code (0 =
 //!   allow, 2 = deny); `main.rs` does the `exit(2)` when `handle_grok_tool` returns `Some`.
+//! - Devin's hook stdin carries the same `tool_name`/`tool_input` fields as Claude Code, but
+//!   its built-in tool vocabulary is lowercase and different (`exec`, `write`, `edit`,
+//!   `apply_patch`, `notebook_edit`, `write_to_process`, plus `mcp_call_tool` wrapping every
+//!   MCP call), and its stdout contract is a top-level `{"decision": "approve"|"block",
+//!   "reason"}` -- no "ask" equivalent exists (Devin CLI hook docs, checked 2026-10), so a flag
+//!   becomes a block, same trade-off as Cursor and Grok. `prompt` mode's output is already
+//!   Devin-compatible (`UserPromptSubmit` + `additionalContext`), so only the tool side gets a
+//!   dedicated mode.
 //!
-//! "tool" mode and the Cursor/Grok modes also catch secrets KeyValet already handed the agent
-//! this session (`credential_get` / `credential_totp_code` / `credential_access_token` /
-//! `credential_aws_credentials` record what they returned in `~/.keyvalet/run/*.redact`) by exact
-//! match -- this does not rely on the value looking like a known key format, unlike `PATTERNS`.
+//! Hooks use format detection only; raw credential values are never logged for matching.
 //!
 //! Never prints the secret itself (only a masked preview). `KEYVALET_HOOKS=off` disables it.
 
 use regex::Regex;
 use serde_json::Value;
 use std::collections::HashSet;
-use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
 
 /// A known key format -> KeyValet template. Order matters: more specific prefixes are listed
 /// before broader, more ambiguous ones, and a pattern that matches first "claims" that text so a
@@ -369,6 +377,54 @@ fn flatten_strings(v: &Value, out: &mut Vec<String>) {
     }
 }
 
+/// Does this tool/server name refer to the keyvalet MCP server? The same server shows up under
+/// runtime-specific spellings (`mcp__keyvalet__credential_set`, `keyvalet__credential_set`,
+/// `MCP:keyvalet:credential_set`, a bare `keyvalet` server field, ...), so split on
+/// non-alphanumerics and look for a whole `keyvalet` segment rather than guess a prefix shape.
+/// A "keyvalet-ish" name like `my-keyvalet-clone` is exempted too -- a false exemption only
+/// means one user-named server skips secret scanning, while a missed exemption would block
+/// `credential_set`, the very path this hook exists to promote.
+fn is_keyvalet_ref(name: &str) -> bool {
+    name.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|seg| seg == "keyvalet")
+}
+
+/// Any of the server-identifying fields a runtime's MCP-tool event might carry
+/// (Cursor's documented `mcp_server_name`, plus the spellings other runtimes use).
+fn mcp_server_field(input: &Value) -> &str {
+    input
+        .get("mcp_server_name")
+        .or_else(|| input.get("server_name"))
+        .or_else(|| input.get("serverName"))
+        .or_else(|| input.get("server"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+}
+
+/// Is this Cursor `beforeMCPExecution` event aimed at the keyvalet server? The documented
+/// identifier is `mcp_server_name`, but the payload also carries the stdio `command` (our own
+/// binary path contains a `keyvalet` segment), a `url`, and a `tool_name` that may itself be
+/// namespaced (`keyvalet__credential_set`) -- probe them all.
+fn cursor_mcp_targets_keyvalet(input: &Value) -> bool {
+    [
+        "tool_name",
+        "mcp_server_name",
+        "server_name",
+        "serverName",
+        "server",
+        "command",
+        "url",
+        "mcp_server_url",
+    ]
+    .iter()
+    .any(|f| {
+        input
+            .get(*f)
+            .and_then(Value::as_str)
+            .is_some_and(is_keyvalet_ref)
+    })
+}
+
 /// Every string value anywhere in an arbitrary MCP tool call's params, depth-first. Used instead
 /// of `tool_text` for Cursor's `beforeMCPExecution` (and any other "gate every MCP tool call, not
 /// just five named shapes" caller): the tool being gated there can be any MCP server's tool, with
@@ -380,100 +436,47 @@ fn mcp_tool_text(input: &Value) -> String {
     out.join("\n")
 }
 
-/// `~/.keyvalet/run/*.redact`, one file per still-live session (written by `recordSecrets` in the
-/// MCP server, deleted when that session ends). Ignores files older than a day so a crashed
-/// session that skipped cleanup doesn't keep flagging long-dead values forever.
-fn returned_secrets_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".keyvalet").join("run"))
-}
-
-fn load_returned_secrets() -> HashSet<String> {
-    match returned_secrets_dir() {
-        Some(dir) => load_returned_secrets_from(&dir),
-        None => HashSet::new(),
-    }
-}
-
-/// Pulled out of `load_returned_secrets` so a test can point it at a tempdir instead of mutating
-/// the process-wide `HOME` env var (which `cargo test`'s parallel threads would race on).
-fn load_returned_secrets_from(dir: &std::path::Path) -> HashSet<String> {
-    let mut out = HashSet::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return out;
-    };
-    let cutoff = SystemTime::now().checked_sub(Duration::from_secs(24 * 60 * 60));
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("redact") {
-            continue;
-        }
-        if let (Ok(meta), Some(cutoff)) = (entry.metadata(), cutoff) {
-            if meta.modified().map(|m| m < cutoff).unwrap_or(false) {
-                continue;
-            }
-        }
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            for line in content.lines() {
-                let v = line.trim();
-                if !v.is_empty() {
-                    out.insert(v.to_string());
-                }
-            }
-        }
-    }
-    out
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReturnedHit {
-    pub preview: String,
-}
-
-/// Exact-match hits (unlike `detect`, not a format guess -- these are values KeyValet itself
-/// handed out this session).
-pub fn detect_returned_secrets(text: &str) -> Vec<ReturnedHit> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-    load_returned_secrets()
-        .into_iter()
-        .filter(|v| text.contains(v.as_str()))
-        .map(|v| ReturnedHit { preview: mask(&v) })
-        .collect()
-}
-
-pub fn tool_reason(tool_name: &str, hits: &[Hit], returned_hits: &[ReturnedHit]) -> String {
-    let where_ = match tool_name {
-        "Bash" => "this shell command",
+/// Where-label for the Claude-Code-shaped tool names (Grok's observed names look the same, and
+/// Cursor's `preToolUse` reports the same PascalCase vocabulary).
+fn tool_where(tool_name: &str) -> &'static str {
+    match tool_name {
+        "Bash" | "Shell" => "this shell command",
         "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => "this file",
-        // An MCP tool call that isn't one of Claude Code's five named shapes above (e.g. an
-        // arbitrary tool Cursor's `beforeMCPExecution` is gating) -- neither "file" nor "shell
-        // command" describes it accurately.
+        // An MCP tool call or an unrecognized name -- neither "file" nor "shell command"
+        // describes it accurately.
         _ => "this tool call",
-    };
+    }
+}
+
+/// Shared first half of a flag message: what was found and where it belongs instead.
+fn flag_reason(where_: &str, hits: &[Hit]) -> String {
+    let list = hits
+        .iter()
+        .map(|h| format!("{} ({})", h.label, h.preview))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{where_} contains a literal secret — {list}. Keep secrets in KeyValet: call APIs with credential_http_request, run SDKs/scripts with credential_gateway (env file with a local base URL and a gateway token), and read env vars in code instead of hard-coding keys."
+    )
+}
+
+pub fn tool_reason(tool_name: &str, hits: &[Hit]) -> String {
     let mut parts = Vec::new();
     if !hits.is_empty() {
-        let list = hits
-            .iter()
-            .map(|h| format!("{} ({})", h.label, h.preview))
-            .collect::<Vec<_>>()
-            .join(", ");
-        parts.push(format!(
-            "{where_} contains a literal secret — {list}. Keep secrets in KeyValet: call APIs with credential_http_request, run SDKs/scripts with credential_gateway (env file with a local base URL and a gateway token), and read env vars in code instead of hard-coding keys."
-        ));
-    }
-    if !returned_hits.is_empty() {
-        let list = returned_hits
-            .iter()
-            .map(|h| h.preview.clone())
-            .collect::<Vec<_>>()
-            .join(", ");
-        parts.push(format!(
-            "{where_} contains a value KeyValet already returned this session ({list}). A secret KeyValet handed you should not go into a shell command or env-var prefix (ps shows it to every local user) or into a plain file — use credential_export_file instead and have the program read it from the private file it returns."
-        ));
+        parts.push(flag_reason(tool_where(tool_name), hits));
     }
     parts.push("Approve only if you really want this.".to_string());
     parts.join(" ")
+}
+
+/// Reason text for runtimes whose only verdict is deny/block (Cursor, Grok): there is no
+/// "approve" step for the user, so instead of Claude Code's "Approve only if..." tail the
+/// escape hatch is disabling the hook.
+fn deny_reason(tool_name: &str, hits: &[Hit], runtime: &str) -> String {
+    format!(
+        "{} If you really want a literal secret here, set KEYVALET_HOOKS=off in {runtime}'s environment.",
+        flag_reason(tool_where(tool_name), hits)
+    )
 }
 
 /// Hook entry: returns the JSON to print, or `None` for no output. `mode` is `"prompt"` or
@@ -505,8 +508,7 @@ pub fn handle(mode: &str, input: &Value) -> Option<Value> {
             let tool_input = input.get("tool_input").unwrap_or(&empty);
             let text = tool_text(name, tool_input);
             let hits = detect(&text, false);
-            let returned_hits = detect_returned_secrets(&text);
-            if hits.is_empty() && returned_hits.is_empty() {
+            if hits.is_empty() {
                 return None;
             }
             let mut additional_context =
@@ -514,14 +516,11 @@ pub fn handle(mode: &str, input: &Value) -> Option<Value> {
             if !hits.is_empty() {
                 additional_context.push_str("If the user hasn't stored it yet, store it with credential_set (template + value), then use credential_http_request / credential_gateway or read it from env vars instead of hard-coding it. ");
             }
-            if !returned_hits.is_empty() {
-                additional_context.push_str("A value returned by a KeyValet tool this session is present verbatim — use credential_export_file so the program reads it from a private file instead.");
-            }
             Some(serde_json::json!({
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
                     "permissionDecision": "ask",
-                    "permissionDecisionReason": tool_reason(name, &hits, &returned_hits),
+                    "permissionDecisionReason": tool_reason(name, &hits),
                     "additionalContext": additional_context,
                 }
             }))
@@ -549,33 +548,88 @@ pub fn handle_cursor_shell(input: &Value) -> Value {
         .and_then(Value::as_str)
         .unwrap_or_default();
     let hits = detect(command, false);
-    let returned_hits = detect_returned_secrets(command);
-    if hits.is_empty() && returned_hits.is_empty() {
+    if hits.is_empty() {
         return cursor_allow();
     }
-    cursor_deny(&tool_reason("Bash", &hits, &returned_hits))
+    cursor_deny(&deny_reason("Bash", &hits, "Cursor"))
 }
 
 /// Cursor `beforeMCPExecution`: input `{"tool_name": "...", "tool_input": "<json-encoded
-/// string>", ...}` -- note `tool_input` is a JSON string here, not an object (unlike Claude
-/// Code's `tool` mode), so it needs its own parse step. Always returns a decision.
+/// string>", "mcp_server_name": "<key in mcp.json>", ...}` (checked against cursor.com/docs/hooks
+/// 2026-10 -- `mcp_server_name` is the documented way to recognize a server). `tool_input` is a
+/// JSON string here, not an object, so it needs its own parse step; if it's already an object or
+/// an unparseable string it is still scanned rather than skipped. Always returns a decision.
+///
+/// Calls on the `keyvalet` server itself are always allowed: `credential_set`'s `value`,
+/// `credential_setup_aws`'s `secret_access_key` and friends legitimately carry secrets, and
+/// gating them would break the very flow this hook exists to promote.
 pub fn handle_cursor_mcp(input: &Value) -> Value {
-    let tool_input: Value = input
-        .get("tool_input")
-        .and_then(Value::as_str)
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or(Value::Null);
-    let text = mcp_tool_text(&tool_input);
+    if cursor_mcp_targets_keyvalet(input) {
+        return cursor_allow();
+    }
+    let text = match input.get("tool_input") {
+        Some(Value::String(raw)) => match serde_json::from_str::<Value>(raw) {
+            Ok(v) => mcp_tool_text(&v),
+            Err(_) => raw.clone(),
+        },
+        Some(v) => mcp_tool_text(v),
+        None => String::new(),
+    };
     let hits = detect(&text, false);
-    let returned_hits = detect_returned_secrets(&text);
-    if hits.is_empty() && returned_hits.is_empty() {
+    if hits.is_empty() {
         return cursor_allow();
     }
     let name = input
         .get("tool_name")
         .and_then(Value::as_str)
-        .unwrap_or("this tool call");
-    cursor_deny(&tool_reason(name, &hits, &returned_hits))
+        .unwrap_or_default();
+    cursor_deny(&deny_reason(name, &hits, "Cursor"))
+}
+
+/// Cursor `sessionStart`: fire-and-forget; output `{"additional_context": ...}` lands in the
+/// session's initial system context. Emits a compact pointer to the KeyValet flow so the agent
+/// knows the credential path even before the `keyvalet` skill's description triggers.
+pub fn handle_cursor_session() -> Value {
+    serde_json::json!({
+        "additional_context": "KeyValet (MCP server `keyvalet`) manages the user's credentials: secrets stay in the local vault and every use is Touch ID-approved and audited. Store keys the user shares with `credential_set` (omit `value` to have the user type it into a private dialog; never ask them to paste a key). Use credentials via `credential_http_request` / `credential_gateway`, or `credential_export_file` when a program needs a file; `credential_get` only as a last resort. Never write secrets into files, shell commands, memory or notes. Commands: /keyvalet-add, /keyvalet-mode, /keyvalet-status, /keyvalet-lock, /keyvalet-audit."
+    })
+}
+
+/// Cursor `preToolUse`: the generic event that fires for every tool type, including the
+/// file-write tools (`Write`, `Edit`, `StrReplace`, `Delete`, ...) that the dedicated
+/// `beforeShellExecution`/`beforeMCPExecution` events don't cover. Input is the same
+/// `tool_name`/`tool_input` shape as Claude Code's, with PascalCase names; `tool_input` is an
+/// object here. Unknown tool names fall back to scanning every string field, so a new write-ish
+/// tool name still gets gated. Always returns a decision.
+pub fn handle_cursor_tool(input: &Value) -> Value {
+    let name = input
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    // The matcher shouldn't route MCP calls here, but if one arrives under an `MCP:...` or
+    // namespaced name anyway, keyvalet's own tools stay exempt.
+    if is_keyvalet_ref(name) || is_keyvalet_ref(mcp_server_field(input)) {
+        return cursor_allow();
+    }
+    let empty = Value::Null;
+    let tool_input = input.get("tool_input").unwrap_or(&empty);
+    // Known Claude-Code-style shapes get field-precise extraction (Edit: new_string only, so
+    // removing a hard-coded key doesn't flag). Anything else -- unknown names, or a non-object
+    // tool_input -- gets the recursive net.
+    let known_shape = matches!(
+        name,
+        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" | "Bash"
+    );
+    let text = if known_shape && tool_input.is_object() {
+        tool_text(name, tool_input)
+    } else {
+        mcp_tool_text(tool_input)
+    };
+    let hits = detect(&text, false);
+    if hits.is_empty() {
+        return cursor_allow();
+    }
+    cursor_deny(&deny_reason(name, &hits, "Cursor"))
 }
 
 /// Grok Build `PreToolUse` -- the only Grok hook event that can actually block anything
@@ -598,7 +652,14 @@ pub fn handle_grok_tool(input: &Value) -> Option<Value> {
         .get("tool_name")
         .or_else(|| input.get("toolName"))
         .and_then(Value::as_str)
-        .unwrap_or("this tool call");
+        .unwrap_or_default();
+    // KeyValet's own tools legitimately take secrets as parameters (credential_set's value,
+    // credential_setup_aws's secret_access_key, ...) -- Grok names MCP tools `server__tool` and
+    // fires PreToolUse for them, so without this exemption the hook would deny the very flow it
+    // exists to promote.
+    if is_keyvalet_ref(name) || is_keyvalet_ref(mcp_server_field(input)) {
+        return None;
+    }
     let empty = Value::Null;
     let tool_input = input
         .get("tool_input")
@@ -606,13 +667,102 @@ pub fn handle_grok_tool(input: &Value) -> Option<Value> {
         .unwrap_or(&empty);
     let text = mcp_tool_text(tool_input);
     let hits = detect(&text, false);
-    let returned_hits = detect_returned_secrets(&text);
-    if hits.is_empty() && returned_hits.is_empty() {
+    if hits.is_empty() {
         return None;
     }
-    Some(
-        serde_json::json!({"decision": "deny", "reason": tool_reason(name, &hits, &returned_hits)}),
+    Some(serde_json::json!({"decision": "deny", "reason": deny_reason(name, &hits, "Grok")}))
+}
+
+/// Pulls the text a Devin tool call is about to write/execute, per tool shape. Devin's tool
+/// names are lowercase (`exec`, `write`, `edit`, `apply_patch`, `notebook_edit`,
+/// `write_to_process`). MCP calls can show up in either of two shapes: wrapped in the
+/// `mcp_call_tool` builtin (`{server_name, tool_name, arguments}`) or reported directly as
+/// `mcp__<server>__<tool>` with the arguments as `tool_input` -- both are handled.
+/// `edit` reads `new_string` only -- an edit *removing* a hard-coded key must not flag.
+/// Calls to the `keyvalet` server itself (either shape) return "": `credential_set`'s `value`
+/// parameter legitimately carries a secret, and gating it would break the very flow this hook
+/// exists to promote. Unknown tools fall back to the recursive scan.
+fn devin_tool_text(tool_name: &str, input: &Value) -> String {
+    // Namespaced MCP tool calls on keyvalet are exempt regardless of payload shape.
+    if is_keyvalet_ref(tool_name) {
+        return String::new();
+    }
+    let Some(obj) = input.as_object() else {
+        // tool_input isn't the usual {field: value} object -- scan whatever it is.
+        return mcp_tool_text(input);
+    };
+    let s = |v: Option<&Value>| v.and_then(Value::as_str).unwrap_or_default().to_string();
+    match tool_name {
+        // `command` plus the `env` values Devin injects into the command's process tree --
+        // a literal key passed via env is the same leak as one inlined in the command.
+        "exec" => {
+            let empty = Value::Null;
+            format!(
+                "{}\n{}",
+                s(obj.get("command")),
+                mcp_tool_text(obj.get("env").unwrap_or(&empty))
+            )
+        }
+        "write" => s(obj.get("content")),
+        "edit" => s(obj.get("new_string")),
+        "notebook_edit" => s(obj.get("new_source")),
+        "write_to_process" => format!(
+            "{}\n{}",
+            s(obj.get("text_input")),
+            s(obj.get("bytes_input"))
+        ),
+        "mcp_call_tool" => {
+            // A missed exemption would block KeyValet's own credential_set (the sanctioned
+            // path), so probe the wrapped payload's server field under every spelling seen in
+            // the wild.
+            if is_keyvalet_ref(mcp_server_field(input)) {
+                return String::new();
+            }
+            // Scan the whole wrapped input, not just `arguments`: server/tool names aren't
+            // secret-shaped so this is a strictly broader net that doesn't depend on
+            // guessing the argument field's name.
+            mcp_tool_text(input)
+        }
+        // apply_patch, other mcp__* servers (the namespaced-name shape), and anything else:
+        // scan every string field.
+        _ => mcp_tool_text(input),
+    }
+}
+
+fn devin_tool_reason(tool_name: &str, hits: &[Hit]) -> String {
+    let where_ = match tool_name {
+        "exec" | "write_to_process" => "this shell command",
+        "write" | "edit" | "apply_patch" | "notebook_edit" => "this file",
+        _ => "this tool call",
+    };
+    let list = hits
+        .iter()
+        .map(|h| format!("{} ({})", h.label, h.preview))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "KeyValet blocked {where_}: it contains a literal secret — {list}. Keep secrets in KeyValet: store with credential_set, call APIs with credential_http_request, run SDKs/scripts with credential_gateway (env file with a local base URL and a gateway token), and read env vars in code instead of hard-coding keys. If the user really wants a literal secret here, they can set KEYVALET_HOOKS=off in Devin's environment."
     )
+}
+
+/// Devin CLI `PreToolUse`. Stdin has the same `tool_name`/`tool_input` fields as Claude Code;
+/// the output contract is a top-level `{"decision": "block", "reason"}` (Devin has no "ask"
+/// decision, only approve/block -- checked 2026-10), so a flag blocks outright and the reason
+/// points the agent at the KeyValet path instead. Silent (`None`) when nothing is flagged,
+/// which Devin treats as proceed -- the same fail-open convention as `handle`'s `tool` mode.
+pub fn handle_devin_tool(input: &Value) -> Option<Value> {
+    let name = input
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let empty = Value::Null;
+    let tool_input = input.get("tool_input").unwrap_or(&empty);
+    let text = devin_tool_text(name, tool_input);
+    let hits = detect(&text, false);
+    if hits.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({"decision": "block", "reason": devin_tool_reason(name, &hits)}))
 }
 
 #[cfg(test)]
@@ -822,6 +972,111 @@ mod tests {
     }
 
     #[test]
+    fn cursor_mcp_allows_keyvalets_own_calls() {
+        // credential_set's value legitimately carries a secret -- gating it would break the
+        // sanctioned path. `mcp_server_name` is Cursor's documented server field.
+        let input = serde_json::json!({
+            "tool_name": "credential_set",
+            "tool_input": serde_json::to_string(&serde_json::json!({
+                "template": "openai", "value": "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
+            })).unwrap(),
+            "mcp_server_name": "keyvalet",
+            "command": "/usr/local/lib/keyvalet/bin/kv-mcp",
+        });
+        assert_eq!(
+            handle_cursor_mcp(&input),
+            serde_json::json!({"permission": "allow"})
+        );
+    }
+
+    #[test]
+    fn cursor_mcp_denies_a_key_in_a_non_json_tool_input_string() {
+        // If tool_input ever arrives as a raw string that isn't JSON, its content is scanned
+        // instead of silently skipped.
+        let input = serde_json::json!({
+            "tool_name": "x", "mcp_server_name": "other",
+            "tool_input": "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789",
+        });
+        assert_eq!(handle_cursor_mcp(&input)["permission"], "deny");
+    }
+
+    #[test]
+    fn cursor_mcp_denies_a_key_in_an_object_tool_input() {
+        // Defensive: a Cursor version that passes tool_input already-parsed still gets scanned.
+        let input = serde_json::json!({
+            "tool_name": "x", "mcp_server_name": "other",
+            "tool_input": {"params": {"key": "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"}},
+        });
+        assert_eq!(handle_cursor_mcp(&input)["permission"], "deny");
+    }
+
+    #[test]
+    fn cursor_tool_denies_a_write_carrying_a_key() {
+        let input = serde_json::json!({
+            "tool_name": "Write",
+            "tool_input": {"path": "/tmp/x", "content": "KEY=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"},
+        });
+        assert_eq!(handle_cursor_tool(&input)["permission"], "deny");
+    }
+
+    #[test]
+    fn cursor_tool_ignores_an_edit_that_removes_a_key() {
+        let input = serde_json::json!({
+            "tool_name": "Edit",
+            "tool_input": {"old_string": "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789", "new_string": "os.environ['KEY']"},
+        });
+        assert_eq!(
+            handle_cursor_tool(&input),
+            serde_json::json!({"permission": "allow"})
+        );
+        // A pure deletion (empty/missing new_string) must not fall back to the recursive scan
+        // and flag the secret that is being *removed*.
+        let deletion = serde_json::json!({
+            "tool_name": "Edit",
+            "tool_input": {"old_string": "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789", "new_string": ""},
+        });
+        assert_eq!(
+            handle_cursor_tool(&deletion),
+            serde_json::json!({"permission": "allow"})
+        );
+    }
+
+    #[test]
+    fn cursor_mcp_exempts_keyvalet_via_the_launch_command_field() {
+        // No mcp_server_name at all -- the stdio `command` still identifies our server.
+        let input = serde_json::json!({
+            "tool_name": "credential_set",
+            "tool_input": serde_json::to_string(&serde_json::json!({
+                "value": "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
+            })).unwrap(),
+            "command": "/usr/local/lib/keyvalet/bin/kv-mcp",
+        });
+        assert_eq!(
+            handle_cursor_mcp(&input),
+            serde_json::json!({"permission": "allow"})
+        );
+    }
+
+    #[test]
+    fn cursor_session_injects_the_keyvalet_pointer() {
+        let ctx = handle_cursor_session()["additional_context"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(ctx.contains("credential_set"));
+    }
+
+    #[test]
+    fn cursor_tool_scans_unknown_tool_names_recursively() {
+        // A write-ish Cursor tool name outside the Claude-Code five still gets gated.
+        let input = serde_json::json!({
+            "tool_name": "StrReplace",
+            "tool_input": {"new_str": "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"},
+        });
+        assert_eq!(handle_cursor_tool(&input)["permission"], "deny");
+    }
+
+    #[test]
     fn grok_tool_is_silent_for_an_ordinary_call() {
         let input = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "echo hi"}});
         assert!(handle_grok_tool(&input).is_none());
@@ -861,64 +1116,139 @@ mod tests {
     }
 
     #[test]
-    fn missing_run_dir_yields_no_hits_without_panicking() {
-        assert!(load_returned_secrets_from(std::path::Path::new("/no/such/dir")).is_empty());
+    fn grok_tool_skips_keyvalets_own_mcp_tools() {
+        // Grok names MCP tools `server__tool` and fires PreToolUse for them; credential_set's
+        // value legitimately carries a secret.
+        let input = serde_json::json!({
+            "tool_name": "keyvalet__credential_set",
+            "tool_input": {"template": "openai", "value": "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"},
+        });
+        assert!(handle_grok_tool(&input).is_none());
     }
 
     #[test]
-    fn a_fresh_redact_file_is_loaded_and_an_exact_match_is_flagged() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("session1.redact"),
-            "sk-live-abcdefghijklmnop\nother-secret-value\n",
-        )
+    fn grok_tool_skips_a_keyvalet_server_field() {
+        let input = serde_json::json!({
+            "tool_name": "credential_set",
+            "server_name": "keyvalet",
+            "tool_input": {"value": "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"},
+        });
+        assert!(handle_grok_tool(&input).is_none());
+    }
+
+    #[test]
+    fn deny_reasons_offer_the_escape_hatch_not_an_approve_button() {
+        // Cursor/Grok have no "approve" step for a denied call -- the message must point at
+        // KEYVALET_HOOKS=off instead.
+        let input =
+            serde_json::json!({"command": "echo sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"});
+        let msg = handle_cursor_shell(&input)["user_message"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(msg.contains("KEYVALET_HOOKS=off") && !msg.contains("Approve only if"));
+        let out = handle_grok_tool(&serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"},
+        }))
         .unwrap();
-        let loaded = load_returned_secrets_from(dir.path());
-        assert_eq!(loaded.len(), 2);
-        assert!(loaded.contains("sk-live-abcdefghijklmnop"));
+        let reason = out["reason"].as_str().unwrap();
+        assert!(reason.contains("KEYVALET_HOOKS=off") && !reason.contains("Approve only if"));
     }
 
     #[test]
-    fn a_non_redact_file_in_the_run_dir_is_ignored() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("notes.txt"), "sk-live-abcdefghijklmnop\n").unwrap();
-        assert!(load_returned_secrets_from(dir.path()).is_empty());
+    fn devin_tool_is_silent_for_an_ordinary_exec() {
+        let input = serde_json::json!({"tool_name": "exec", "tool_input": {"command": "echo hi"}});
+        assert!(handle_devin_tool(&input).is_none());
     }
 
     #[test]
-    fn a_stale_redact_file_past_the_24h_cutoff_is_ignored() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("old.redact");
-        std::fs::write(&path, "sk-live-abcdefghijklmnop\n").unwrap();
-        let two_days_ago = SystemTime::now() - Duration::from_secs(48 * 60 * 60);
-        filetime_touch(&path, two_days_ago);
-        assert!(load_returned_secrets_from(dir.path()).is_empty());
-    }
-
-    /// `std::fs::set_file_mtime` isn't in std; `touch -t`-equivalent via the file API without a
-    /// new crate dependency just for one test -- open, set_modified via `File::set_modified` is
-    /// stable since Rust 1.75.
-    fn filetime_touch(path: &std::path::Path, t: SystemTime) {
-        let f = std::fs::File::options().write(true).open(path).unwrap();
-        f.set_modified(t).unwrap();
+    fn devin_tool_blocks_with_devin_native_shape_not_claude_codes() {
+        let input = serde_json::json!({
+            "tool_name": "exec",
+            "tool_input": {"command": "curl -H 'x-api-key: sk-ant-api03-Zx9Yw8Vu7Ts6Rq5Po4Nm3Lk2Ji1Hg0FeDcBa-9z8y7x6w5v4u3t2' https://api.anthropic.com"},
+        });
+        let out = handle_devin_tool(&input).unwrap();
+        assert_eq!(out["decision"], "block");
+        assert!(
+            out.get("hookSpecificOutput").is_none(),
+            "must not use Claude Code's output shape -- Devin reads top-level decision/reason"
+        );
+        assert!(out["reason"].as_str().unwrap().contains("shell command"));
     }
 
     #[test]
-    fn detect_returned_secrets_matches_exact_values_regardless_of_shape() {
-        // Doesn't need to look like a known key format (unlike `detect`) -- any exact substring
-        // match against something KeyValet itself handed out counts.
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("s.redact"),
-            "not-a-recognizable-key-format-at-all\n",
-        )
-        .unwrap();
-        let hits: Vec<_> = load_returned_secrets_from(dir.path())
-            .into_iter()
-            .filter(|v| {
-                "the value is not-a-recognizable-key-format-at-all here".contains(v.as_str())
-            })
-            .collect();
-        assert_eq!(hits.len(), 1);
+    fn devin_tool_flags_write_and_edit_by_their_field_names() {
+        let write = serde_json::json!({"tool_name": "write", "tool_input": {"content": "KEY=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"}});
+        assert!(handle_devin_tool(&write).is_some());
+        // new_string is what an edit adds; a key sitting in old_string is being *removed*.
+        let removing = serde_json::json!({"tool_name": "edit", "tool_input": {"old_string": "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789", "new_string": "os.environ['KEY']"}});
+        assert!(handle_devin_tool(&removing).is_none());
+        let adding = serde_json::json!({"tool_name": "edit", "tool_input": {"old_string": "x", "new_string": "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"}});
+        assert!(handle_devin_tool(&adding).is_some());
+    }
+
+    #[test]
+    fn devin_tool_flags_a_secret_passed_via_exec_env() {
+        let input = serde_json::json!({"tool_name": "exec", "tool_input": {"command": "./deploy.sh", "env": {"API_KEY": "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"}}});
+        assert!(handle_devin_tool(&input).is_some());
+    }
+
+    #[test]
+    fn devin_tool_flags_write_to_process_input() {
+        let input = serde_json::json!({"tool_name": "write_to_process", "tool_input": {"text_input": "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"}});
+        assert!(handle_devin_tool(&input).is_some());
+    }
+
+    #[test]
+    fn devin_tool_skips_keyvalets_own_mcp_calls() {
+        // credential_set's value parameter legitimately carries a secret -- gating it would
+        // break the sanctioned path this hook exists to promote.
+        let input = serde_json::json!({
+            "tool_name": "mcp_call_tool",
+            "tool_input": {"server_name": "keyvalet", "tool_name": "credential_set",
+                "arguments": {"template": "openai", "value": "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"}},
+        });
+        assert!(handle_devin_tool(&input).is_none());
+    }
+
+    #[test]
+    fn devin_tool_scans_other_mcp_calls_arguments() {
+        let input = serde_json::json!({
+            "tool_name": "mcp_call_tool",
+            "tool_input": {"server_name": "github", "tool_name": "create_issue",
+                "arguments": {"env": {"TOKEN": "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"}}},
+        });
+        assert!(handle_devin_tool(&input).is_some());
+    }
+
+    #[test]
+    fn devin_tool_exempts_namespaced_keyvalet_tool_names() {
+        // The other MCP name shape Devin can report: tool_name IS mcp__keyvalet__<tool>.
+        // credential_set's value legitimately carries a secret -- exempt like the wrapped form.
+        let input = serde_json::json!({
+            "tool_name": "mcp__keyvalet__credential_set",
+            "tool_input": {"template": "openai", "value": "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"},
+        });
+        assert!(handle_devin_tool(&input).is_none());
+    }
+
+    #[test]
+    fn devin_tool_scans_namespaced_mcp_tool_arguments() {
+        let input = serde_json::json!({
+            "tool_name": "mcp__github__create_issue",
+            "tool_input": {"env": {"TOKEN": "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"}},
+        });
+        assert!(handle_devin_tool(&input).is_some());
+    }
+
+    #[test]
+    fn devin_tool_scans_non_object_tool_input() {
+        // A tool whose tool_input isn't the usual {field: value} object still gets scanned.
+        let input = serde_json::json!({
+            "tool_name": "apply_patch",
+            "tool_input": "patch text with sk-proj-abcdefghijklmnopqrstuvwxyz0123456789 in it",
+        });
+        assert!(handle_devin_tool(&input).is_some());
     }
 }

@@ -40,7 +40,17 @@ async fn new_gateway_with_credential(
 ) -> (tempfile::TempDir, Arc<Vault>, Gateway) {
     let tmp = tempfile::tempdir().unwrap();
     let vault = Arc::new(Vault::new(tmp.path().join("vault")));
-    vault.init().unwrap();
+    vault.prepare().unwrap();
+    if !vault.dir.join("master.key").exists() {
+        // Explicit legacy fixture: production code never creates this file.
+        std::fs::write(vault.dir.join("master.key"), [7u8; 32]).unwrap();
+        std::fs::set_permissions(
+            vault.dir.join("master.key"),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+        )
+        .unwrap();
+    }
+    vault.init_legacy().unwrap();
     vault
         .set(SetParams {
             r#type: "api_key".into(),
@@ -223,4 +233,21 @@ async fn a_host_outside_the_credentials_allowlist_is_rejected_before_any_request
         .await
         .unwrap();
     assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn revoking_gateway_tokens_rejects_subsequent_requests() {
+    let _guard = with_insecure_loopback();
+    let server = MockServer::start().await;
+    let (_tmp, _vault, gateway) = new_gateway_with_credential(&server, "synthetic-key").await;
+    let entry = gateway.open("api_key", "svc", Some("test")).await.unwrap();
+    gateway.revoke_all();
+    let response = reqwest::Client::new()
+        .get(format!("{}/{}/resource", entry.base, server.address()))
+        .bearer_auth(entry.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 401);
+    assert!(server.received_requests().await.unwrap().is_empty());
 }

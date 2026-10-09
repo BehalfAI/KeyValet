@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "/usr/local/lib/keyvalet/bin/kv-hook cursor-session"
+      }
+    ],
+    "beforeShellExecution": [
+      {
+        "command": "/usr/local/lib/keyvalet/bin/kv-hook cursor-shell"
+      }
+    ],
+    "beforeMCPExecution": [
+      {
+        "command": "/usr/local/lib/keyvalet/bin/kv-hook cursor-mcp"
+      }
+    ],
+    "preToolUse": [
+      {
+        "command": "/usr/local/lib/keyvalet/bin/kv-hook cursor-tool",
+        "matcher": "Write|Edit|StrReplace|MultiEdit|Delete|Notebook|Create|Patch"
+      }
+    ]
+  }
+}

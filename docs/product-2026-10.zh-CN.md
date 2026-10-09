@@ -1,7 +1,8 @@
 # KeyValet 产品规划（阶段 0 到阶段 3）
 
 - 日期：2026-10-08
-- 配套：`docs/strategy-2026-10.zh-CN.md`（市场、定价、路线图）、`docs/architecture-2026-10.zh-CN.md`（技术架构）
+- 决策更新：2026-10-09，平台支持与密钥保护顺序已确认，见 §1.4；macOS 硬件 vault 已实现并完成本机迁移，其他平台仍为规划，现有能力以 `SECURITY.md` 为准。
+- 配套：`docs/strategy-2026-10.zh-CN.md`（市场、定价、路线图）、`docs/architecture-2026-10.md`（技术架构）
 - 范围：产品定义、用户旅程、功能清单与验收标准、UX 规范、指标、发布节奏；阶段 4（enclave、远程 MCP、Enterprise）只列非目标和预留
 - 主体与品牌：Simvito Limited 运营，产品 KeyValet，主域名 keyvalet.dev
 
@@ -58,6 +59,42 @@ KeyValet 让 AI agent 替你用 API key、OAuth 账号和私钥，却永远拿�
 5. **对 agent 友好**：工具描述、错误信息和提示都为模型写，让 agent 第一次就用对。
 6. **一个产品，多个运行时**：Claude Code、Codex、Cursor、Grok 用同一个 vault、同一套策略。
 
+### 1.4 平台支持与密钥保护
+
+**决策日期：2026-10-09；状态：macOS 首版已实现，其他平台按以下顺序推进。** macOS 硬件保护先行，Linux / CI 是下一阶段重点；Windows 原生支持按明确用户需求排期；云端隔离执行首选 AWS Nitro Enclaves + KMS。目标用户、付费触发点与实施顺序保持一致，执行环境按用户需求逐项增加。
+
+| 支持项 | 顺序与范围 | 产品理由 |
+| --- | --- | --- |
+| macOS Secure Enclave + Touch ID | 当前唯一支持的 macOS vault 模式；安装直接初始化硬件 vault 或迁移旧 vault，停用文件密钥运行模式 | 沿用现有审批体验，不要求云账号；加强 vault 文件被复制后的保护 |
+| Linux / CI | 下一阶段优先做调用与身份接入；长期凭证可以留在 Mac 或远程执行端，远程路径依赖配对与 relay；本地 helper 保留兼容路径，TPM 2.0 可选 | 覆盖服务器和自动化场景，不把 TPM 作为安装前置条件，也不要求每台 runner 保存长期凭证 |
+| Windows TPM + Windows Hello | 有明确用户或客户需求后排期，覆盖本地保存、系统认证、后台服务、安装与更新 | 扩展桌面覆盖；TPM 密钥保护与 Hello 审批的绑定必须实际验证（候选做法与 session 0 限制见架构 §8.1） |
+| AWS Nitro Enclaves + KMS | 团队 / 企业首个云端隔离执行方案，随设备离线和无人值守执行需求推进；默认 BYO-KMS | 提供宿主机管理员无法直接读取执行环境内存的保护，兼顾团队部署与治理 |
+| Windows VBS Enclaves、Linux SGX、Azure / GCP 机密计算 | 当前仅保留扩展接口，按客户需求再增加 | 每一种都会增加硬件、部署、验证与维护成本 |
+
+**运行位置与保护能力分别说明。** 用户看到的是本地保存、连接已有凭证库或远程执行，以及当前实际生效的保护状态；ECDH、HKDF、PCR 等实现细节留在技术文档。
+
+2026-10-09 已整合为 macOS 必需模式：安装与升级运行 `keyvalet setup-enclave`，通过终端或本机隐藏输入框设置独立恢复口令，新 vault 直接初始化硬件密钥，旧 vault 更换主密钥后删除 `master.key`。每个新会话认证，`remember` 也不跳过；取消设置或硬件失败不会降级，旧文件密钥 vault 仅能进入迁移。换机可通过恢复口令重新绑定硬件密钥；`migrate-to-enclave` 保留为迁移命令别名。当前实现与本机验证范围见架构 §8.0。
+
+| 保护能力 | 对用户的说明 | 保证边界 |
+| --- | --- | --- |
+| 本地保护 | 凭证留在自己的电脑，审批后由 KeyValet 使用 | 信任操作系统与 helper；现有 root 妥协仍在威胁模型之外 |
+| 硬件密钥保护 | 使用硬件保护的密钥，降低复制 vault 文件后离线解密的风险 | Enclave / TPM 内的私钥不可导出，不代表解封或派生到普通进程中的 AES 主密钥也不可读取。强度因平台而异：macOS SE 每次使用都要求用户在场（Touch ID / 密码）；TPM 没有用户在场机制，未设 PIN 时同机 root 可静默使用，只防 vault 被复制到别处 |
+| 隔离执行 | 秘密在通过证明的隔离环境内使用，宿主机管理员不能直接读取其内存 | 授权检查、解密、凭证注入和 TLS 留在隔离环境；仍信任硬件、固件、执行代码和密钥策略治理，不承诺“无论如何都拿不到” |
+
+**本地方案的准确承诺。** Secure Enclave 的 ECDH + HKDF 方案若把固定 AES 主密钥交给 `kv-helper`，该主密钥就存在于普通进程内存中。攻击者若在一次合法解锁时截获它，直到密钥轮换前仍可离线解密其保护的 vault；退出会话、清零内存和下一次 Touch ID 都不能撤回已经复制出去的密钥。因此该方案可以作为第一步，但不能宣传为实际解密密钥永不离开硬件，或已经防住 root。硬件密钥的加密表示只绑定这台 Mac，不绑定 KeyValet 签名：被攻破的 root 无需等待合法解锁，可以自己发起认证，用户批准一次即可取得主密钥。会话弹窗只显示固定的范围文字，其他程序可以模仿，所以用户的防线是：留意不是自己刚触发的认证弹窗，并查看审计记录。新设置或轮换过的 vault 带设备绑定：密钥还依赖一个只有 root 可读、不进 Time Machine 的绑定文件，单有 vault 文件副本加一次获批弹窗无法解密；旧 vault 运行 `keyvalet rotate-recovery` 即可启用，该命令同时更换恢复口令。
+
+SE 不可用时（例如系统更新后无法完成硬件认证）不降级：`keyvalet recovery-read` 用恢复口令只读访问凭证，`keyvalet recovery-check` 不用硬件、只验证恢复口令，换到正常的 Mac 后用 `recover-vault` 恢复。这些都是用户显式发起的 CLI 应急路径，helper 不接受。
+
+**商业与体验要求：**
+
+1. 本地硬件保护属于基础安全能力，Free / Team 不以是否启用它区分安全等级。团队收费点放在共享、撤销、策略、CI 身份和审计；云端隔离执行可作为有部署与运维成本的付费能力。
+2. macOS 必须具备 Secure Enclave，不提供文件密钥或软件回退。后续 Linux 等平台可按平台决策提供明确标注的软件兼容方案，状态显示“硬件密钥保护”或“软件保护”；硬件访问失败必须报错，不能静默切回文件密钥。
+3. Linux / CI 优先通过受限身份和能力令牌调用持有凭证的执行端。远程审批后把主密钥或长期凭证交回 runner，仍不能防该机器的 root。
+4. 换机、备份、硬件损坏和恢复与硬件绑定方案一起设计，迁移前让用户了解并验证恢复路径。恢复码、软件备份或额外设备包裹形成独立解密路径，其安全边界必须单独说明。
+5. 普通 KMS 可以作为企业后端，但不能把“主密钥不可导出”宣传成“调用方拿不到明文”。BYO-KMS 与托管 KMS 的策略管理权分别说明，见架构 §11.4。
+
+技术边界参考：[Apple Secure Enclave](https://developer.apple.com/documentation/security/protecting-keys-with-the-secure-enclave)、[Windows TPM](https://learn.microsoft.com/en-us/windows/security/hardware-security/tpm/how-windows-uses-the-tpm)、[Windows VBS Enclaves](https://learn.microsoft.com/en-us/windows/win32/trusted-execution/vbs-enclaves)、[Linux Trusted Keys](https://www.kernel.org/doc/html/latest/security/keys/trusted-encrypted.html)、[AWS Nitro Enclaves](https://docs.aws.amazon.com/enclaves/latest/user/nitro-enclave.html)、[KMS Decrypt / Recipient](https://docs.aws.amazon.com/kms/latest/APIReference/API_Decrypt.html)。
+
 ---
 
 ## 2. 用户画像与任务
@@ -79,7 +116,7 @@ Dev 是产品的第一用户，Lead 是第一付费者；所有阶段 0–2 的�
 1. 官网或 README：一条 `curl … | sh`。安装脚本检测 Claude Code / Codex / Cursor / Grok，询问是否为每个已安装的运行时配置 MCP 与 hooks（默认全选）。
 2. 第一次输入密码（安装特权 helper），之后全部 Touch ID。
 3. 在 agent 里说 `/keyvalet:add openai`：原生对话框让用户粘贴 key，模板自动配置代理和验证请求，验证通过显示「已就绪」。
-4. 对 agent 说「用 KeyValet 列出我的 OpenAI 模型」：Touch ID 弹窗显示凭据、用途、真实请求；按一下，agent 拿到响应。
+4. 对 agent 说「用 KeyValet 列出我的 OpenAI 模型」：Touch ID 弹窗显示「使用 openai（本会话）」及这次授权放开的能力（proxy_only 凭证为「仅代理请求」）；按一下，agent 拿到响应。逐次授权时显示真实操作及全部参数。
 5. 结束时 agent 用一句话告诉用户发生了什么：哪条凭据、什么请求、审计里能查。
 
 验收：新用户从安装到第一次成功代理调用的中位时间 < 5 分钟；每步都有单一明确动作。
@@ -110,7 +147,9 @@ Dev 是产品的第一用户，Lead 是第一付费者；所有阶段 0–2 的�
 
 ### J5 Linux 与服务器
 
+- 优先提供调用与身份接入，长期凭证可以保留在 Mac 或远程执行端；远程执行随配对与 relay 能力上线，无 TPM 的 runner 也可使用。
 - `install.sh` 在 Linux 上安装系统用户 `keyvalet` 的 helper；无 GUI 时审批走 TTY 确认码（只允许只读与普通写入）。
+- 本地保存是兼容路径，TPM 可选，保护状态按 §1.4 明示；远程审批不会让普通 Linux helper 获得抵御 root 的隔离能力。
 - 阶段 3 起配对手机后，Linux 上的敏感操作走手机 Face ID。
 - CI：GitHub Actions 用 OIDC 换一张限定范围的能力令牌，没有任何静态 secret 进入仓库设置。
 
@@ -163,6 +202,7 @@ Dev 是产品的第一用户，Lead 是第一付费者；所有阶段 0–2 的�
 
 | 优先级 | 功能 | AC |
 | --- | --- | --- |
+| M | macOS Secure Enclave 本地主密钥保护：先验证，再显式迁移；保护状态与换机恢复同步设计（§1.4） | spike 不接触真实 vault；临时 vault 完成迁移、解锁与恢复验证；硬件访问失败不静默降级；产品准确说明 helper 内存边界 |
 | M | 审批弹窗显示真实请求（method、host、path、摘要）并绑定请求摘要 | 任一字段改动后旧审批失效；弹窗在 Touch ID 文案字数限制内可读 |
 | M | 模板 `summarize` 规则（先覆盖 OpenAI、Anthropic、GitHub、Stripe、AWS、Slack） | 这些服务的弹窗显示业务语义（model、repo、金额）而非路径 |
 | M | 工具 annotations（readOnly / destructive / openWorld） | 客户端能区分只读工具；Claude Code 权限提示减少 |
@@ -180,7 +220,7 @@ Dev 是产品的第一用户，Lead 是第一付费者；所有阶段 0–2 的�
 | M | 策略引擎 v1：T0–T3、host/method/path 规则、预算、`.keyvalet/policy.yaml`、`keyvalet policy test` | 只读 GET 默认不弹窗但有审计；仓库策略不能放宽 |
 | M | grant 范围明确化；T2 永不被记住 | 用例矩阵（4 模式 × 4 层级）全部通过 |
 | M | 「以后自动放行」推荐 | 连续 5 次批准后出现；接受后写入用户策略 |
-| M | Linux helper（系统用户、Unix socket、TTY 审批） | Ubuntu 22.04+ 与 Debian 12 上 J1 可完成 |
+| M | Linux / CI 调用与身份接入、本地 helper 兼容路径（系统用户、Unix socket、TTY 审批；TPM 可选，见 §1.4） | Ubuntu 22.04+ 与 Debian 12 上 J1 可完成；无 TPM 可用并显示保护状态，硬件访问失败不静默降级 |
 | M | `keyvalet hooks install --all` | 幂等；卸载可逆 |
 | M | 审计哈希链与 `keyvalet audit export` | `audit verify` 可检出篡改 |
 | S | 能力令牌：Mac 签发、CI 使用（GitHub Actions 示例工作流） | 示例仓库跑通，无静态 secret |
@@ -222,11 +262,11 @@ Dev 是产品的第一用户，Lead 是第一付费者；所有阶段 0–2 的�
 
 ### 6.1 审批弹窗
 
-- 结构固定四行：凭据与层级、用途（agent 声明）、真实请求（模板摘要或 method + host + path）、来源（运行时、仓库）。授权范围作为按钮或选项，不占文案。
-- 用途是 agent 的话，用引号或「agent 说：」标明，不写成事实。
+- 普通 Touch ID 弹窗默认一句话：凭据与授权范围，例如「使用 openai（本会话）」。逐次授权才补充真实请求（method + host + path）；明文读取等非代理操作保留具体动作。来源和完整用途留在审计中。
+- 会话授权覆盖该凭据在会话中的使用，不以某条请求或 agent 自述用途暗示更窄的权限。
 - 真实请求不显示哈希、不显示完整 URL 的查询值、不显示任何 header 值。
 - T2 弹窗加一行红色提示「敏感操作，不会被记住」。
-- Touch ID 文案有长度限制：超过时先裁用途，再裁来源，永不裁真实请求。
+- Touch ID 文案有长度限制：保留凭据、授权范围，以及逐次授权或明文读取时必要的操作信息；用途与来源目录不放入紧凑弹窗。
 - 中英文各一套措辞（附录 A）。
 
 ### 6.2 错误与拒绝
@@ -326,7 +366,8 @@ Dev 是产品的第一用户，Lead 是第一付费者；所有阶段 0–2 的�
 - 浏览器自动填充与网页登录（1Password 的领域）。
 - 人用的密码管理器功能（密码生成、表单、家庭共享）。
 - 企业 NHI 控制平面（Keycard、Aembit 的领域）。
-- Windows 客户端、Android App、SAML、SCIM、enclave 离线执行、远程 MCP 端点（阶段 4）。
+- Windows 原生客户端目前不承诺版本或月份，按 §1.4 在明确需求出现后排期；VBS Enclaves、Linux SGX、Azure / GCP 机密计算当前只保留接口。
+- Android App、SAML、SCIM、enclave 离线执行、远程 MCP 端点（阶段 4）。
 - 自研 OAuth 授权服务器（用 Ory Hydra）。
 - 个人付费档。
 
@@ -401,18 +442,14 @@ keyvalet.dev
 
 ## 附录 A：审批弹窗文案规范与示例
 
-规范：四行，顺序固定，T2 加红色提示；长度超限时先裁用途再裁来源。
+规范：普通 Touch ID 审批默认一句话，保留凭据和授权范围；逐次授权和非代理操作补充必要的操作信息。T2 敏感操作和 TTY 等界面使用独立的完整模板。
 
 中文示例（T1，OpenAI）：
 ```
-KeyValet · openai/default · 写操作
-agent 说：总结会议纪要
-POST chat/completions · model=gpt-5 · 2.1 KB · 「请把以下会议记录…」
-claude-code · github.com/x/y
-[这一次] [这个凭据，本会话] [记住 4 小时]
+使用 openai/default（本会话）
 ```
 
-English (T2, GitHub):
+English (planned T2 approval interface, GitHub):
 ```
 KeyValet · github/work · sensitive
 Agent says: clean up old branches

@@ -69,7 +69,17 @@ fn rust_can_read_a_vault_written_by_the_ts_implementation() {
     );
 
     let vault = Vault::new(&dir);
-    vault.init().unwrap();
+    vault.prepare().unwrap();
+    if !vault.dir.join("master.key").exists() {
+        // Explicit legacy fixture: production code never creates this file.
+        std::fs::write(vault.dir.join("master.key"), [7u8; 32]).unwrap();
+        std::fs::set_permissions(
+            vault.dir.join("master.key"),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+        )
+        .unwrap();
+    }
+    vault.init_legacy().unwrap();
     assert_eq!(
         vault.get("api_key", "openai").unwrap().value,
         "sk-from-ts-abc123"
@@ -99,7 +109,17 @@ fn ts_can_read_a_vault_written_by_rust_including_after_a_rust_write_following_a_
 
     // 2. Rust opens the SAME vault (master key + vault.enc already on disk) and writes another one.
     let vault = Vault::new(&dir);
-    vault.init().unwrap();
+    vault.prepare().unwrap();
+    if !vault.dir.join("master.key").exists() {
+        // Explicit legacy fixture: production code never creates this file.
+        std::fs::write(vault.dir.join("master.key"), [7u8; 32]).unwrap();
+        std::fs::set_permissions(
+            vault.dir.join("master.key"),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+        )
+        .unwrap();
+    }
+    vault.init_legacy().unwrap();
     vault
         .set(SetParams {
             r#type: "token".into(),

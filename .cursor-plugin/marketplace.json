@@ -1,0 +1,29 @@
+{
+  "name": "keyvalet",
+  "owner": {
+    "name": "Simvito Limited",
+    "email": "plugins@keyvalet.dev"
+  },
+  "plugins": [
+    {
+      "name": "keyvalet",
+      "source": "./cursor-plugin",
+      "description": "Keeps your keys in KeyValet: stores secrets you share, blocks keys about to be hard-coded, and adds the /keyvalet-* commands (requires the KeyValet install: curl -fsSL https://keyvalet.dev/install.sh | sh).",
+      "version": "0.2.0",
+      "author": {
+        "name": "Simvito Limited"
+      },
+      "homepage": "https://keyvalet.dev/",
+      "repository": "https://github.com/KeyValet/KeyValet",
+      "license": "Apache-2.0",
+      "keywords": [
+        "credentials",
+        "secrets",
+        "mcp",
+        "touch-id",
+        "security"
+      ],
+      "category": "integrations"
+    }
+  ]
+}

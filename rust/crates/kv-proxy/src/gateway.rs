@@ -60,6 +60,22 @@ struct Inner {
     routes: Mutex<HashMap<String, Route>>,
     port: Mutex<u16>,
     in_flight: std::sync::atomic::AtomicUsize,
+    /// Bumped (under the `routes` lock) whenever tokens are revoked. A request records the epoch
+    /// it was authorized under and stops -- before contacting upstream and between streamed
+    /// chunks -- once it changes, so revocation also ends requests already in flight.
+    epoch: std::sync::atomic::AtomicU64,
+}
+
+impl Inner {
+    fn revoke(&self) {
+        let mut routes = self.routes.lock().unwrap();
+        routes.clear();
+        self.epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn revoked_since(&self, epoch: u64) -> bool {
+        self.epoch.load(std::sync::atomic::Ordering::SeqCst) != epoch
+    }
 }
 
 pub struct Gateway {
@@ -83,12 +99,18 @@ impl Gateway {
                 routes: Mutex::new(HashMap::new()),
                 port: Mutex::new(0),
                 in_flight: std::sync::atomic::AtomicUsize::new(0),
+                epoch: std::sync::atomic::AtomicU64::new(0),
             }),
             vault,
             audit,
             allowed_uid,
             started: tokio::sync::OnceCell::new(),
         }
+    }
+
+    /// Revoke existing tokens (and stop requests in flight) when the session's policy changes.
+    pub fn revoke_all(&self) {
+        self.inner.revoke();
     }
 
     /// Opens a gateway entry point for a credential (re-opening the same credential returns the same token).
@@ -130,7 +152,7 @@ impl Gateway {
     }
 
     pub fn close(&self) {
-        self.inner.routes.lock().unwrap().clear();
+        self.inner.revoke();
     }
 
     async fn ensure_started(&self) -> std::io::Result<()> {
@@ -226,10 +248,12 @@ async fn serve(
     }
 }
 
-type BoxBody = http_body_util::combinators::BoxBody<Bytes, std::convert::Infallible>;
+/// A body error makes hyper abort the connection instead of ending the response normally, so a
+/// client never mistakes a cut-off stream for a complete one.
+type BoxBody = http_body_util::combinators::BoxBody<Bytes, std::io::Error>;
 
 fn full_body(b: impl Into<Bytes>) -> BoxBody {
-    Full::new(b.into()).map_err(|_| unreachable!()).boxed()
+    Full::new(b.into()).map_err(|never| match never {}).boxed()
 }
 
 fn fail(status: StatusCode, message: &str) -> Response<BoxBody> {
@@ -324,10 +348,15 @@ async fn handle(
         );
     }
     let token = token_from(&req);
-    let route = token
-        .as_ref()
-        .and_then(|t| inner.routes.lock().unwrap().get(t).cloned());
-    let Some(route) = route else {
+    // Read the epoch under the same lock as the route, so a concurrent revocation is never missed.
+    let authorized = token.as_ref().and_then(|t| {
+        let routes = inner.routes.lock().unwrap();
+        routes
+            .get(t)
+            .cloned()
+            .map(|route| (route, inner.epoch.load(std::sync::atomic::Ordering::SeqCst)))
+    });
+    let Some((route, epoch)) = authorized else {
         record_audit(false, 401, Some("token"), None);
         return fail(
             StatusCode::UNAUTHORIZED,
@@ -354,8 +383,16 @@ async fn handle(
     inner
         .in_flight
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let result =
-        handle_authorized(req, &vault, &route, &upstream_host, rest, query.as_deref()).await;
+    let result = handle_authorized(
+        req,
+        &vault,
+        &route,
+        (&inner, epoch),
+        &upstream_host,
+        rest,
+        query.as_deref(),
+    )
+    .await;
     inner
         .in_flight
         .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
@@ -381,6 +418,7 @@ async fn handle_authorized(
     req: Request<Incoming>,
     vault: &Vault,
     route: &Route,
+    (inner, epoch): (&Arc<Inner>, u64),
     upstream_host: &str,
     rest: &str,
     query: Option<&str>,
@@ -472,6 +510,17 @@ async fn handle_authorized(
         b
     };
 
+    let revoked = || {
+        (
+            StatusCode::UNAUTHORIZED,
+            "revoked".to_string(),
+            kv_i18n::t("网关令牌已撤销", "The gateway token has been revoked"),
+        )
+    };
+    if inner.revoked_since(epoch) {
+        return Err(revoked());
+    }
+
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(TIMEOUT)
@@ -506,6 +555,9 @@ async fn handle_authorized(
         }
     };
 
+    if inner.revoked_since(epoch) {
+        return Err(revoked());
+    }
     let status = upstream.status().as_u16();
     let mut resp_headers = Vec::new();
     for (k, v) in upstream.headers() {
@@ -522,18 +574,29 @@ async fn handle_authorized(
         }
     }
 
-    let (tx, rx) = mpsc::channel::<Result<Frame<Bytes>, std::convert::Infallible>>(4);
+    let (tx, rx) = mpsc::channel::<Result<Frame<Bytes>, std::io::Error>>(4);
     let redactions = inj.redactions.clone();
+    let inner = inner.clone();
     tokio::spawn(async move {
         let mut redactor = StreamRedactor::new(redactions);
         let mut stream = upstream.bytes_stream();
         let mut total: u64 = 0;
         use futures_util::StreamExt;
+        let abort = |reason: &str| Err(std::io::Error::other(reason.to_string()));
         while let Some(chunk) = stream.next().await {
-            let Ok(chunk) = chunk else { break };
+            if inner.revoked_since(epoch) {
+                let _ = tx.send(abort("gateway token revoked")).await;
+                return;
+            }
+            let Ok(chunk) = chunk else {
+                let _ = tx.send(abort("upstream stream failed")).await;
+                return;
+            };
             total += chunk.len() as u64;
             if total > MAX_RESPONSE_BYTES {
-                break; // over-limit: disconnect rather than let the client think the response completed normally
+                // Over the limit: abort rather than let the client think the response completed.
+                let _ = tx.send(abort("response too large")).await;
+                return;
             }
             let out = redactor.push(&chunk);
             if !out.is_empty() && tx.send(Ok(Frame::data(Bytes::from(out)))).await.is_err() {
@@ -589,7 +652,17 @@ mod tests {
     async fn open_reuses_the_same_token_for_the_same_credential() {
         let tmp = tempfile::tempdir().unwrap();
         let vault = Arc::new(kv_vault::Vault::new(tmp.path().join("vault")));
-        vault.init().unwrap();
+        vault.prepare().unwrap();
+        if !vault.dir.join("master.key").exists() {
+            // Explicit legacy fixture: production code never creates this file.
+            std::fs::write(vault.dir.join("master.key"), [7u8; 32]).unwrap();
+            std::fs::set_permissions(
+                vault.dir.join("master.key"),
+                <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+            )
+            .unwrap();
+        }
+        vault.init_legacy().unwrap();
         let gw = Gateway::new(vault, Arc::new(|_| {}), None);
         let a = gw.open("api_key", "svc", Some("test")).await.unwrap();
         let b = gw.open("api_key", "svc", Some("test again")).await.unwrap();

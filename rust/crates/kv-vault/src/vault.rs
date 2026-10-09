@@ -5,6 +5,10 @@ use crate::validate::{
     check_attributes, check_description, check_value, normalize_name, normalize_type,
     MAX_PROTOCOL_BYTES,
 };
+use crate::{
+    DeviceBinding, EnclaveKey, MasterKey, MasterKeyMetadata, MasterKeyProvider, ProviderId,
+    WrappedMasterKey, DEVICE_BINDING_BYTES,
+};
 use aes_gcm::aead::{rand_core::RngCore, OsRng};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -12,6 +16,7 @@ use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
@@ -21,10 +26,26 @@ const LOCK_STALE: Duration = Duration::from_millis(30_000);
 pub struct Vault {
     pub dir: PathBuf,
     key_path: PathBuf,
+    binding_path: PathBuf,
     data_path: PathBuf,
     audit_path: PathBuf,
     lock_path: PathBuf,
     key: std::sync::Mutex<Option<Zeroizing<[u8; KEY_BYTES]>>>,
+    metadata: std::sync::Mutex<Option<MasterKeyMetadata>>,
+    /// Set only by `open_recovery_read_only`; any newly installed key clears it.
+    read_only: AtomicBool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProtectionStatus {
+    pub provider: &'static str,
+    pub recovery_configured: bool,
+    /// The vault key also depends on the root-only device binding secret.
+    pub device_binding: bool,
+    /// A `vault.migration-backup.enc` snapshot left by an older version is still in the directory.
+    pub migration_backup_present: bool,
+    pub legacy_key_present: bool,
+    pub hardware_required: bool,
 }
 
 fn now_iso() -> String {
@@ -48,50 +69,389 @@ impl Vault {
         let dir = dir.into();
         Self {
             key_path: dir.join("master.key"),
+            binding_path: dir.join("device-binding.key"),
             data_path: dir.join("vault.enc"),
             audit_path: dir.join("audit.log"),
             lock_path: dir.join(".lock"),
             dir,
             key: std::sync::Mutex::new(None),
+            metadata: std::sync::Mutex::new(None),
+            read_only: AtomicBool::new(false),
         }
     }
 
-    /// Creates/checks the directory and master key. Refuses to work when directory or file
+    /// Creates/checks the directory without loading any key. Refuses directory or file
     /// permissions are wrong, rather than "fixing" them.
-    pub fn init(&self) -> Result<()> {
+    pub fn prepare(&self) -> Result<()> {
         if !self.dir.exists() {
             std::fs::create_dir(&self.dir)?;
             std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700))?;
         }
         self.assert_private(&self.dir, true)?;
+        if self.data_path.symlink_metadata().is_ok() {
+            self.assert_private(&self.data_path, false)?;
+        }
+        Ok(())
+    }
 
-        if !self.key_path.exists() {
-            let mut key_bytes = [0u8; KEY_BYTES];
-            OsRng.fill_bytes(&mut key_bytes);
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&self.key_path)
-            {
-                Ok(mut f) => f.write_all(&key_bytes)?,
-                // Another session initialized concurrently: use the key it wrote.
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(e.into()),
+    fn disk_metadata(&self) -> Result<Option<MasterKeyMetadata>> {
+        if !self.data_path.exists() {
+            return Ok(None);
+        }
+        self.assert_private(&self.data_path, false)?;
+        let file: crate::types::EncryptedFile =
+            serde_json::from_slice(&std::fs::read(&self.data_path)?)?;
+        if let Some(m) = &file.master_key {
+            m.enclave.decode()?;
+        }
+        Ok(file.master_key)
+    }
+
+    pub fn protection(&self) -> Result<ProtectionStatus> {
+        self.prepare()?;
+        let metadata = self.disk_metadata()?;
+        let protected = metadata.is_some();
+        Ok(ProtectionStatus {
+            device_binding: metadata.is_some_and(|m| m.device_binding.is_some()),
+            provider: if protected {
+                "secure_enclave"
+            } else if self.data_path.exists() || self.key_path.symlink_metadata().is_ok() {
+                "migration_required"
+            } else {
+                "uninitialized"
+            },
+            recovery_configured: protected,
+            migration_backup_present: self
+                .dir
+                .join("vault.migration-backup.enc")
+                .symlink_metadata()
+                .is_ok(),
+            legacy_key_present: self.key_path.symlink_metadata().is_ok(),
+            hardware_required: true,
+        })
+    }
+
+    pub fn init_with_provider(&self, provider: &dyn MasterKeyProvider, reason: &str) -> Result<()> {
+        self.clear_key();
+        self.prepare()?;
+        match self.disk_metadata()? {
+            None => Err(VaultError::new("macOS 凭证库必须使用 Secure Enclave；请运行 keyvalet setup-enclave 完成初始化或迁移", "macOS vaults require Secure Enclave; run keyvalet setup-enclave to initialize or migrate")),
+            Some(metadata) => {
+                // Check the binding file before prompting: a missing or replaced one can't
+                // succeed anyway.
+                let secret = match &metadata.device_binding {
+                    Some(binding) => Some(self.load_binding_secret(binding)?),
+                    None => None,
+                };
+                let hardware = provider.unlock(&metadata.enclave, reason)?;
+                let key = match (&metadata.device_binding, secret) {
+                    (Some(binding), Some(secret)) => binding.bind(&hardware, &secret)?,
+                    _ => hardware,
+                };
+                self.set_key(key, Some(metadata));
+                if let Err(error) = self.read() {
+                    self.clear_key();
+                    return Err(error);
+                }
+                Ok(())
             }
         }
+    }
+
+    /// Loads an existing file key for explicit legacy import; never creates a file key.
+    /// The macOS helper and ordinary CLI operations must use `init_with_provider`.
+    pub fn init_legacy(&self) -> Result<()> {
+        self.clear_key();
+        self.prepare()?;
+        if self.disk_metadata()?.is_some() {
+            return Err(VaultError::new(
+                "凭证库需要硬件解锁；禁止文件密钥降级",
+                "Vault requires hardware unlock; file-key fallback is disabled",
+            ));
+        }
+
+        if !self.key_path.exists() {
+            return Err(VaultError::new(
+                "旧主密钥文件缺失；不会生成文件密钥，请初始化硬件 vault 或恢复",
+                "Legacy master key is missing; file keys are no longer generated. Initialize a hardware vault or recover",
+            ));
+        }
         self.assert_private(&self.key_path, false)?;
-        let raw = std::fs::read(&self.key_path)?;
+        let raw = Zeroizing::new(std::fs::read(&self.key_path)?);
         if raw.len() != KEY_BYTES {
             return Err(VaultError::new(
                 "主密钥文件已损坏（长度不对）",
                 "Master key file is corrupted (wrong length)",
             ));
         }
-        let mut key = [0u8; KEY_BYTES];
+        let mut key: MasterKey = Default::default();
         key.copy_from_slice(&raw);
+        self.set_key(key, None);
+
+        if self.data_path.exists() {
+            self.read()?; // fail fast if the key and data don't match
+        }
+        Ok(())
+    }
+
+    /// Emergency read-only access with the recovery passphrase, for when Secure Enclave is
+    /// unusable on this Mac. The passphrase is already an independent decryption path; this only
+    /// reads through it. No hardware is used, writes and key removal are rejected, and the next
+    /// hardware unlock of this `Vault` restores normal operation. Returns the credential count.
+    pub fn open_recovery_read_only(&self, password: &str) -> Result<usize> {
+        self.clear_key();
+        self.prepare()?;
+        let file: crate::types::EncryptedFile =
+            serde_json::from_slice(&std::fs::read(&self.data_path)?)?;
+        let metadata = file.master_key.clone().ok_or_else(|| {
+            VaultError::new(
+                "此凭证库没有硬件恢复信息",
+                "This vault has no hardware recovery information",
+            )
+        })?;
+        metadata.enclave.decode()?;
+        let key = metadata.recovery.open(password)?;
+        let data = Self::decrypt_file(&file, &key)?;
+        self.install_key(key, Some(metadata), true);
+        Ok(data.credentials.values().map(HashMap::len).sum())
+    }
+
+    fn require_writable(&self) -> Result<()> {
+        if self.read_only.load(Ordering::SeqCst) {
+            return Err(VaultError::new(
+                "恢复口令访问为只读；修改请用硬件解锁，或运行 keyvalet recover-vault",
+                "Recovery-passphrase access is read-only; unlock with hardware or run keyvalet recover-vault to make changes",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The digest-named path (`device-binding-<hex of the first 16 digest bytes>.key`) for a
+    /// binding. The name ties the file to the digest stored in the vault metadata.
+    fn binding_path_for(&self, binding: &DeviceBinding) -> Result<PathBuf> {
+        let digest = base64_decode(&binding.digest).map_err(|_| {
+            VaultError::new(
+                "凭证库元数据已损坏（设备绑定摘要无效）",
+                "Vault metadata is corrupt (invalid device binding digest)",
+            )
+        })?;
+        // A SHA-256 digest, not the 32-byte secret length it happens to coincide with.
+        if digest.len() != 32 {
+            return Err(VaultError::new(
+                "凭证库元数据已损坏（设备绑定摘要无效）",
+                "Vault metadata is corrupt (invalid device binding digest)",
+            ));
+        }
+        let id: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
+        Ok(self.dir.join(format!("device-binding-{id}.key")))
+    }
+
+    /// Reads the root-only device binding secret: the digest-named file first, then the legacy
+    /// `device-binding.key` name written by earlier versions.
+    fn load_binding_secret(
+        &self,
+        binding: &DeviceBinding,
+    ) -> Result<Zeroizing<[u8; DEVICE_BINDING_BYTES]>> {
+        let named = self.binding_path_for(binding)?;
+        let path = if named.symlink_metadata().is_ok() {
+            named
+        } else if self.binding_path.symlink_metadata().is_ok() {
+            self.binding_path.clone()
+        } else {
+            return Err(VaultError::new(
+                "设备绑定密钥缺失；请运行 keyvalet recover-vault 用恢复口令重新绑定",
+                "The device binding key is missing; run keyvalet recover-vault to rebind with the recovery passphrase",
+            ));
+        };
+        self.assert_private(&path, false)?;
+        let raw = Zeroizing::new(std::fs::read(&path)?);
+        if raw.len() != DEVICE_BINDING_BYTES {
+            return Err(VaultError::new(
+                "设备绑定密钥已损坏",
+                "The device binding key is corrupted",
+            ));
+        }
+        let mut secret = Zeroizing::new([0u8; DEVICE_BINDING_BYTES]);
+        secret.copy_from_slice(&raw);
+        if DeviceBinding::for_secret(&secret) != *binding {
+            return Err(VaultError::new(
+                "设备绑定密钥与凭证库不匹配；请运行 keyvalet recover-vault 用恢复口令重新绑定",
+                "The device binding key does not match this vault; run keyvalet recover-vault to rebind with the recovery passphrase",
+            ));
+        }
+        Ok(secret)
+    }
+
+    /// Creates a fresh random binding secret in its digest-named file (create_new: never
+    /// overwritten). The Time Machine exclusion is set while the file is still empty, so a
+    /// backup can never pick up the secret itself. On a write/sync error the partial file is
+    /// removed.
+    fn create_binding_secret(
+        &self,
+    ) -> Result<(
+        Zeroizing<[u8; DEVICE_BINDING_BYTES]>,
+        DeviceBinding,
+        PathBuf,
+    )> {
+        let mut secret = Zeroizing::new([0u8; DEVICE_BINDING_BYTES]);
+        OsRng.fill_bytes(secret.as_mut());
+        let binding = DeviceBinding::for_secret(&secret);
+        let path = self.binding_path_for(&binding)?;
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)?;
+        let result = (|| -> Result<()> {
+            exclude_from_backups(&path);
+            f.write_all(secret.as_ref())?;
+            f.sync_all()?;
+            std::fs::File::open(&self.dir)?.sync_all()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&path);
+        }
+        result?;
+        Ok((secret, binding, path))
+    }
+
+    /// Deletes every binding file in the vault directory (legacy `device-binding.key` and
+    /// digest-named `device-binding-*.key`) except `keep`. Called only after the new vault that
+    /// references `keep` has committed, so older vault copies can no longer be opened with a
+    /// stale binding.
+    fn remove_stale_bindings(&self, keep: &Path) -> Result<()> {
+        for entry in std::fs::read_dir(&self.dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let is_binding = name == "device-binding.key"
+                || (name.starts_with("device-binding-") && name.ends_with(".key"));
+            if is_binding && entry.path() != keep {
+                std::fs::remove_file(entry.path())?;
+            }
+        }
+        std::fs::File::open(&self.dir)?.sync_all()?;
+        Ok(())
+    }
+
+    /// Removes the encrypted migration snapshot written by versions that kept one. Reached via
+    /// `remove_legacy_key` (migrate / recover / finish-enclave-migration) and directly at the
+    /// end of `rotate_enclave`.
+    fn remove_migration_backup(&self) -> Result<()> {
+        let path = self.dir.join("vault.migration-backup.enc");
+        if path.symlink_metadata().is_ok() {
+            std::fs::remove_file(&path)?;
+            std::fs::File::open(&self.dir)?.sync_all()?;
+        }
+        Ok(())
+    }
+
+    /// Whether the current device binding file is excluded from Time Machine, per
+    /// `tmutil isexcluded`. `Ok(None)` when the vault metadata has no device binding (or not on
+    /// macOS); `Ok(Some(false))` also covers a missing binding file or a failed check.
+    pub fn binding_backup_exclusion(&self) -> Result<Option<bool>> {
+        let Some(binding) = self
+            .disk_metadata()?
+            .and_then(|metadata| metadata.device_binding)
+        else {
+            return Ok(None);
+        };
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = binding;
+            Ok(None)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let named = self.binding_path_for(&binding)?;
+            let path = if named.symlink_metadata().is_ok() {
+                named
+            } else if self.binding_path.symlink_metadata().is_ok() {
+                self.binding_path.clone()
+            } else {
+                return Ok(Some(false));
+            };
+            let excluded = std::process::Command::new("/usr/bin/tmutil")
+                .arg("isexcluded")
+                .arg(&path)
+                .env_clear()
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .output()
+                .map(|out| {
+                    out.status.success()
+                        && String::from_utf8_lossy(&out.stdout).contains("[Excluded]")
+                })
+                .unwrap_or(false);
+            Ok(Some(excluded))
+        }
+    }
+
+    /// Turns a freshly created and verified hardware key into the vault key and its metadata:
+    /// a new random binding secret for every key change, with the recovery passphrase wrapping
+    /// the final key. Must be called under the write lock so the new binding file can't be
+    /// cleaned up as "stale" by a concurrent rotation.
+    fn bound_key(
+        &self,
+        created: EnclaveKey,
+        password: &str,
+    ) -> Result<(MasterKey, MasterKeyMetadata, PathBuf)> {
+        let (secret, binding, path) = self.create_binding_secret()?;
+        let key = binding.bind(&created.key, &secret)?;
+        let metadata = MasterKeyMetadata {
+            provider: ProviderId::SecureEnclave,
+            enclave: created.metadata,
+            recovery: WrappedMasterKey::wrap(&key, password)?,
+            device_binding: Some(binding),
+        };
+        Ok((key, metadata, path))
+    }
+
+    /// Encrypts `data` under the new bound key, commits it atomically, installs the key, then
+    /// removes every other binding file. If the commit fails, the just-created binding file is
+    /// removed -- but only when the on-disk vault doesn't reference it: `atomic_write` can fail
+    /// on the post-rename directory fsync after `vault.enc` already points at the new binding,
+    /// and deleting it there would leave the vault recoverable only by passphrase (an orphan
+    /// from a real pre-commit failure is cleaned up here, one from a crash by the next
+    /// successful key change).
+    fn commit_bound_key(
+        &self,
+        data: &VaultData,
+        created: EnclaveKey,
+        password: &str,
+    ) -> Result<()> {
+        let (key, metadata, binding_path) = self.bound_key(created, password)?;
+        let result = Self::encrypt_file(data, &key, Some(metadata.clone()))
+            .and_then(|bytes| self.atomic_write(&bytes));
+        if let Err(error) = result {
+            // Unreadable on-disk state counts as "maybe committed": an orphan is harmless.
+            let uncommitted = matches!(
+                self.disk_metadata(),
+                Ok(on_disk) if on_disk.as_ref().and_then(|m| m.device_binding.as_ref())
+                    != metadata.device_binding.as_ref()
+            );
+            if uncommitted {
+                let _ = std::fs::remove_file(&binding_path);
+            }
+            return Err(error);
+        }
+        self.set_key(key, Some(metadata));
+        self.remove_stale_bindings(&binding_path)
+    }
+
+    fn set_key(&self, key: MasterKey, metadata: Option<MasterKeyMetadata>) {
+        self.install_key(key, metadata, false);
+    }
+
+    fn install_key(&self, key: MasterKey, metadata: Option<MasterKeyMetadata>, read_only: bool) {
         let mut guard = self.key.lock().unwrap();
-        *guard = Some(Zeroizing::new(key));
+        self.read_only.store(read_only, Ordering::SeqCst);
+        *guard = Some(key);
+        *self.metadata.lock().unwrap() = metadata;
         // Best-effort: ask the OS to never swap out the page(s) holding the master key, so it
         // can't end up on disk in a swap file if this machine's swap isn't encrypted. Failure
         // (e.g. a locked-memory rlimit) isn't fatal -- this is defense in depth on top of the
@@ -101,13 +461,12 @@ impl Vault {
                 libc::mlock(k.as_ptr() as *const libc::c_void, KEY_BYTES);
             }
         }
-        drop(guard);
+    }
 
-        if self.data_path.exists() {
-            self.assert_private(&self.data_path, false)?;
-            self.read()?; // fail fast if the key and data don't match
-        }
-        Ok(())
+    fn clear_key(&self) {
+        *self.key.lock().unwrap() = None;
+        *self.metadata.lock().unwrap() = None;
+        self.read_only.store(false, Ordering::SeqCst);
     }
 
     fn assert_private(&self, p: &Path, is_dir: bool) -> Result<()> {
@@ -151,18 +510,36 @@ impl Vault {
     }
 
     fn read(&self) -> Result<VaultData> {
+        let key = self.require_key()?;
+        self.check_epoch()?;
         if !self.data_path.exists() {
             return Ok(VaultData::empty());
         }
         let file: crate::types::EncryptedFile =
             serde_json::from_slice(&std::fs::read(&self.data_path)?)?;
+        Self::decrypt_file(&file, &key)
+    }
+
+    fn check_epoch(&self) -> Result<()> {
+        if self.disk_metadata()? != *self.metadata.lock().unwrap() {
+            return Err(VaultError::new(
+                "凭证库密钥已更换，请重新开启会话",
+                "Vault key has changed; start a new session",
+            ));
+        }
+        Ok(())
+    }
+
+    fn decrypt_file(
+        file: &crate::types::EncryptedFile,
+        key: &[u8; KEY_BYTES],
+    ) -> Result<VaultData> {
         if file.v != 1 || file.alg != "aes-256-gcm" {
             return Err(VaultError::new(
                 "不支持的凭证库格式",
                 "Unsupported vault format",
             ));
         }
-        let key = self.require_key()?; // checked before the decrypt attempts: an uninitialized vault is a real error, not "tampered"
         let decode_err = || {
             VaultError::new("凭证库解密失败：数据被篡改或主密钥不匹配", "Failed to decrypt vault: data has been tampered with or the master key does not match")
         };
@@ -173,8 +550,14 @@ impl Vault {
         let tag: [u8; crate::crypto::TAG_BYTES] = tag_v.try_into().map_err(|_| decode_err())?;
 
         let mut plain: Option<Zeroizing<Vec<u8>>> = None;
-        for aad in [AAD, LEGACY_AAD] {
-            if let Ok(p) = crypto::decrypt(&key, &nonce, aad, &ct, &tag) {
+        let bound_aad = Self::encryption_aad(file.master_key.as_ref())?;
+        let aads: Vec<&[u8]> = if file.master_key.is_some() {
+            vec![&bound_aad]
+        } else {
+            vec![AAD, LEGACY_AAD]
+        };
+        for aad in aads {
+            if let Ok(p) = crypto::decrypt(key, &nonce, aad, &ct, &tag) {
                 plain = Some(Zeroizing::new(p));
                 break;
             }
@@ -191,36 +574,229 @@ impl Vault {
     }
 
     fn write(&self, data: &VaultData) -> Result<()> {
+        self.require_writable()?;
+        self.check_epoch()?;
         let key = self.require_key()?;
+        let metadata = self.metadata.lock().unwrap().clone();
+        self.atomic_write(&Self::encrypt_file(data, &key, metadata)?)
+    }
+
+    fn encryption_aad(metadata: Option<&MasterKeyMetadata>) -> Result<Vec<u8>> {
+        let mut aad = AAD.to_vec();
+        if let Some(metadata) = metadata {
+            aad.extend_from_slice(b"/secure-enclave/v1/");
+            aad.extend_from_slice(&serde_json::to_vec(metadata)?);
+        }
+        Ok(aad)
+    }
+
+    fn encrypt_file(
+        data: &VaultData,
+        key: &[u8; KEY_BYTES],
+        metadata: Option<MasterKeyMetadata>,
+    ) -> Result<Vec<u8>> {
         let mut nonce = [0u8; NONCE_BYTES];
         OsRng.fill_bytes(&mut nonce);
         let plain = Zeroizing::new(serde_json::to_vec(data)?);
-        let (ct, tag) = crypto::split_tag(crypto::encrypt(&key, &nonce, AAD, &plain));
+        let (ct, tag) = crypto::split_tag(crypto::encrypt(
+            key,
+            &nonce,
+            &Self::encryption_aad(metadata.as_ref())?,
+            &plain,
+        ));
         let file = crate::types::EncryptedFile {
             v: 1,
             alg: "aes-256-gcm".to_string(),
             iv: base64_encode(nonce),
             tag: base64_encode(tag),
             ct: base64_encode(&ct),
+            master_key: metadata,
         };
         let bytes = serde_json::to_vec(&file)?;
+        // Verify the candidate before it can replace the only current vault.
+        Self::decrypt_file(&file, key)?;
+        Ok(bytes)
+    }
 
+    fn atomic_write(&self, bytes: &[u8]) -> Result<()> {
         // Atomic write: temp file + fsync + rename, so a crash never leaves a half-written file.
         let mut tmp_name = self.data_path.clone().into_os_string();
         tmp_name.push(format!(".tmp-{}-{}", std::process::id(), random_hex(4)));
         let tmp = PathBuf::from(tmp_name);
-        {
+        let result = (|| -> Result<()> {
             let mut f = OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
                 .open(&tmp)?;
-            f.write_all(&bytes)?;
+            f.write_all(bytes)?;
             f.sync_all()?;
+            std::fs::rename(&tmp, &self.data_path)?;
+            std::fs::File::open(&self.dir)?.sync_all()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
         }
-        std::fs::rename(&tmp, &self.data_path)?;
-        std::fs::File::open(&self.dir)?.sync_all()?;
+        result
+    }
+
+    /// A fresh production vault starts with hardware protection, without ever creating master.key.
+    pub fn initialize_enclave(
+        &self,
+        provider: &dyn MasterKeyProvider,
+        password: &str,
+        reason: &str,
+    ) -> Result<()> {
+        self.prepare()?;
+        self.require_empty_directory_state()?;
+        WrappedMasterKey::validate_password(password)?;
+        let created = provider.create(reason)?;
+        created.metadata.decode()?;
+        let restored = provider.unlock(&created.metadata, reason)?;
+        if *restored != *created.key {
+            return Err(VaultError::new(
+                "新硬件密钥无法重新载入，初始化已取消",
+                "New hardware key could not be restored; initialization cancelled",
+            ));
+        }
+        let _guard = self.lock()?;
+        self.require_empty_directory_state()?;
+        self.commit_bound_key(&VaultData::empty(), created, password)
+    }
+
+    fn require_empty_directory_state(&self) -> Result<()> {
+        if self.data_path.symlink_metadata().is_ok() || self.key_path.symlink_metadata().is_ok() {
+            return Err(VaultError::new("凭证库已有数据或旧密钥，请迁移或恢复，不能重新初始化", "Vault contains data or a legacy key; migrate or recover instead of initializing again"));
+        }
         Ok(())
+    }
+
+    /// Rotation is committed by one rename containing both ciphertext and its key metadata.
+    /// Hardware prompts happen before acquiring the short-lived cross-process write lock.
+    pub fn migrate_to_enclave(
+        &self,
+        provider: &dyn MasterKeyProvider,
+        password: &str,
+        reason: &str,
+    ) -> Result<()> {
+        self.check_epoch()?;
+        if self.metadata.lock().unwrap().is_some() {
+            return Err(VaultError::new(
+                "已启用 Secure Enclave",
+                "Secure Enclave is already enabled",
+            ));
+        }
+        self.require_key()?;
+        // Reject an invalid passphrase before opening the authentication dialog.
+        WrappedMasterKey::validate_password(password)?;
+        let created = provider.create(reason)?;
+        created.metadata.decode()?;
+        let restored = provider.unlock(&created.metadata, reason)?;
+        if *restored != *created.key {
+            return Err(VaultError::new(
+                "新硬件密钥无法重新载入，迁移已取消",
+                "New hardware key could not be restored; migration cancelled",
+            ));
+        }
+        let _guard = self.lock()?;
+        let data = self.read()?;
+        self.commit_bound_key(&data, created, password)?;
+        // Also removes a `vault.migration-backup.enc` left by an older version.
+        self.remove_legacy_key()
+    }
+
+    /// Password recovery rotates to a fresh device key without using the old Enclave.
+    pub fn recover_enclave(
+        &self,
+        provider: &dyn MasterKeyProvider,
+        password: &str,
+        reason: &str,
+    ) -> Result<()> {
+        self.prepare()?;
+        let original = std::fs::read(&self.data_path)?;
+        let file: crate::types::EncryptedFile = serde_json::from_slice(&original)?;
+        let metadata = file.master_key.as_ref().ok_or_else(|| {
+            VaultError::new(
+                "此凭证库没有硬件恢复信息",
+                "This vault has no hardware recovery information",
+            )
+        })?;
+        metadata.enclave.decode()?;
+        let old_key = metadata.recovery.open(password)?;
+        let data = Self::decrypt_file(&file, &old_key)?;
+        let created = provider.create(reason)?;
+        created.metadata.decode()?;
+        let restored = provider.unlock(&created.metadata, reason)?;
+        if *restored != *created.key {
+            return Err(VaultError::new(
+                "新硬件密钥无法重新载入，恢复已取消",
+                "New hardware key could not be restored; recovery cancelled",
+            ));
+        }
+        let _guard = self.lock()?;
+        if std::fs::read(&self.data_path)? != original {
+            return Err(VaultError::new(
+                "恢复期间凭证库发生变化，请重试",
+                "Vault changed during recovery; retry",
+            ));
+        }
+        self.commit_bound_key(&data, created, password)?;
+        self.remove_legacy_key()
+    }
+
+    /// Replaces the hardware key, the vault key and the recovery passphrase together, after a
+    /// hardware unlock of the current key; also adds device binding to an older unbound vault.
+    /// Rotating the vault key is what revokes the old passphrase for the current vault: a
+    /// rewrapped old key would stay decryptable by anyone who had already opened the old
+    /// wrapper. Earlier copies of `vault.enc` remain decryptable with their old passphrase.
+    pub fn rotate_enclave(
+        &self,
+        provider: &dyn MasterKeyProvider,
+        password: &str,
+        reason: &str,
+    ) -> Result<()> {
+        self.require_writable()?;
+        self.check_epoch()?;
+        if self.metadata.lock().unwrap().is_none() {
+            return Err(VaultError::new(
+                "尚未启用 Secure Enclave",
+                "Secure Enclave is not enabled",
+            ));
+        }
+        self.require_key()?;
+        WrappedMasterKey::validate_password(password)?;
+        let created = provider.create(reason)?;
+        created.metadata.decode()?;
+        let restored = provider.unlock(&created.metadata, reason)?;
+        if *restored != *created.key {
+            return Err(VaultError::new(
+                "新硬件密钥无法重新载入，更换已取消",
+                "New hardware key could not be restored; rotation cancelled",
+            ));
+        }
+        let _guard = self.lock()?;
+        let data = self.read()?;
+        self.commit_bound_key(&data, created, password)?;
+        self.remove_migration_backup()
+    }
+
+    pub fn remove_legacy_key(&self) -> Result<()> {
+        self.require_writable()?;
+        self.check_epoch()?;
+        self.read()?; // Require a successful hardware/recovery unlock before removing anything.
+        if self.metadata.lock().unwrap().is_none() {
+            return Err(VaultError::new(
+                "尚未启用 Secure Enclave，不能删除主密钥",
+                "Enable Secure Enclave before removing the master key",
+            ));
+        }
+        if self.key_path.symlink_metadata().is_ok() {
+            self.assert_private(&self.key_path, false)?;
+            std::fs::remove_file(&self.key_path)?;
+            std::fs::File::open(&self.dir)?.sync_all()?;
+        }
+        self.remove_migration_backup()
     }
 
     /// Read-modify-write, holding the cross-process write lock.
@@ -706,6 +1282,25 @@ impl Vault {
     }
 }
 
+/// Best effort: keep the device binding secret out of Time Machine (a sticky exclusion that
+/// survives copies), so a backup of `vault.enc` and this secret don't travel together. Restoring
+/// such a backup elsewhere uses the recovery passphrase instead.
+fn exclude_from_backups(path: &Path) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("/usr/bin/tmutil")
+            .arg("addexclusion")
+            .arg(path)
+            .env_clear()
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = path;
+}
+
 struct LockGuard<'a> {
     vault: &'a Vault,
 }
@@ -802,4 +1397,122 @@ pub struct SetProtocolParams {
     pub description: Option<String>,
     pub type_description: Option<String>,
     pub overwrite: bool,
+}
+
+#[cfg(test)]
+mod device_binding_tests {
+    use super::*;
+    use crate::EnclaveMetadata;
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    const PASSWORD: &str = "a separate offline recovery passphrase";
+    const NEW_PASSWORD: &str = "another separate recovery passphrase";
+
+    fn enclave_metadata() -> EnclaveMetadata {
+        let mut peer = [5u8; 65];
+        peer[0] = 4;
+        EnclaveMetadata {
+            version: 1,
+            key_blob: STANDARD.encode([5u8]),
+            peer_public_key: STANDARD.encode(peer),
+        }
+    }
+
+    struct Fixed;
+    impl MasterKeyProvider for Fixed {
+        fn create(&self, _reason: &str) -> Result<EnclaveKey> {
+            Ok(EnclaveKey {
+                key: MasterKey::new([5u8; 32]),
+                metadata: enclave_metadata(),
+            })
+        }
+        fn unlock(&self, metadata: &EnclaveMetadata, _reason: &str) -> Result<MasterKey> {
+            assert_eq!(metadata, &enclave_metadata());
+            Ok(MasterKey::new([5u8; 32]))
+        }
+    }
+
+    #[test]
+    fn unbound_vaults_from_earlier_versions_open_and_rotation_binds_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = Vault::new(tmp.path().join("vault"));
+        vault.prepare().unwrap();
+        // Exactly what the previous version wrote: the vault key is the hardware key itself.
+        let metadata = MasterKeyMetadata {
+            provider: ProviderId::SecureEnclave,
+            enclave: enclave_metadata(),
+            recovery: WrappedMasterKey::wrap(&[5u8; 32], PASSWORD).unwrap(),
+            device_binding: None,
+        };
+        let bytes = Vault::encrypt_file(&VaultData::empty(), &[5u8; 32], Some(metadata)).unwrap();
+        vault.atomic_write(&bytes).unwrap();
+
+        let old = Vault::new(&vault.dir);
+        old.init_with_provider(&Fixed, "test").unwrap();
+        assert!(!old.protection().unwrap().device_binding);
+        old.set(SetParams {
+            r#type: "api_key".into(),
+            name: "example".into(),
+            value: Some("kept-through-rotation".into()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let stale = Vault::new(&vault.dir);
+        stale.init_with_provider(&Fixed, "test").unwrap();
+        old.rotate_enclave(&Fixed, NEW_PASSWORD, "test").unwrap();
+        let status = old.protection().unwrap();
+        assert!(status.device_binding);
+        let binding = std::fs::read_dir(&vault.dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .find(|n| n.starts_with("device-binding-") && n.ends_with(".key"))
+            .expect("rotation creates a digest-named binding file");
+        assert_eq!(
+            std::fs::metadata(vault.dir.join(binding)).unwrap().mode() & 0o777,
+            0o600
+        );
+        assert!(
+            stale.get("api_key", "example").is_err(),
+            "older sessions are invalidated"
+        );
+
+        let reopened = Vault::new(&vault.dir);
+        reopened.init_with_provider(&Fixed, "test").unwrap();
+        assert_eq!(
+            reopened.get("api_key", "example").unwrap().value,
+            "kept-through-rotation"
+        );
+        // The hardware key alone (what any process reading a vault copy can derive after one
+        // approved prompt) no longer decrypts.
+        let file: crate::types::EncryptedFile =
+            serde_json::from_slice(&std::fs::read(vault.dir.join("vault.enc")).unwrap()).unwrap();
+        assert!(Vault::decrypt_file(&file, &[5u8; 32]).is_err());
+        // The old passphrase no longer opens the current vault; the new one does.
+        assert!(Vault::new(&vault.dir)
+            .open_recovery_read_only(PASSWORD)
+            .is_err());
+        assert_eq!(
+            Vault::new(&vault.dir)
+                .open_recovery_read_only(NEW_PASSWORD)
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn read_only_or_unprotected_handles_cannot_rotate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = Vault::new(tmp.path().join("vault"));
+        vault.initialize_enclave(&Fixed, PASSWORD, "test").unwrap();
+        let emergency = Vault::new(&vault.dir);
+        emergency.open_recovery_read_only(PASSWORD).unwrap();
+        assert!(emergency
+            .rotate_enclave(&Fixed, NEW_PASSWORD, "test")
+            .is_err());
+        assert!(Vault::new(&vault.dir)
+            .rotate_enclave(&Fixed, NEW_PASSWORD, "test")
+            .is_err());
+        assert!(vault.rotate_enclave(&Fixed, "short", "test").is_err());
+    }
 }

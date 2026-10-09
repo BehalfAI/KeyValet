@@ -4,7 +4,6 @@ use super::common::{
     fail, guard_overwrite, import_file, norm, ok, ok_data, purpose_desc, resolve_type,
     safe_display, wrap, CLIENT_ID_RE,
 };
-use crate::gateway_env::record_secrets;
 use crate::oauth_flow::{
     copy_to_clipboard, discover_oidc, open_in_browser, run_browser_flow, RunBrowserFlowOpts,
 };
@@ -133,7 +132,6 @@ impl Server {
                     return Ok(fail(kv_i18n::t("无法确定邮箱地址：请传 username，或在授权 scope 中包含 openid email。", "Cannot determine the email address: pass username, or include openid email in the authorization scopes.")));
                 };
                 let x = crate::mail::xoauth2(&username, &r.access_token);
-                record_secrets(&self.session.session_id, [Some(r.access_token.clone()), Some(x.clone())]);
                 let mut data = r.rest.clone();
                 data.insert("access_token".into(), json!(r.access_token));
                 data.insert("account".into(), json!(r.account));
@@ -141,7 +139,6 @@ impl Server {
                 data.insert("xoauth2".into(), json!(x));
                 return Ok(ok_data(kv_i18n::t("access token（含 XOAUTH2）：", "access token (with XOAUTH2):"), data));
             }
-            record_secrets(&self.session.session_id, [Some(r.access_token.clone())]);
             let mut data = r.rest.clone();
             data.insert("access_token".into(), json!(r.access_token));
             data.insert("account".into(), json!(r.account));
@@ -374,10 +371,6 @@ impl Server {
                 rest: Map<String, Value>,
             }
             let r: R = s.request("totp", p).await?;
-            record_secrets(
-                &self.session.session_id,
-                [Some(r.code.clone()), r.next_code.clone()],
-            );
             Ok(ok_data(kv_i18n::t("验证码：", "Code:"), &r))
         })
         .await
@@ -477,14 +470,6 @@ impl Server {
                 rest: Map<String, Value>,
             }
             let c: C = s.request("aws", p).await?;
-            record_secrets(
-                &self.session.session_id,
-                [
-                    Some(c.access_key_id.clone()),
-                    Some(c.secret_access_key.clone()),
-                    Some(c.session_token.clone()),
-                ],
-            );
             Ok(ok_data(
                 kv_i18n::t("AWS 临时凭证：", "AWS temporary credentials:"),
                 &c,

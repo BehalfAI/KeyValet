@@ -1,0 +1,17 @@
+{
+  "UserPromptSubmit": [
+    {
+      "hooks": [
+        { "type": "command", "command": "/usr/local/lib/keyvalet/bin/kv-hook prompt", "timeout": 10 }
+      ]
+    }
+  ],
+  "PreToolUse": [
+    {
+      "matcher": "^(exec|write|edit|apply_patch|notebook_edit|write_to_process|mcp_call_tool|mcp__.*)$",
+      "hooks": [
+        { "type": "command", "command": "/usr/local/lib/keyvalet/bin/kv-hook devin-tool", "timeout": 10 }
+      ]
+    }
+  ]
+}

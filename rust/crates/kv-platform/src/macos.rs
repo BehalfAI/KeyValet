@@ -6,6 +6,7 @@
 
 use crate::paths::{OSASCRIPT_BIN, TOUCHID_BIN};
 use crate::trust::untrusted_reason;
+use crate::user;
 use crate::{AuthOutcome, Authenticator, Confirmer};
 use std::path::Path;
 use std::time::Duration;
@@ -13,14 +14,33 @@ use std::time::Duration;
 const AUTH_TIMEOUT: Duration = Duration::from_millis(120_000);
 const CONFIRM_TIMEOUT: Duration = Duration::from_millis(130_000);
 
-/// The user who invoked sudo (set by sudo itself; the caller cannot forge this).
-fn invoking_user() -> Option<(u32, u32)> {
-    let uid: u32 = std::env::var("SUDO_UID").ok()?.parse().ok()?;
-    let gid: u32 = std::env::var("SUDO_GID").ok()?.parse().ok()?;
-    if uid == 0 {
-        return None;
+/// Builds a `program` invocation with privileges dropped to the invoking user. Never
+/// `CommandExt::uid/gid`: on macOS that sequence resets the effective gid to 0 (wheel) --
+/// see `user::drop_to`.
+fn dropped_command(
+    program: &str,
+    args: &[&str],
+    uid: u32,
+    gid: u32,
+    capture_stdout: bool,
+) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args)
+        .kill_on_drop(true)
+        .current_dir("/")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .stdin(std::process::Stdio::null())
+        .stdout(if capture_stdout {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
+        .stderr(std::process::Stdio::null());
+    unsafe {
+        cmd.pre_exec(user::drop_to(uid, gid));
     }
-    Some((uid, gid))
+    cmd
 }
 
 /// Runs `program` with privileges dropped to the invoking user, waiting up to `timeout` and
@@ -33,20 +53,21 @@ async fn run_dropped(
     timeout: Duration,
     capture_stdout: bool,
 ) -> Option<(Option<i32>, String)> {
-    let mut cmd = tokio::process::Command::new(program);
-    cmd.args(args)
-        .uid(uid)
-        .gid(gid)
-        .current_dir("/")
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .stdin(std::process::Stdio::null())
-        .stdout(if capture_stdout {
-            std::process::Stdio::piped()
-        } else {
-            std::process::Stdio::null()
-        })
-        .stderr(std::process::Stdio::null());
+    run_with_timeout(
+        dropped_command(program, args, uid, gid, capture_stdout),
+        timeout,
+        capture_stdout,
+    )
+    .await
+}
+
+/// Spawns `cmd` and waits up to `timeout`, killing it if that elapses. `None` means the process
+/// could not be spawned at all, or never produced an exit status in time.
+async fn run_with_timeout(
+    mut cmd: tokio::process::Command,
+    timeout: Duration,
+    capture_stdout: bool,
+) -> Option<(Option<i32>, String)> {
     let mut child = cmd.spawn().ok()?;
     let wait = async {
         let out = if capture_stdout {
@@ -79,7 +100,7 @@ impl Authenticator for TouchIdAuthenticator {
                 &format!("The Touch ID program is untrusted ({bad}); please reinstall"),
             ));
         }
-        let Some((uid, gid)) = invoking_user() else {
+        let Some((uid, gid)) = user::invoking_user() else {
             return AuthOutcome::Error(kv_i18n::t(
                 "无法确定发起请求的用户（SUDO_UID）",
                 "Cannot determine the requesting user (SUDO_UID)",
@@ -106,7 +127,7 @@ pub struct RootUserDialogConfirmer;
 
 impl Confirmer for RootUserDialogConfirmer {
     async fn confirm(&self, message: &str, ok_label: &str) -> bool {
-        let Some((uid, gid)) = invoking_user() else {
+        let Some((uid, gid)) = user::invoking_user() else {
             return false;
         };
         let script = r#"on run argv
@@ -120,6 +141,57 @@ end run"#;
         match run_dropped(OSASCRIPT_BIN, &args, uid, gid, CONFIRM_TIMEOUT, true).await {
             Some((Some(0), out)) => out.trim() == ok_label,
             _ => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn timed_out_dialog_processes_are_terminated() {
+        let dir = tempfile::tempdir().unwrap();
+        for capture_stdout in [false, true] {
+            let pid_file = dir.path().join(format!("pid-{capture_stdout}"));
+            let args = [
+                "-c",
+                r#"echo $$ > "$1"; exec /bin/sleep 60"#,
+                "keyvalet-dialog-timeout-test",
+                pid_file.to_str().unwrap(),
+            ];
+            let mut cmd = tokio::process::Command::new("/bin/sh");
+            cmd.args(args)
+                .kill_on_drop(true)
+                .current_dir("/")
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .stdin(std::process::Stdio::null())
+                .stdout(if capture_stdout {
+                    std::process::Stdio::piped()
+                } else {
+                    std::process::Stdio::null()
+                })
+                .stderr(std::process::Stdio::null());
+            // Plain un-dropped command: as non-root, `user::drop_to` would fail with EPERM.
+            let result = run_with_timeout(cmd, Duration::from_millis(250), capture_stdout).await;
+            assert!(result.is_none());
+            let pid: libc::pid_t = std::fs::read_to_string(pid_file)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            let reaped = tokio::time::timeout(Duration::from_secs(2), async {
+                while unsafe { libc::kill(pid, 0) } == 0 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+            if reaped.is_err() {
+                // Keep a failed regression test from leaving its disposable child running.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+            assert!(reaped.is_ok(), "a timed-out dialog must not stay open");
         }
     }
 }

@@ -29,7 +29,7 @@ KeyValet's answer: **secrets stay on your machine, owned by root. Agents ask; yo
  AI agent ──MCP──▶ KeyValet server (your user)
                         │  sudo -n (rule allows ONLY the helper)
                         ▼
-                  root helper ── Touch ID gate ("Use credential X — purpose: …")
+                  root helper ── Touch ID gate ("use credential X for this session")
                         │
           ┌─────────────┼───────────────────────┐
    encrypted vault   HTTPS proxy            protocol engines
@@ -40,7 +40,7 @@ KeyValet's answer: **secrets stay on your machine, owned by root. Agents ask; yo
 
 - **Use, don't see.** `credential_http_request` makes the HTTP call inside the root helper with the key/token injected; the agent only gets the (redacted) response.
 - **SDKs and streaming too.** `credential_gateway` gives programs that can't speak MCP a per-session local endpoint (`OPENAI_BASE_URL=…`). Streaming responses flow through, redacted on the fly; the program never holds the real key.
-- **You're in the loop.** By default every credential needs its own Touch ID approval, and the prompt shows *which* credential and *why*.
+- **You're in the loop.** By default every credential needs its own Touch ID approval, and the prompt shows *which* credential and *for how long*.
 - **Audited.** Every unlock, read, token fetch and proxied call is logged with session, purpose and result (never the secret). Agents can query the log.
 - **Local and root-isolated.** AES-256-GCM vault readable only by root; code that runs as root is installed root-owned and self-verifies before running.
 - **Speaks every auth.** OAuth 2.0 (auth code + PKCE, device code, client credentials, auto-refresh), Google service accounts, GitHub Apps, signed JWTs (e.g. App Store Connect), TOTP, AWS STS (AssumeRole + MFA), IMAP XOAUTH2 — plus a template catalog of common APIs.
@@ -54,8 +54,8 @@ KeyValet's answer: **secrets stay on your machine, owned by root. Agents ask; yo
 ## Requirements
 
 - macOS (Touch ID recommended; without it the system prompt asks for your login password — handled by macOS, never seen by KeyValet)
-- Node.js ≥ 20 from nvm or nodejs.org (Homebrew's node links user-writable libraries and is refused for root use)
-- Xcode Command Line Tools (`xcode-select --install`) for the Swift Touch ID helper
+- A Rust toolchain (`cargo` from [rustup.rs](https://rustup.rs)) to build the binaries
+- Xcode Command Line Tools (`xcode-select --install`) for the Swift Secure Enclave helper
 
 ## Install
 
@@ -70,10 +70,10 @@ The installer builds everything, copies it to root-owned `/usr/local/lib/keyvale
 If Claude Code isn't installed (or you set `KEYVALET_NO_REGISTER=1`), register manually, e.g.:
 
 ```sh
-claude mcp add keyvalet --scope user -- /usr/local/lib/keyvalet/bin/node /usr/local/lib/keyvalet/app/dist/server/index.js
+claude mcp add keyvalet --scope user -- /usr/local/lib/keyvalet/bin/kv-mcp
 ```
 
-Other clients (Cursor, etc.): add a stdio server with command `/usr/local/lib/keyvalet/bin/node` and argument `/usr/local/lib/keyvalet/app/dist/server/index.js`.
+Cursor: the installer also copies the KeyValet plugin to `~/.cursor/plugins/local/keyvalet` (restart Cursor to load it) — it brings the MCP server, the secret-detection hooks and the `/keyvalet-*` commands. Other clients: add a stdio server whose command is `/usr/local/lib/keyvalet/bin/kv-mcp`.
 
 Your vault is kept across upgrades. `./scripts/uninstall.sh --purge` (from a clone) also deletes the vault.
 
@@ -84,7 +84,7 @@ credential_templates    { query: "openai" }
 credential_set          { template: "openai", name: "main", purpose: "Store my OpenAI key" }
                           → a native dialog asks YOU for the key (not the agent); proxy + test are configured and the key is verified
 credential_http_request { name: "main", url: "https://api.openai.com/v1/models", purpose: "List models" }
-                          → Touch ID: "Request: GET api.openai.com/v1/models — Purpose: List models" → response returned, key never shown
+                          → Touch ID: "use openai/main for this session" → response returned, key never shown
 credential_audit_log    { this_session_only: true }
 ```
 
@@ -115,14 +115,14 @@ credential_http_request   { name: "work", url: "https://www.googleapis.com/drive
 | `per_use` | every time a credential is used |
 | `per_credential` (**default**) | once per credential per session; credentials you create in the session are granted automatically |
 | `per_session` | once per session, then every credential |
-| `remember` | once, then no prompts in **any** session for `remember_hours` (default 8; `0` = forever) |
+| `remember` | one credential authorization for `remember_hours` (default 8; `0` = forever); Secure Enclave still authenticates each new session |
 
-Listing, templates and audit queries never need Touch ID.
+Listing and audit queries need no additional credential grant after session unlock. Templates need no vault session. Every new session authenticates Secure Enclave, including while a `remember` window is active.
 
-**Change it from inside Claude Code** with the plugin's slash commands (installed by the one-line installer):
+**Change it from inside Claude Code, Cursor or Devin** with the plugin's slash commands (Claude Code: installed by the one-line installer; Cursor: installed to `~/.cursor/plugins/local/` by the installer, spelled `/keyvalet-mode` etc.; Devin CLI: `devin plugins install KeyValet/KeyValet#devin-plugin`):
 
 ```text
-/keyvalet:mode remember 8      # Touch ID once, then remembered for 8 hours
+/keyvalet:mode remember 8      # Remember credential grants for 8 hours; each new session authenticates
 /keyvalet:mode per-use         # strictest
 /keyvalet:status               # current mode, remembered-until, grants of this session
 /keyvalet:lock                 # lock now and forget the remembered authorization
@@ -134,23 +134,27 @@ Rules that keep this safe:
 
 - The mode lives in the root-only `/var/db/keyvalet/settings.json`. **Loosening** (a more permissive mode or a longer remember window) requires your **Touch ID** — not a clickable dialog — so an agent can't loosen it on its own. Tightening applies immediately. Changes take effect in the current session as well.
 - A client can only make it **stricter**: e.g. register Codex with `KEYVALET_GRANT_MODE=per_use`; the stricter of the global and the client setting wins.
-- In `remember` mode any local process can use your credentials without a prompt until the window ends (secrets still stay hidden and every use is audited). `/keyvalet:lock` ends it early.
+- In `remember` mode, an unlocked session can use credentials without further prompts until the window ends. Every new session still authenticates the hardware key. `/keyvalet:lock` ends the window early.
 - From a terminal: `keyvalet grant-mode remember 8`, `keyvalet grant-mode forget`.
 
-### Keeping KeyValet up to date (Claude Code plugin)
+### Keeping KeyValet up to date (Claude Code / Cursor / Devin plugin)
 
-The plugin makes Claude Code maintain your vault for you:
+The plugin makes the agent maintain your vault for you:
 
-- **Paste a key in the chat** ("here's my Stripe key: sk_live_…") and Claude stores it in KeyValet with the matching template, then uses it through the proxy or gateway instead of a `.env` file. A `UserPromptSubmit` hook recognizes ~25 key formats (OpenAI, Anthropic, GitHub, AWS, Stripe, Slack, Google, …) and tells Claude what to store, showing only a masked preview.
+- **Paste a key in the chat** ("here's my Stripe key: sk_live_…") and the agent stores it in KeyValet with the matching template, then uses it through the proxy or gateway instead of a `.env` file. A `UserPromptSubmit` hook recognizes ~25 key formats (OpenAI, Anthropic, GitHub, AWS, Stripe, Slack, Google, …) and tells the agent what to store, showing only a masked preview.
 - **Better: `/keyvalet:add openai`** — you type the key into KeyValet's private dialog, so it never passes through the chat or the model provider's logs.
-- **Before a literal key is written to a file or shell command**, a `PreToolUse` hook asks you to confirm and points Claude to KeyValet instead. This also catches values KeyValet itself already handed back this session (via `credential_get`, `credential_totp_code`, `credential_access_token`, `credential_aws_credentials`) by exact match, not just known key formats — so a value with no recognizable prefix (an app password, an authorization code) is still caught if Claude tries to put it in a command or a file.
-- Claude also offers to move secrets it finds in `.env`/config files into KeyValet, and to replace a stored key when it stops working (401/403).
+- **Before a literal key is written to a file or shell command**, a `PreToolUse` hook intervenes and points the agent to KeyValet instead — in Claude Code it asks you to confirm first; in Cursor and Devin (whose hook contracts have no "ask") it blocks the call. Hooks detect formats without retaining returned secrets or a plaintext matching cache. Arbitrary strings without a recognizable format may not be detected.
+- The agent also offers to move secrets it finds in `.env`/config files into KeyValet, and to replace a stored key when it stops working (401/403).
 
-Disable the hooks with `KEYVALET_HOOKS=off` in the environment Claude Code runs in.
+Native plugins exist for Cursor (`cursor-plugin/`, installed to `~/.cursor/plugins/local/` by the installer — same commands spelled `/keyvalet-add` etc., plus `sessionStart`/`preToolUse`/`beforeShellExecution`/`beforeMCPExecution` hooks and the MCP server) and for Devin CLI (`devin plugins install KeyValet/KeyValet#devin-plugin` — same `/keyvalet:*` commands, `UserPromptSubmit`/`PreToolUse` hooks and the `keyvalet` MCP server, shipped in `devin-plugin/`).
+
+Disable the hooks with `KEYVALET_HOOKS=off` in the environment the agent runs in.
 
 ### Purpose and audit
 
-Every tool that reads, uses or changes a credential **requires** a `purpose`. It is shown in the Touch ID prompt and written to the audit log (`/var/db/keyvalet/audit.log`, root-only, rotated at 10 MB). The root helper enforces this too. For `credential_http_request`/`credential_test`, the prompt also shows a request line (method, host, path — never the query string) built from the call about to be made. Both the purpose and the request line are the agent's *claim* — read them before approving.
+Every tool that reads, uses or changes a credential **requires** a `purpose`. The root helper enforces this too. Session approval prompts show the credential and what the grant exposes (for example a plaintext-readable warning for credentials that aren't `proxy_only`); per-use prompts also show the exact request; session unlocks show the vault scope. The purpose is not shown in prompts. Source directories and the full purpose remain in the audit log (`/var/db/keyvalet/audit.log`, root-only, rotated at 10 MB).
+
+A session approval covers that credential for the session, rather than a particular HTTP endpoint. A per-use approval covers exactly one matching operation and shows every parameter it is bound to: for HTTP requests the method, host, path, query, agent-set headers and a body preview; for tokens the scopes, repositories and permissions; for AWS the lifetime. The root helper derives this from the complete operation; agent-provided display hints cannot replace it. Unsupported methods, hosts outside the allowlist and operations the credential kind can't perform are refused before any prompt.
 
 ### Proxy calls
 
@@ -164,7 +168,7 @@ Every tool that reads, uses or changes a credential **requires** a `purpose`. It
 ### Streaming and the local gateway
 
 - `credential_http_request` reads streaming (SSE) responses in full and returns the text assembled from LLM deltas in `stream.text` (OpenAI Chat Completions and Responses, Anthropic, Gemini formats).
-- `credential_gateway` opens a per-session gateway on `127.0.0.1` for programs: `http://127.0.0.1:<port>/<token>/<host>/<path>` → `https://<host>/<path>`. The gateway drops whatever auth headers the program sends, injects the real credential, enforces the host allowlist, never follows redirects, and redacts responses while streaming (it holds back only bytes that could be the start of a secret). The token is random per credential and session, requests must target `127.0.0.1`/`localhost` (DNS-rebinding protection), and every request is audited. For known templates it returns ready-to-use SDK environment variables.
+- `credential_gateway` opens a per-session gateway on `127.0.0.1` for programs: `http://127.0.0.1:<port>/<host>/<path>` → `https://<host>/<path>`. The gateway drops whatever auth headers the program sends, injects the real credential, enforces the host allowlist, never follows redirects, and redacts responses while streaming (it holds back only bytes that could be the start of a secret). The token is random per credential and session, requests must target `127.0.0.1`/`localhost` (DNS-rebinding protection), and every request is audited. For known templates it returns ready-to-use SDK environment variables.
 
 When a tool needs the secret as a local file to work (the typical example: an SSH private key used with `ssh -i`), use `credential_export_file` — only the file path goes back to the agent, never the content, and the file is deleted automatically when the session ends.
 When neither fits and the raw value itself is genuinely needed (e.g. a database password), `credential_get` still returns the value after your approval.
@@ -219,7 +223,33 @@ keyvalet audit 20
 keyvalet grant-mode per-credential        # or: all
 ```
 
-Each command runs through `sudo -k`, so it asks for your password every time.
+Each command runs through `sudo -k`, so it asks for your password every time. Protected vault commands also require system authentication to unlock the Secure Enclave key.
+
+### Secure Enclave master key
+
+Secure Enclave is the only supported macOS vault mode (Apple silicon or supported T2 Macs). Installation runs `setup-enclave`: new vaults start with hardware protection; existing file-key vaults are migrated after privately entering a recovery passphrase. Hardware unavailability or cancelled setup leaves the vault unavailable for normal operation, with no software fallback. KeyValet uses a device-bound, encrypted CryptoKit key representation with a `userPresence` ACL: Touch ID or the device password is checked by macOS during the key operation. No plaintext hardware private key is stored in a file or Keychain item.
+
+Run from a logged-in Mac GUI session. Headless / SSH authentication contexts may fail; hardware failures never enable a software fallback. The local validation used Apple silicon and macOS 26.5.1; T2 hardware and password fallback without enrolled fingerprints still need separate device validation.
+
+```sh
+keyvalet protection             # provider, hardware_required, recovery_configured, legacy_key_present
+keyvalet enclave-test           # two system prompts; disposable key, vault unchanged
+keyvalet setup-enclave          # initialize or migrate; hidden recovery passphrase twice, two system prompts
+keyvalet migrate-to-enclave     # alias for setup-enclave
+keyvalet rotate-recovery        # new hardware key, vault key and recovery passphrase; adds device binding
+keyvalet recovery-check         # verify the recovery passphrase; no hardware, no changes, no values
+keyvalet recovery-read list     # emergency read-only access with the passphrase (types / list / get)
+```
+
+Use a separate strong recovery passphrase, preferably six or more randomly chosen words, and keep it offline. KeyValet accepts 12–1024 bytes, but length alone does not ensure strength. Without a terminal, a hidden native dialog returns the passphrase directly to the root CLI; it never enters the agent, command arguments, environment or a file. Recovery wraps the AES key with Argon2id (64 MiB, three iterations, one lane) and AES-256-GCM. **Anyone with the encrypted vault and this passphrase can decrypt without the original Mac or Touch ID**; a weak passphrase can be attacked offline.
+
+The installer ends existing KeyValet helper/MCP sessions before replacing executables and migrating. Manual setup requires closing those sessions first. Migration verifies that a newly created hardware key can be restored in a fresh subprocess, rotates the AES key, commits ciphertext and key metadata together, and removes `master.key`. `vault.migration-backup.enc` is an encrypted snapshot of the credentials at migration, already protected by the new key and recovery passphrase. Existing backup files are never overwritten. If a failed migration leaves a partial backup while `protection` still reports `migration_required`, preserve the intact `vault.enc` and `master.key` and move that partial backup before retrying. `uninitialized` means setup has not completed; neither state can serve normal operations. After a crash, if protection reports `secure_enclave` and `legacy_key_present: true`, run `keyvalet finish-enclave-migration` to authenticate and remove the leftover file key. Setup also performs this cleanup after authentication. Older KeyValet versions cannot read the migrated vault.
+
+Back up the **latest** `/var/db/keyvalet/vault.enc` using an administrator account; it contains the encrypted key representation and recovery wrapper. Keep every copy readable only by root, or inside an encrypted archive. Vaults set up or rotated by this version are device-bound: their key also depends on `/var/db/keyvalet/device-binding.key`, which is root-only and excluded from Time Machine, so a copy of `vault.enc` alone can't be decrypted with one approved system prompt. Don't back up `device-binding.key` together with the vault. If `keyvalet protection` shows `device_binding: false`, run `keyvalet rotate-recovery` once. Restoring `vault.enc` on the same Mac works while the binding file is still present; otherwise use `keyvalet recover-vault`. Store settings separately if needed. On a replacement Mac, install KeyValet, restore `vault.enc` as root with mode `0600` under the root-owned `0700` vault directory, close all sessions, then run `keyvalet recover-vault`. Recovery uses the hidden passphrase, creates and verifies a fresh hardware key on that Mac, and re-encrypts the vault. To restore the migration snapshot, substitute `vault.migration-backup.enc` for `vault.enc` before recovery; it only contains data present at migration. Losing both device access and the recovery passphrase means the vault cannot be recovered.
+
+Run `keyvalet recovery-check` once after setup, and again whenever you are unsure of the passphrase. It decrypts with the passphrase in the root CLI and reports only a credential count. If Secure Enclave stops working on this Mac (for example, system authentication fails after an OS update), the vault does not fall back to a file key. `keyvalet recovery-read types|list|get <type> <name>` reads credentials with the recovery passphrase instead; writes are rejected, the helper and AI sessions cannot use this mode, and each use is audited. To resume normal use, run `keyvalet recover-vault` on a Mac where Secure Enclave works. If the recovery passphrase may have been exposed, run `keyvalet rotate-recovery`: after a hardware unlock it replaces the hardware key, vault key and passphrase together, so the old passphrase no longer opens the current vault (older backups still open with it).
+
+Secure Enclave protection keeps the hardware private key nonexportable and prevents copied current vault files from being decrypted using the old file key. The derived AES key and credential plaintext still enter ordinary process memory. The encrypted key representation is bound to this Mac's Secure Enclave, not to KeyValet, so compromised root does not need to wait for an unlock: it can request a derivation itself, with any prompt text, and one approval yields the AES key (device binding doesn't help here, since root can read the binding file). It can also capture the key or plaintext during an approved unlock. Capturing the AES key permits offline decryption until rotation. Treat an unexpected system authentication prompt as a warning sign. Old `master.key` copies plus old vault backups remain decryptable, and deletion cannot guarantee forensic erasure from APFS snapshots or SSDs. See [SECURITY.md](../SECURITY.md).
 
 ## Development
 
@@ -235,3 +265,9 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md).
 ## License
 
 [Apache-2.0](../LICENSE). The optional n8n-derived catalog you may generate locally is subject to n8n's license and is not part of this project.
+
+### Password retrieval and use
+
+The root helper derives each `per_use` prompt and binding from the complete operation, parameters and stored credential configuration. Changing the operation, request or stored test, or replaying approval, is rejected. Reusable gateways are disabled in this mode; a change to the effective grant mode revokes existing gateway tokens.
+
+Raw tool results are never cached on disk. Explicit secret exports and gateway environment files use private directories, 0600 files and symlink rejection. Locking, expiry and helper disconnect delete them; a subsequent MCP startup cleans up files from crashed processes. Values already returned to a caller cannot be revoked. OAuth errors return status and fixed error codes, never potentially sensitive upstream diagnostics.

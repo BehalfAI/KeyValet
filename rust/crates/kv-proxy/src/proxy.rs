@@ -166,6 +166,27 @@ pub fn describe_target(method: Option<&str>, url: &str) -> Option<String> {
     Some(s.chars().take(300).collect())
 }
 
+/// Applies the method and URL policy that `proxy_request` enforces, before any authentication
+/// prompt: a prompt is never shown for a request that would be refused, and never renders an
+/// unvalidated method. Returns the normalized method and URL.
+pub fn precheck_request(
+    record: &kv_vault::CredentialRecord,
+    method: Option<&str>,
+    url: &str,
+) -> kv_vault::Result<(String, url::Url)> {
+    let Some(http) = &record.http else {
+        return Err(VaultError::new(
+            "该凭证没有配置代理调用，请先用 credential_configure_http 设置允许的域名",
+            "This credential has no proxy configuration; set the allowed hosts with credential_configure_http first",
+        ));
+    };
+    let method = method.unwrap_or("GET").to_uppercase();
+    if !METHODS.contains(&method.as_str()) {
+        return Err(VaultError::new("不支持的方法", "Unsupported method"));
+    }
+    Ok((method, check_url(url, &http.allowed_hosts)?))
+}
+
 fn check_url(raw: &str, allowed: &[String]) -> kv_vault::Result<url::Url> {
     if raw.len() > 8000 {
         return Err(VaultError::new("url 必须是字符串", "url must be a string"));

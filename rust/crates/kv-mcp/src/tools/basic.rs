@@ -4,7 +4,7 @@ use super::common::{
     fail, name_field_desc, norm, ok, ok_data, optional_purpose_desc, purpose_desc, resolve_type,
     type_field_desc, wrap,
 };
-use crate::gateway_env::{record_secrets, write_secret_file};
+use crate::gateway_env::write_secret_file;
 use crate::server::Server;
 use crate::session::CredentialTarget;
 use rmcp::handler::server::wrapper::Parameters;
@@ -195,8 +195,8 @@ impl Server {
     }
 
     #[tool(description = kv_i18n::t(
-        "弹出 Touch ID 认证（显示目的），通过后解锁凭证库。授权模式为 per_credential（默认）时，传 name 可同时授权使用该凭证；使用其他凭证时会再次弹 Touch ID。模式为 all 时一次解锁全部。其他工具在需要时也会自动触发认证。",
-        "Show a Touch ID prompt (displaying the purpose) and unlock the vault once approved. In per_credential grant mode (default), pass name to also grant use of that credential; using other credentials will prompt Touch ID again. In all mode, one unlock grants everything. Other tools also trigger authentication automatically when needed.",
+        "弹出系统认证（显示目的），通过后解锁 Secure Enclave 凭证库。每个新会话都必须认证，具体凭证另按授权模式批准。per_credential 模式可传 name 在解锁后授权该凭证；per_use 模式请直接调用具体使用工具以批准完整操作。per_session 模式一次解锁全部。其他工具在需要时也会自动触发认证。",
+        "Show system authentication (displaying the purpose) and unlock the Secure Enclave vault. Every new session requires authentication; specific credentials follow the grant mode separately. In per_credential mode, pass name to grant a credential after unlocking. In per_use mode, call the intended tool directly to approve its complete operation. In per_session mode, one unlock grants everything. Other tools also trigger authentication when needed.",
     ))]
     async fn credential_unlock(&self, Parameters(a): Parameters<UnlockArgs>) -> CallToolResult {
         wrap(async {
@@ -248,12 +248,12 @@ impl Server {
     }
 
     #[tool(description = kv_i18n::t(
-        "立即锁定凭证库，之后再访问需要重新通过 Touch ID 认证。remember 模式下传 forget=true 同时清除\u{201c}记住\u{201d}状态（否则下次访问会自动解锁）。",
-        "Lock the vault now; further access requires Touch ID again. In remember mode pass forget=true to also clear the remembered authorization (otherwise the next access unlocks automatically).",
+        "立即锁定凭证库，之后再访问需要重新通过系统硬件认证。remember 模式下传 forget=true 同时清除记住的凭证授权；每个新会话仍须认证解锁 Secure Enclave。",
+        "Lock the vault now; further access requires system hardware authentication again. In remember mode pass forget=true to also clear remembered credential grants. Every new session still requires authentication to unlock Secure Enclave.",
     ))]
     async fn credential_lock(&self, Parameters(a): Parameters<LockArgs>) -> CallToolResult {
         wrap(async {
-            if a.forget == Some(true) {
+            let forgotten = if a.forget == Some(true) {
                 let purpose = kv_i18n::t("锁定并清除记住状态", "Lock and forget");
                 let mut p = Map::new();
                 p.insert("forget".into(), json!(true));
@@ -261,9 +261,14 @@ impl Server {
                 self.session
                     .scoped(purpose, None)
                     .request::<Value>("settings", p)
-                    .await?;
-            }
+                    .await
+                    .map(|_| ())
+            } else {
+                Ok(())
+            };
+            // Lock even if forgetting failed: a lock request must never leave the session open.
             self.session.lock().await;
+            forgotten?;
             Ok(ok(if a.forget == Some(true) {
                 kv_i18n::t(
                     "凭证库已锁定，\u{201c}记住\u{201d}状态已清除。",
@@ -376,9 +381,6 @@ impl Server {
                 .scoped(a.purpose, Some(target))
                 .request("get", p)
                 .await?;
-            let mut secrets: Vec<Option<String>> = vec![r.value.clone()];
-            secrets.extend(r.fields.clone().unwrap_or_default().into_values().map(Some));
-            record_secrets(&self.session.session_id, secrets);
             Ok(ok_data(
                 kv_i18n::t("凭证：", "Credential:"),
                 json!({"value": r.value, "fields": r.fields}),
@@ -388,8 +390,8 @@ impl Server {
     }
 
     #[tool(description = kv_i18n::t(
-        "把一个 static 凭证的原始值写入只有你本人账户可读的私有临时文件（~/.keyvalet/run，0600），只把文件路径返回给 AI，内容本身不经过 AI 上下文。用于必须读本地文件才能工作的场景，典型例子是 SSH 私钥（配合 ssh -i <路径> 使用）、证书等。能走代理时优先用 credential_http_request / credential_gateway；只有代理不适用、又必须落地成文件时才用这个——不要先 credential_get 拿到值再自己写文件，那样秘密会先经过 AI 上下文。文件在本会话结束时自动删除。",
-        "Write a static credential's raw value to a private temp file readable only by your own account (~/.keyvalet/run, 0600); only the file path is returned, never the content. For cases where a program must read a local file to work - the typical examples are SSH private keys (used with ssh -i <path>) and certificates. Prefer the proxy (credential_http_request / credential_gateway) when it applies; use this only when the proxy doesn't fit and the secret must land on disk as a file - don't call credential_get and write the file yourself, since that routes the secret through the AI context first. The file is deleted automatically when this session ends.",
+        "把一个 static 凭证的原始值写入只有你本人账户可读的私有临时文件（~/.keyvalet/run，0600），只把文件路径返回给 AI，内容本身不经过 AI 上下文。用于必须读本地文件才能工作的场景，典型例子是 SSH 私钥（配合 ssh -i <路径> 使用）、证书等。能走代理时优先用 credential_http_request / credential_gateway；只有代理不适用、又必须落地成文件时才用这个——不要先 credential_get 拿到值再自己写文件，那样秘密会先经过 AI 上下文。文件在锁定、会话超时、helper 断开或会话结束时自动删除。",
+        "Write a static credential's raw value to a private temp file readable only by your own account (~/.keyvalet/run, 0600); only the file path is returned, never the content. For cases where a program must read a local file to work - the typical examples are SSH private keys (used with ssh -i <path>) and certificates. Prefer the proxy (credential_http_request / credential_gateway) when it applies; use this only when the proxy doesn't fit and the secret must land on disk as a file - don't call credential_get and write the file yourself, since that routes the secret through the AI context first. The file is deleted automatically on lock, session expiry, helper disconnect, or session exit.",
     ))]
     async fn credential_export_file(
         &self,
@@ -431,8 +433,8 @@ impl Server {
                 json!({
                     "path": path.display().to_string(),
                     "note": kv_i18n::t(
-                        "只有你本人账户可读；本会话结束时自动删除，提前用完也可以自己删掉。不要让我读取或打印它的内容，直接把这个路径传给需要文件的命令（如 ssh -i）。",
-                        "Readable only by your own account; deleted automatically when this session ends, or delete it yourself once done. Don't have me read or print its contents - pass this path directly to the command that needs a file (e.g. ssh -i).",
+                        "只有你本人账户可读；锁定、超时、helper 断开或会话结束时自动删除，提前用完也可以自己删掉。不要让我读取或打印它的内容，直接把这个路径传给需要文件的命令（如 ssh -i）。",
+                        "Readable only by your own account; deleted automatically on lock, expiry, helper disconnect or session exit, or delete it yourself once done. Don't have me read or print its contents - pass this path directly to the command that needs a file (e.g. ssh -i).",
                     ),
                 }),
             ))
@@ -544,8 +546,8 @@ impl Server {
     }
 
     #[tool(description = kv_i18n::t(
-        "查看或修改 KeyValet 的授权模式。grant_mode：per_use（每次使用凭证都按 Touch ID）、per_credential（默认，每个会话中每个凭证按一次）、per_session（每个会话按一次）、remember（按一次后，remember_hours 小时内所有会话都不用再按；0 表示永久）。放宽（更宽松的模式或更长的记住时长）需要用户按 Touch ID；收紧立即生效。修改对当前会话也立即生效。forget=true 清除\u{201c}记住\u{201d}状态。只在用户明确要求时修改设置。",
-        "View or change KeyValet's authorization mode. grant_mode: per_use (Touch ID for every use), per_credential (default; Touch ID once per credential per session), per_session (Touch ID once per session), remember (Touch ID once, then no prompts for any session for remember_hours hours; 0 = forever). Loosening (a more permissive mode or a longer remember window) requires the user's Touch ID; tightening applies immediately. Changes take effect in the current session too. forget=true clears the remembered authorization. Only change settings when the user explicitly asks.",
+        "查看或修改 KeyValet 的凭证授权模式。每个新会话都必须通过系统认证解锁 Secure Enclave。grant_mode：per_use（每次使用凭证都按 Touch ID）、per_credential（默认，每个会话中每个凭证按一次）、per_session（会话解锁后批准全部凭证）、remember（在 remember_hours 小时内记住凭证授权，0 表示永久；不跳过新会话硬件解锁）。放宽模式或延长记住时长需要 Touch ID；收紧立即生效。修改对当前会话也立即生效。forget=true 清除记住的凭证授权。只在用户明确要求时修改设置。",
+        "View or change KeyValet's credential grant mode. Every new session requires system authentication to unlock Secure Enclave. grant_mode: per_use (Touch ID for every use), per_credential (default; Touch ID once per credential per session), per_session (grant all credentials after session unlock), remember (remember credential grants for remember_hours hours; 0 = forever; new sessions still require hardware unlock). Loosening the mode or extending the window requires Touch ID; tightening applies immediately. Changes take effect in the current session too. forget=true clears remembered credential grants. Only change settings when the user explicitly asks.",
     ))]
     async fn credential_settings(&self, Parameters(a): Parameters<SettingsArgs>) -> CallToolResult {
         wrap(async {

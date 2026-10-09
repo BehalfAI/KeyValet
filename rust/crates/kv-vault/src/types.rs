@@ -186,6 +186,8 @@ pub struct EncryptedFile {
     pub iv: String,
     pub tag: String,
     pub ct: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub master_key: Option<crate::MasterKeyMetadata>,
 }
 
 #[cfg(test)]

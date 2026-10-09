@@ -73,7 +73,17 @@ fn new_vault() -> (tempfile::TempDir, Vault) {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("vault");
     let vault = Vault::new(&dir);
-    vault.init().unwrap();
+    vault.prepare().unwrap();
+    if !vault.dir.join("master.key").exists() {
+        // Explicit legacy fixture: production code never creates this file.
+        std::fs::write(vault.dir.join("master.key"), [7u8; 32]).unwrap();
+        std::fs::set_permissions(
+            vault.dir.join("master.key"),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+        )
+        .unwrap();
+    }
+    vault.init_legacy().unwrap();
     vault
         .set(SetParams {
             r#type: "api_key".into(),
@@ -91,6 +101,20 @@ fn new_vault() -> (tempfile::TempDir, Vault) {
         })
         .unwrap();
     (tmp, vault)
+}
+
+/// Gives an existing static credential a proxy configuration for `hosts`.
+fn allow_hosts(vault: &Vault, name: &str, hosts: &[&str]) {
+    vault
+        .update_http("api_key", name, |_| {
+            Some(kv_vault::HttpConfig {
+                inject: None,
+                allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
+                proxy_only: false,
+                test: None,
+            })
+        })
+        .unwrap();
 }
 
 fn params(extra: Value) -> JsonMap {
@@ -179,7 +203,10 @@ async fn per_credential_unauthorized_denied_then_usable_after_grant_but_only_for
         result_of(g),
         json!({"granted": "api_key/openai", "already": false, "single_use": false})
     );
-    assert!(fake.reasons()[0].contains("授权本次 AI 会话使用凭证：api_key/openai"));
+    assert_eq!(
+        fake.reasons()[0],
+        "使用 openai（本会话）\n可读取明文凭证（AI 可见）"
+    );
 
     assert!(is_ok(
         &call(
@@ -219,13 +246,10 @@ async fn per_credential_unauthorized_denied_then_usable_after_grant_but_only_for
     );
 }
 
-/// The MCP server attaches `request_hint` (method + host + path of the HTTP call it's about to
-/// make) to the `grant` call for an HTTP-shaped op; `grant_credential` must fold it into the
-/// Touch ID reason, ahead of `purpose`. A plain, hint-less grant (e.g. the explicit
-/// `credential_grant` tool, or any non-HTTP op) must look exactly as before -- no empty
-/// "Request:" line.
+/// Session approval covers the credential, not an individual HTTP endpoint. Both bound and
+/// unbound session grants stay concise; agent-provided purpose and hints stay out of the prompt.
 #[tokio::test]
-async fn grant_reason_includes_the_request_hint_when_the_mcp_server_supplies_one() {
+async fn session_grant_shows_the_credential_scope_and_keeps_purpose_in_the_audit() {
     let (_tmp, vault) = new_vault();
     let fake = FakeAuth::new();
     let mut auth = session_auth(&vault, GrantMode::PerCredential, fake.clone());
@@ -241,16 +265,23 @@ async fn grant_reason_includes_the_request_hint_when_the_mcp_server_supplies_one
             "type": "api_key",
             "name": "openai",
             "purpose": "Summarize meeting notes",
-            "request_hint": "POST api.openai.com/v1/chat/completions",
+            "request_hint": "GET attacker.example/forged",
+            "operation": "httpRequest",
+            "request": {"type": "api_key", "name": "openai", "method": "POST", "url": "https://api.openai.com/v1/chat/completions?private=query-value#fragment-value"},
         }),
     )
     .await;
     let reason = &fake.reasons()[0];
-    assert!(
-        reason.contains("请求：POST api.openai.com/v1/chat/completions"),
-        "reason should show the request ahead of the purpose, got: {reason}"
-    );
-    assert!(reason.find("请求：").unwrap() < reason.find("目的：").unwrap());
+    assert_eq!(reason, "使用 openai（本会话）\n可读取明文凭证（AI 可见）");
+    assert!(!reason.contains("attacker.example"));
+    assert!(!reason.contains("query-value"));
+    assert!(!reason.contains("fragment-value"));
+    assert!(!reason.contains("Summarize meeting notes"));
+    assert!(!reason.contains("/proj"));
+    let audit = std::fs::read_to_string(vault.dir.join("audit.log")).unwrap();
+    let last: Value = serde_json::from_str(audit.lines().last().unwrap()).unwrap();
+    assert_eq!(last["purpose"], "Summarize meeting notes");
+    assert_eq!(last["client"]["cwd"], "/proj");
 
     fake.push(true);
     call(
@@ -262,10 +293,58 @@ async fn grant_reason_includes_the_request_hint_when_the_mcp_server_supplies_one
     )
     .await;
     let plain_reason = &fake.reasons()[1];
-    assert!(
-        !plain_reason.contains("请求："),
-        "no request_hint -> no 请求： line, got: {plain_reason}"
+    assert_eq!(
+        plain_reason,
+        "使用 github（本会话）\n可读取明文凭证（AI 可见）"
     );
+}
+
+/// One-shot approval still exposes the helper-derived operation, never the agent's display hint.
+/// Session approval also keeps the disclosure warning when the operation returns the secret.
+#[tokio::test]
+async fn operation_details_remain_for_per_use_approval_and_plaintext_disclosure() {
+    let (_tmp, vault) = new_vault();
+    allow_hosts(&vault, "openai", &["api.openai.com"]);
+    let fake = FakeAuth::new();
+    let confirmer = PanicConfirmer;
+    let mut auth = session_auth(&vault, GrantMode::PerUse, fake.clone());
+    fake.push(true);
+    assert!(is_ok(&call(
+        &vault,
+        &mut auth,
+        &confirmer,
+        "grant",
+        json!({
+            "type": "api_key", "name": "openai", "purpose": "Just list models",
+            "request_hint": "GET attacker.example/forged", "operation": "httpRequest",
+            "request": {"type": "api_key", "name": "openai", "method": "DELETE", "url": "https://api.openai.com/v1/files/file-123?private=query-value#fragment-value"},
+        }),
+    ).await));
+    let reason = &fake.reasons()[0];
+    // Everything the approval is bound to is shown; the fragment is never sent, so it isn't.
+    assert_eq!(
+        reason,
+        "使用 openai（仅此一次）\nDELETE api.openai.com/v1/files/file-123\n?private=query-value"
+    );
+
+    let mut auth = session_auth(&vault, GrantMode::PerCredential, fake.clone());
+    fake.push(true);
+    assert!(is_ok(
+        &call(
+            &vault,
+            &mut auth,
+            &confirmer,
+            "grant",
+            json!({
+                "type": "api_key", "name": "openai", "purpose": "Just list models",
+                "operation": "get", "request": {"type": "api_key", "name": "openai"},
+            }),
+        )
+        .await
+    ));
+    let reason = &fake.reasons()[1];
+    assert_eq!(reason, "使用 openai（本会话）\n可读取明文凭证（AI 可见）");
+    assert!(!reason.contains("sk-openai-123"));
 }
 
 #[tokio::test]
@@ -345,11 +424,13 @@ async fn per_use_one_touch_id_buys_exactly_one_use() {
             &mut auth,
             &confirmer,
             "grant",
-            json!({"type": "api_key", "name": "openai"})
+            json!({"type": "api_key", "name": "openai", "operation": "get", "request": {"type": "api_key", "name": "openai"}})
         )
         .await
     ));
     assert!(fake.reasons()[0].contains("仅此一次"));
+    assert!(fake.reasons()[0].contains("读取明文凭证（AI 可见）"));
+    assert!(!fake.reasons()[0].contains("sk-openai-123"));
     assert!(is_ok(
         &call(
             &vault,
@@ -381,7 +462,7 @@ async fn per_use_one_touch_id_buys_exactly_one_use() {
                 &mut auth,
                 &confirmer,
                 "grant",
-                json!({"type": "api_key", "name": "openai"})
+                json!({"type": "api_key", "name": "openai", "operation": "get", "request": {"type": "api_key", "name": "openai"}})
             )
             .await
         ),
@@ -460,7 +541,6 @@ async fn per_use_grant_matching_the_exact_request_executes_it_exactly_once() {
     http_credential(&vault, &mut auth, &confirmer, *server.address()).await;
 
     let req = json!({"type": "api_key", "name": "svc", "method": "POST", "url": format!("http://{}/v1/charge", server.address()), "body": {"amount": 100}});
-    let digest = request_digest(req.as_object().unwrap()).unwrap();
 
     fake.push(true);
     assert!(is_ok(
@@ -469,7 +549,7 @@ async fn per_use_grant_matching_the_exact_request_executes_it_exactly_once() {
             &mut auth,
             &confirmer,
             "grant",
-            json!({"type": "api_key", "name": "svc", "request_digest": digest}),
+            json!({"type": "api_key", "name": "svc", "operation": "httpRequest", "request": req}),
         )
         .await
     ));
@@ -490,8 +570,16 @@ async fn per_use_grant_does_not_cover_a_request_that_differs_from_the_one_it_was
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/charge"))
+        .and(wiremock::matchers::body_json(json!({"amount": 100_000})))
         .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
         .expect(0) // the request that was actually sent must never reach the network unapproved
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/charge"))
+        .and(wiremock::matchers::body_json(json!({"amount": 100})))
+        .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+        .expect(1) // the approved request runs exactly once
         .mount(&server)
         .await;
 
@@ -502,7 +590,6 @@ async fn per_use_grant_does_not_cover_a_request_that_differs_from_the_one_it_was
     http_credential(&vault, &mut auth, &confirmer, *server.address()).await;
 
     let shown = json!({"type": "api_key", "name": "svc", "method": "POST", "url": format!("http://{}/v1/charge", server.address()), "body": {"amount": 100}});
-    let digest = request_digest(shown.as_object().unwrap()).unwrap();
 
     fake.push(true);
     assert!(is_ok(
@@ -511,7 +598,7 @@ async fn per_use_grant_does_not_cover_a_request_that_differs_from_the_one_it_was
             &mut auth,
             &confirmer,
             "grant",
-            json!({"type": "api_key", "name": "svc", "request_digest": digest}),
+            json!({"type": "api_key", "name": "svc", "operation": "httpRequest", "request": shown}),
         )
         .await
     ));
@@ -525,13 +612,169 @@ async fn per_use_grant_does_not_cover_a_request_that_differs_from_the_one_it_was
     );
     assert!(error_of(&r).unwrap().starts_with(GRANT_REQUIRED_PREFIX));
 
-    // The mismatched attempt consumed the one-shot grant; the originally-approved request can't
-    // be replayed against it after the fact either -- a mismatch must not be retriable.
+    // A mismatched request neither runs nor consumes the approval of the request that was
+    // shown; that one still runs exactly once, as approved.
+    let approved = call(&vault, &mut auth, &confirmer, "httpRequest", shown.clone()).await;
+    assert!(is_ok(&approved), "{:?}", error_of(&approved));
     let replay_of_shown = call(&vault, &mut auth, &confirmer, "httpRequest", shown).await;
     assert!(
         !is_ok(&replay_of_shown),
-        "a consumed grant cannot be reused, even for the exact request it was originally shown for"
+        "a used approval cannot be reused, even for the exact request it was shown for"
     );
+}
+
+#[tokio::test]
+async fn session_prompt_text_comes_from_the_record_not_the_client_operation() {
+    let (_tmp, vault) = new_vault();
+    let fake = FakeAuth::new();
+    let mut auth = session_auth(&vault, GrantMode::PerCredential, fake.clone());
+    let confirmer = PanicConfirmer;
+    // A direct client misstates the operation to hide the plaintext disclosure warning.
+    fake.push(true);
+    let misstated = call(
+        &vault,
+        &mut auth,
+        &confirmer,
+        "grant",
+        json!({"type": "api_key", "name": "openai", "operation": "totp", "request": {"type": "api_key", "name": "openai"}}),
+    )
+    .await;
+    assert!(
+        !is_ok(&misstated),
+        "an operation the credential can't perform is refused"
+    );
+    assert!(fake.reasons().is_empty(), "refused before any prompt");
+    let unsafe_methods = [("httpRequest", "https://api.openai.com/v1/models")];
+    for (op, url) in unsafe_methods {
+        fake.push(true);
+        let r = call(
+            &vault,
+            &mut auth,
+            &confirmer,
+            "grant",
+            json!({"type": "api_key", "name": "openai", "operation": op, "request": {"type": "api_key", "name": "openai", "url": url}}),
+        )
+        .await;
+        assert!(is_ok(&r), "{:?}", error_of(&r));
+    }
+    assert_eq!(
+        fake.reasons()[0],
+        "使用 openai（本会话）\n可读取明文凭证（AI 可见）",
+        "even a session grant requested for a proxied call warns that plaintext is readable"
+    );
+    // Proxy-only credentials say so instead.
+    vault
+        .update_http("api_key", "github", |_| {
+            Some(kv_vault::HttpConfig {
+                inject: None,
+                allowed_hosts: vec!["api.github.com".into()],
+                proxy_only: true,
+                test: None,
+            })
+        })
+        .unwrap();
+    fake.push(true);
+    assert!(is_ok(
+        &call(
+            &vault,
+            &mut auth,
+            &confirmer,
+            "grant",
+            json!({"type": "api_key", "name": "github"}),
+        )
+        .await
+    ));
+    assert_eq!(
+        fake.reasons()[1],
+        "使用 github（本会话）\n仅代理请求（AI 看不到明文）"
+    );
+}
+
+#[tokio::test]
+async fn per_use_refuses_invalid_methods_and_hosts_before_prompting() {
+    let (_tmp, vault) = new_vault();
+    allow_hosts(&vault, "openai", &["api.openai.com"]);
+    let fake = FakeAuth::new();
+    let mut auth = session_auth(&vault, GrantMode::PerUse, fake.clone());
+    let confirmer = PanicConfirmer;
+    for request in [
+        json!({"type": "api_key", "name": "openai", "method": "GET\n\u{202e}Scope: all", "url": "https://api.openai.com/v1/models"}),
+        json!({"type": "api_key", "name": "openai", "method": "GET", "url": "https://attacker.example/v1/models"}),
+        json!({"type": "api_key", "name": "openai", "method": "GET", "url": "http://api.openai.com/v1/models"}),
+    ] {
+        let r = call(
+            &vault,
+            &mut auth,
+            &confirmer,
+            "grant",
+            json!({"type": "api_key", "name": "openai", "operation": "httpRequest", "request": request}),
+        )
+        .await;
+        assert!(!is_ok(&r));
+    }
+    assert!(
+        fake.reasons().is_empty(),
+        "no prompt for a request that would be refused"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_per_use_approvals_for_one_credential_do_not_overwrite_each_other() {
+    let _guard = with_insecure_loopback();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let (_tmp, vault) = new_vault();
+    let fake = FakeAuth::new();
+    let mut auth = session_auth(&vault, GrantMode::PerUse, fake.clone());
+    let confirmer = PanicConfirmer;
+    http_credential(&vault, &mut auth, &confirmer, *server.address()).await;
+    let first = json!({"type": "api_key", "name": "svc", "method": "GET", "url": format!("http://{}/a", server.address())});
+    let second = json!({"type": "api_key", "name": "svc", "method": "GET", "url": format!("http://{}/b", server.address())});
+    for request in [&first, &second] {
+        fake.push(true);
+        assert!(is_ok(
+            &call(
+                &vault,
+                &mut auth,
+                &confirmer,
+                "grant",
+                json!({"type": "api_key", "name": "svc", "operation": "httpRequest", "request": request}),
+            )
+            .await
+        ));
+    }
+    for request in [second, first] {
+        let r = call(&vault, &mut auth, &confirmer, "httpRequest", request).await;
+        assert!(is_ok(&r), "{:?}", error_of(&r));
+    }
+}
+
+#[tokio::test]
+async fn a_mode_tightened_elsewhere_applies_to_a_live_session() {
+    let (_tmp, vault) = new_vault();
+    let fake = FakeAuth::new();
+    let settings = |grant_mode| kv_core::settings::Settings {
+        grant_mode,
+        remember_hours: 8.0,
+        remember_until: None,
+    };
+    kv_core::write_settings(&vault.dir, &settings(GrantMode::PerSession)).unwrap();
+    let mut auth = SessionAuth::new(fake.clone());
+    auth.apply_mode(&settings(GrantMode::PerSession));
+    let confirmer = PanicConfirmer;
+    let get = json!({"type": "api_key", "name": "openai"});
+    assert!(is_ok(
+        &call(&vault, &mut auth, &confirmer, "get", get.clone()).await
+    ));
+    // E.g. `keyvalet grant-mode per-use` in a terminal while this session is running.
+    kv_core::write_settings(&vault.dir, &settings(GrantMode::PerUse)).unwrap();
+    let r = call(&vault, &mut auth, &confirmer, "get", get).await;
+    assert!(error_of(&r).unwrap().starts_with(GRANT_REQUIRED_PREFIX));
+    assert_eq!(auth.mode, Some(GrantMode::PerUse));
 }
 
 #[tokio::test]
@@ -576,7 +819,7 @@ async fn loosening_requires_touch_id_and_takes_effect_immediately() {
         .reasons()
         .last()
         .unwrap()
-        .contains("每个会话按一次 Touch ID"));
+        .contains("本会话可使用全部凭证，新会话需解锁"));
     assert_eq!(
         kv_core::read_settings(&vault.dir).grant_mode,
         GrantMode::PerSession
@@ -969,7 +1212,7 @@ async fn gateway_open_fails_cleanly_when_no_gateway_is_attached_to_the_session()
 }
 
 #[tokio::test]
-async fn gateway_open_end_to_end_through_a_real_listening_gateway() {
+async fn gateway_open_and_policy_tightening_through_a_real_listening_gateway() {
     let _guard = with_insecure_loopback();
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -982,10 +1225,29 @@ async fn gateway_open_end_to_end_through_a_real_listening_gateway() {
 
     let tmp = tempfile::tempdir().unwrap();
     let vault = Arc::new(Vault::new(tmp.path().join("vault")));
-    vault.init().unwrap();
+    vault.prepare().unwrap();
+    if !vault.dir.join("master.key").exists() {
+        // Explicit legacy fixture: production code never creates this file.
+        std::fs::write(vault.dir.join("master.key"), [7u8; 32]).unwrap();
+        std::fs::set_permissions(
+            vault.dir.join("master.key"),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+        )
+        .unwrap();
+    }
+    vault.init_legacy().unwrap();
     kv_i18n::set_lang("zh");
 
-    let mut auth = session_auth(&vault, GrantMode::PerCredential, FakeAuth::new());
+    let mut auth = session_auth(&vault, GrantMode::PerSession, FakeAuth::new());
+    kv_core::write_settings(
+        &vault.dir,
+        &Settings {
+            grant_mode: GrantMode::PerSession,
+            remember_hours: 8.0,
+            remember_until: None,
+        },
+    )
+    .unwrap();
     auth.gateway = Some(Arc::new(kv_proxy::gateway::Gateway::new(
         vault.clone(),
         Arc::new(|_| {}),
@@ -1026,6 +1288,27 @@ async fn gateway_open_end_to_end_through_a_real_listening_gateway() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.text().await.unwrap(), "pong");
+
+    let tightened = call(
+        &vault,
+        &mut auth,
+        &confirmer,
+        "settings",
+        json!({"grant_mode": "per_credential"}),
+    )
+    .await;
+    assert!(is_ok(&tightened));
+    let revoked = client
+        .get(format!("{base}/{upstream_host}/v1/ping"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        revoked.status(),
+        401,
+        "an existing gateway must obey the tightened policy"
+    );
 }
 
 #[tokio::test]
@@ -1064,4 +1347,140 @@ async fn info_on_a_protocol_credential_includes_its_config() {
     let v = result_of(r);
     assert_eq!(v["config"]["provider"], "google");
     assert_eq!(v["config"]["client_id"], "abc123");
+}
+
+#[tokio::test]
+async fn per_use_rejects_legacy_digest_and_cross_operation_secret_reads() {
+    let (_tmp, vault) = new_vault();
+    allow_hosts(&vault, "openai", &["example.com"]);
+    let fake = FakeAuth::new();
+    let mut auth = session_auth(&vault, GrantMode::PerUse, fake.clone());
+    let confirmer = PanicConfirmer;
+    let req = json!({"type": "api_key", "name": "openai", "method": "GET", "url": "https://example.com/status"});
+    let digest = request_digest(req.as_object().unwrap()).unwrap();
+    let legacy = call(&vault, &mut auth, &confirmer, "grant", json!({"type": "api_key", "name": "openai", "request_hint": "GET example.com/status", "request_digest": digest})).await;
+    assert!(!is_ok(&legacy));
+    assert!(fake.reasons().is_empty());
+    fake.push(true);
+    assert!(is_ok(
+        &call(
+            &vault,
+            &mut auth,
+            &confirmer,
+            "grant",
+            json!({"type": "api_key", "name": "openai", "operation": "httpRequest", "request": req})
+        )
+        .await
+    ));
+    let stolen = call(&vault, &mut auth, &confirmer, "get", req.clone()).await;
+    assert!(error_of(&stolen)
+        .unwrap()
+        .starts_with(GRANT_REQUIRED_PREFIX));
+    assert!(!is_ok(
+        &call(&vault, &mut auth, &confirmer, "httpRequest", req).await
+    ));
+}
+
+#[tokio::test]
+async fn per_use_gateway_is_rejected_before_prompt() {
+    let (_tmp, vault) = new_vault();
+    let fake = FakeAuth::new();
+    let mut auth = session_auth(&vault, GrantMode::PerUse, fake.clone());
+    let confirmer = PanicConfirmer;
+    let grant = call(&vault, &mut auth, &confirmer, "grant", json!({"type": "api_key", "name": "openai", "operation": "gatewayOpen", "request": {"type": "api_key", "name": "openai"}})).await;
+    assert!(!is_ok(&grant));
+    assert!(fake.reasons().is_empty());
+}
+
+#[tokio::test]
+async fn per_use_test_approval_is_invalidated_by_stored_configuration_changes() {
+    let (_tmp, vault) = new_vault();
+    let config = serde_json::from_value(json!({
+        "inject": {"headers": {"Authorization": "Bearer {{value}}"}},
+        "allowed_hosts": ["example.com"], "proxy_only": true,
+        "test": {"method": "GET", "url": "https://example.com/approved"}
+    }))
+    .unwrap();
+    vault
+        .update_http("api_key", "openai", |_| Some(config))
+        .unwrap();
+    let fake = FakeAuth::new();
+    fake.push(true);
+    let mut auth = session_auth(&vault, GrantMode::PerUse, fake.clone());
+    let confirmer = PanicConfirmer;
+    let request = json!({"type": "api_key", "name": "openai"});
+    let grant = call(
+        &vault,
+        &mut auth,
+        &confirmer,
+        "grant",
+        json!({
+            "type": "api_key", "name": "openai", "operation": "httpTest", "request": request
+        }),
+    )
+    .await;
+    assert!(is_ok(&grant));
+    assert!(fake.reasons()[0].contains("GET example.com/approved"));
+    vault
+        .update_http("api_key", "openai", |record| {
+            let mut config = record.http.clone().unwrap();
+            config.test.as_mut().unwrap().url = "https://example.com/replaced".into();
+            Some(config)
+        })
+        .unwrap();
+    let result = call(&vault, &mut auth, &confirmer, "httpTest", request).await;
+    assert!(error_of(&result)
+        .unwrap()
+        .starts_with(GRANT_REQUIRED_PREFIX));
+}
+
+#[tokio::test]
+async fn oauth_error_diagnostics_never_reach_the_response_or_audit_reader() {
+    let _guard = with_insecure_loopback();
+    let server = MockServer::start().await;
+    let secret = "synthetic-client-secret-012345";
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(
+            json!({"error": "invalid_client", "error_description": format!("Rejected {secret}")}),
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let (_tmp, vault) = new_vault();
+    kv_protocols::index::setup_protocol(&vault, kv_protocols::index::SetupProtocolParams {
+        r#type: "oauth2".into(), name: "review".into(), kind: kv_vault::Kind::Oauth2,
+        config: json!({"flow": "client_credentials", "client_id": "review", "token_url": format!("{}/token", server.uri())}),
+        secrets: json!({"client_secret": secret}), description: None, type_description: None, overwrite: false, reuse_client_secret: false,
+    }).unwrap();
+    let fake = FakeAuth::new();
+    let mut auth = session_auth(&vault, GrantMode::PerCredential, fake);
+    auth.grants.insert("oauth2/review".into());
+    let confirmer = PanicConfirmer;
+    let response = call(
+        &vault,
+        &mut auth,
+        &confirmer,
+        "accessToken",
+        json!({"type": "oauth2", "name": "review"}),
+    )
+    .await;
+    assert!(!is_ok(&response));
+    assert!(!error_of(&response).unwrap().contains(secret));
+    assert!(error_of(&response).unwrap().contains("invalid_client"));
+    let mut ungranted = session_auth(&vault, GrantMode::PerCredential, FakeAuth::new());
+    let audit = result_of(
+        call(
+            &vault,
+            &mut ungranted,
+            &confirmer,
+            "auditQuery",
+            json!({"limit": 10}),
+        )
+        .await,
+    );
+    assert!(!audit.to_string().contains(secret));
+    assert!(!std::fs::read_to_string(vault.dir.join("audit.log"))
+        .unwrap()
+        .contains(secret));
 }

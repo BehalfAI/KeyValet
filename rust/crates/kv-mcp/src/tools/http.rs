@@ -872,8 +872,8 @@ impl Server {
     }
 
     #[tool(description = kv_i18n::t(
-        "为凭证开通本地网关，给不能走 MCP 的程序（SDK、CLI、脚本）使用，支持流式响应。网关地址和本会话专属令牌写入一个仅你可读的环境变量文件（env_file）；用 `set -a; . <env_file>; set +a; <命令>` 运行程序，常见 SDK（OpenAI、Anthropic 等）的 BASE_URL 和 API_KEY 已设置好。程序把令牌当作 API key 发送，网关替换为真实凭证、只转发到允许的域名并对响应脱敏——程序和 agent 都拿不到真实 key。只接受你本人账户的进程连接；会话结束即失效。不要读取、打印该文件，也不要把其中的值写进命令行参数。凭证需先配置代理（credential_set 用模板，或 credential_configure_http）。",
-        "Open a local gateway for a credential, for programs that cannot use MCP (SDKs, CLIs, scripts); streaming responses are supported. The gateway URL and a per-session token are written to an environment file readable only by you (env_file); run programs with `set -a; . <env_file>; set +a; <command>` - BASE_URL and API_KEY for common SDKs (OpenAI, Anthropic, …) are already set. The program sends the token as its API key; the gateway swaps in the real credential, forwards only to allowed hosts and redacts responses, so neither the program nor the agent ever holds the real key. Only processes of your own user account may connect; the token stops working when the session ends. Never read or print the file, or put its values in command-line arguments. The credential must have a proxy configuration (credential_set with a template, or credential_configure_http).",
+        "为凭证开通本地网关，给不能走 MCP 的程序（SDK、CLI、脚本）使用，支持流式响应。网关地址和本会话专属令牌写入一个仅你可读的环境变量文件（env_file）；用 `set -a; . <env_file>; set +a; <命令>` 运行程序，常见 SDK（OpenAI、Anthropic 等）的 BASE_URL 和 API_KEY 已设置好。程序把令牌当作 API key 发送，网关替换为真实凭证、只转发到允许的域名并对响应脱敏——程序和 agent 都拿不到真实 key。只接受你本人账户的进程连接；锁定、会话结束或授权模式变更即失效。per_use 模式不支持可复用网关，请使用 credential_http_request。不要读取、打印该文件，也不要把其中的值写进命令行参数。凭证需先配置代理（credential_set 用模板，或 credential_configure_http）。",
+        "Open a local gateway for a credential, for programs that cannot use MCP (SDKs, CLIs, scripts); streaming responses are supported. The gateway URL and a per-session token are written to an environment file readable only by you (env_file); run programs with `set -a; . <env_file>; set +a; <command>` - BASE_URL and API_KEY for common SDKs (OpenAI, Anthropic, …) are already set. The program sends the token as its API key; the gateway swaps in the real credential, forwards only to allowed hosts and redacts responses, so neither the program nor the agent ever holds the real key. Only processes of your own user account may connect; locking, session exit, or a grant-mode change invalidates the token. Reusable gateways are unavailable in per_use mode; use credential_http_request. Never read or print the file, or put its values in command-line arguments. The credential must have a proxy configuration (credential_set with a template, or credential_configure_http).",
     ), annotations(open_world_hint = true))]
     async fn credential_gateway(&self, Parameters(a): Parameters<GatewayArgs>) -> CallToolResult {
         wrap(async {
@@ -902,7 +902,7 @@ impl Server {
                 json!({
                     "env_file": file_str,
                     "variables": env.iter().map(|(k,_)| k).collect::<Vec<_>>(),
-                    "usage": format!("set -a; . {file_str}; set +a; <command>"),
+                    "usage": format!("set -a; . {}; set +a; <command>", crate::gateway_env::quote(&file_str)),
                     "base_urls": g.base_urls,
                     "how_to_call": kv_i18n::t(
                         "请求 <base_urls 中的地址>/<API 路径>，并把 $KEYVALET_GATEWAY_TOKEN 作为 API key 发送（Authorization: Bearer、x-api-key 或 x-goog-api-key）。不要读取、打印或在命令行参数中写出该文件的内容。",

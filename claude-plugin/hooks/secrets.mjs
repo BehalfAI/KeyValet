@@ -1,25 +1,16 @@
 #!/usr/bin/env node
 // KeyValet hook for Claude Code: notices secrets so they end up in KeyValet instead of the chat, files or shell.
 //
-// Superseded in production by the Rust port at rust/crates/kv-hook (installed as the kv-hook binary,
-// invoked via run.sh); kept here because src/test/proactive.test.ts still imports it directly as the
-// spec for the detection logic. Port behavior changes to both files, or move the spec test to kv-hook.
+// The Rust kv-hook binary is preferred by run.sh; this remains a fallback for older installs.
+// Keep its format detection consistent with rust/crates/kv-hook.
 //
 //   secrets.mjs prompt   UserPromptSubmit: the user pasted a key → tell Claude to store it in KeyValet
 //   secrets.mjs tool     PreToolUse (Write/Edit/MultiEdit/NotebookEdit/Bash): a literal key is about to be
 //                        written to a file or a command → ask the user first and point Claude to KeyValet
 //
-// The "tool" mode also catches secrets Claude already pulled OUT of KeyValet this session
-// (credential_get / credential_totp_code / credential_access_token / credential_aws_credentials record
-// what they returned in ~/.keyvalet/run/*.redact) by exact match — this does not rely on the value
-// looking like a known key format, unlike the PATTERNS below.
-//
+// Hooks recognize secret formats without reading or retaining returned credential values.
 // Never prints the secret itself (only a masked preview). Set KEYVALET_HOOKS=off to disable.
 // No dependencies: runs with whatever node is available.
-
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 
 /** Known key formats → KeyValet template. Order matters: more specific prefixes first. */
 export const PATTERNS = [
@@ -135,65 +126,11 @@ export function toolText(toolName, input) {
   }
 }
 
-/**
- * Secrets that a KeyValet tool already returned to Claude in a still-live session, read from
- * ~/.keyvalet/run/*.redact (one file per session, written by recordSecrets in src/server/gateway-env.ts,
- * deleted when that session ends). Ignores files older than a day so a crashed session that skipped
- * cleanup doesn't keep flagging long-dead values forever.
- */
-function loadReturnedSecrets() {
-  const dir = path.join(os.homedir(), ".keyvalet", "run");
-  const out = new Set();
-  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-  let names;
-  try {
-    names = fs.readdirSync(dir).filter((f) => f.endsWith(".redact"));
-  } catch {
-    return out;
-  }
-  for (const name of names) {
-    const p = path.join(dir, name);
-    try {
-      if (fs.statSync(p).mtimeMs < cutoff) continue;
-      for (const line of fs.readFileSync(p, "utf8").split("\n")) {
-        const v = line.trim();
-        if (v) out.add(v);
-      }
-    } catch {
-      /* ignore */
-    }
-  }
-  return out;
-}
-
-/** Exact-match hits (unlike detect(), not a format guess — these are values KeyValet itself handed out). */
-export function detectReturnedSecrets(text) {
-  if (typeof text !== "string" || !text) return [];
-  const hits = [];
-  for (const v of loadReturnedSecrets()) {
-    if (text.includes(v)) hits.push({ preview: mask(v) });
-  }
-  return hits;
-}
-
-export function toolReason(toolName, hits, returnedHits = []) {
+export function toolReason(toolName, hits) {
   const where = toolName === "Bash" ? "this shell command" : "this file";
-  const parts = [];
-  if (hits.length) {
-    parts.push(
-      `${where} contains a literal secret — ${hits.map((h) => `${h.label} (${h.preview})`).join(", ")}. ` +
-        "Keep secrets in KeyValet: call APIs with credential_http_request, run SDKs/scripts with credential_gateway (env file with a local base URL and a gateway token), " +
-        "and read env vars in code instead of hard-coding keys.",
-    );
-  }
-  if (returnedHits.length) {
-    parts.push(
-      `${where} contains a value KeyValet already returned this session (${returnedHits.map((h) => h.preview).join(", ")}). ` +
-        "A secret KeyValet handed you should not go into a shell command or env-var prefix (ps shows it to every local user) or into a plain file — " +
-        "use credential_export_file instead and have the program read it from the private file it returns.",
-    );
-  }
-  return parts.join(" ") + " Approve only if you really want this.";
+  return `${where} contains a literal secret — ${hits.map((h) => `${h.label} (${h.preview})`).join(", ")}. ` +
+    "Keep secrets in KeyValet: call APIs with credential_http_request, run SDKs/scripts with credential_gateway (env file with a local base URL and a gateway token), " +
+    "and read env vars in code instead of hard-coding keys. Approve only if you really want this.";
 }
 
 /** Hook entry: returns the JSON to print, or null for no output. */
@@ -207,17 +144,15 @@ export function handle(mode, input) {
     const name = String(input?.tool_name ?? "");
     const text = toolText(name, input?.tool_input);
     const hits = detect(text);
-    const returnedHits = detectReturnedSecrets(text);
-    if (!hits.length && !returnedHits.length) return null;
+    if (!hits.length) return null;
     return {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: "ask",
-        permissionDecisionReason: toolReason(name, hits, returnedHits),
+        permissionDecisionReason: toolReason(name, hits),
         additionalContext:
           "KeyValet flagged a secret in this tool call. " +
-          (hits.length ? "If the user hasn't stored it yet, store it with credential_set (template + value), then use credential_http_request / credential_gateway or read it from env vars instead of hard-coding it. " : "") +
-          (returnedHits.length ? "A value returned by a KeyValet tool this session is present verbatim — use credential_export_file so the program reads it from a private file instead." : ""),
+          "If the user hasn't stored it yet, store it with credential_set (template + value), then use credential_http_request / credential_gateway or read it from env vars instead of hard-coding it.",
       },
     };
   }
