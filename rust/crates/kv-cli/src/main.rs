@@ -29,7 +29,8 @@ fn usage() -> String {
         \u{20}\u{20}delete-type <type>                 删除空的凭证类型\n\
         \u{20}\u{20}audit [行数]                       查看审计日志（默认 50 行）\n\
         \u{20}\u{20}grant-mode [per-use|per-credential|per-session|remember [小时]|forget]\n\
-        \u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}查看/设置授权模式：每次 / 每个凭证 / 每个会话按 Touch ID，或按一次后记住一段时间",
+        \u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}查看/设置授权模式：每次 / 每个凭证 / 每个会话按 Touch ID，或按一次后记住一段时间\n\
+        \u{20}\u{20}scan                               在常见配置文件（.env、~/.claude.json 等）里找可能的密钥（只检测，不改动文件）",
         "Usage: keyvalet <command>\n\n\
         \u{20}\u{20}types                              List credential types\n\
         \u{20}\u{20}list [type]                        List credentials (without values)\n\
@@ -43,7 +44,8 @@ fn usage() -> String {
         \u{20}\u{20}delete-type <type>                 Delete an empty credential type\n\
         \u{20}\u{20}audit [lines]                      Show the audit log (default 50 lines)\n\
         \u{20}\u{20}grant-mode [per-use|per-credential|per-session|remember [hours]|forget]\n\
-        \u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}Show/set grant mode: Touch ID per use / per credential / per session, or once and remember for a while",
+        \u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}Show/set grant mode: Touch ID per use / per credential / per session, or once and remember for a while\n\
+        \u{20}\u{20}scan                               Look for possible secrets in common config files (.env, ~/.claude.json, ...); detects only, never changes a file",
     )
 }
 
@@ -457,9 +459,199 @@ fn main() {
             let start = lines.len().saturating_sub(n);
             println!("{}", lines[start..].join("\n"));
         }
+        "scan" => scan(),
         other => fatal(&kv_i18n::t(
             &format!("未知命令 {other}\n\n{}", usage()),
             &format!("Unknown command {other}\n\n{}", usage()),
         )),
+    }
+}
+
+/// The invoking (non-root) user's home directory -- `$HOME` is reset to root's own under `sudo`
+/// (no `-E` in the `keyvalet` wrapper), so dotfiles like `~/.claude.json` have to be found via
+/// `SUDO_USER` instead. `dscl` is the authoritative source (handles a non-default home
+/// directory); `/Users/<name>` is the fallback if that lookup fails, which is right for the
+/// overwhelming majority of real Macs. Falls back to `$HOME` itself when there's no `SUDO_USER`
+/// at all (e.g. invoking `kv-cli` directly as root for testing).
+fn real_home() -> std::path::PathBuf {
+    if let Some(user) = std::env::var("SUDO_USER").ok().filter(|u| !u.is_empty()) {
+        if let Ok(out) = std::process::Command::new("dscl")
+            .args([".", "-read", &format!("/Users/{user}"), "NFSHomeDirectory"])
+            .output()
+        {
+            if let Some(dir) = std::str::from_utf8(&out.stdout)
+                .ok()
+                .and_then(|s| s.strip_prefix("NFSHomeDirectory:"))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                return std::path::PathBuf::from(dir);
+            }
+        }
+        return std::path::PathBuf::from(format!("/Users/{user}"));
+    }
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/"))
+}
+
+/// The fixed list of places secrets commonly end up (action-plan 4.1), filtered down to the ones
+/// that actually exist. `.env*`/`.cursor/mcp.json` are resolved against the current directory
+/// (wherever the user ran `keyvalet scan` from -- `sudo` doesn't change cwd); the rest are
+/// per-user dotfiles under `real_home()`.
+fn scan_paths() -> Vec<std::path::PathBuf> {
+    let home = real_home();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let mut paths = vec![
+        cwd.join(".env"),
+        cwd.join(".env.local"),
+        cwd.join(".env.development"),
+        cwd.join(".env.production"),
+        cwd.join(".cursor/mcp.json"),
+        home.join(".claude.json"),
+        home.join(".codex/config.toml"),
+        home.join(".zshrc"),
+        home.join(".bashrc"),
+        home.join(".bash_profile"),
+        home.join(".profile"),
+    ];
+    paths.retain(|p| p.is_file());
+    paths
+}
+
+/// `keyvalet scan` (action-plan 4.1): a deliberately read-only first slice. Finds secret-shaped
+/// strings in the usual places and prints where, with a suggested `keyvalet set` command for
+/// each -- but does not import anything or touch any file. The full plan (native checkbox
+/// dialog, import, placeholder rewrite, delete-the-plaintext-after-confirming) writes to the
+/// user's real config files; that's a materially riskier feature than reporting what's there, so
+/// it's left as a follow-up rather than shipped without a chance to review the rewrite logic
+/// specifically. Reuses `kv_hook::detect` (the exact same engine the `tool`/`prompt` hooks use)
+/// line by line, so results and recognized services match what the hooks would flag.
+fn scan() {
+    let (report, total) = scan_report(&scan_paths());
+    print!("{report}");
+    if total == 0 {
+        println!(
+            "{}",
+            kv_i18n::t(
+                "没有在常见位置发现明显的密钥。",
+                "No obvious secrets found in the usual places."
+            )
+        );
+    } else {
+        println!();
+        println!(
+            "{}",
+            kv_i18n::t(
+                &format!("共 {total} 条可能的密钥。只是检测，没有改动任何文件：要收进 KeyValet，用上面建议的命令逐条 set，再手动从原文件删掉。"),
+                &format!("{total} possible secret(s) total. This only detects, it didn't change any file: to store one in KeyValet, run the suggested `keyvalet set` command for it, then remove it from the original file by hand."),
+            )
+        );
+    }
+}
+
+/// The pure part of `scan`: given a list of files (assumed to already exist -- `scan_paths`
+/// filters for that; a test can skip straight to passing in tempdir paths), reads each, detects
+/// line by line, and renders the per-file report. Returns the rendered text and the total hit
+/// count so `scan` can decide which closing message to print without re-parsing its own output.
+fn scan_report(paths: &[std::path::PathBuf]) -> (String, usize) {
+    let mut out = String::new();
+    let mut total = 0usize;
+    for path in paths {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue; // unreadable or not UTF-8 -- skip rather than fail the whole scan
+        };
+        let hits: Vec<(usize, kv_hook::Hit)> = content
+            .lines()
+            .enumerate()
+            .flat_map(|(i, line)| {
+                kv_hook::detect(line, false)
+                    .into_iter()
+                    .map(move |h| (i + 1, h))
+            })
+            .collect();
+        if hits.is_empty() {
+            continue;
+        }
+        total += hits.len();
+        out.push_str(&format!("{}\n", path.display()));
+        for (line_no, hit) in hits {
+            // `tool` means the credential needs more than one secret field (e.g. AWS is a key
+            // pair) -- `keyvalet set` only ever takes a single value, so it can't create one of
+            // these correctly. Only an MCP-connected agent can run the dedicated setup tool
+            // right now; `id` alone (no `tool`) is the common case `set` actually handles.
+            let suggestion = match (&hit.tool, &hit.id) {
+                (Some(tool), _) => kv_i18n::t(
+                    &format!("需要多字段设置，`keyvalet set` 做不了：请让接入 KeyValet MCP 的 AI agent 调用 {tool}"),
+                    &format!("needs multi-field setup that `keyvalet set` can't do: ask an AI agent connected to KeyValet's MCP server to run {tool}"),
+                ),
+                (None, Some(id)) => format!("keyvalet set {id} <name>"),
+                (None, None) => "keyvalet set <type> <name>".to_string(),
+            };
+            out.push_str(&format!(
+                "  :{line_no}\t{} ({})\t{suggestion}\n",
+                hit.label, hit.preview
+            ));
+        }
+    }
+    (out, total)
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use super::scan_report;
+    use std::io::Write;
+
+    fn write_tmp(name: &str, content: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(name);
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(content.as_bytes())
+            .unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn reports_a_secret_with_its_line_number_and_a_set_suggestion() {
+        let (_dir, path) = write_tmp(
+            ".env",
+            "APP_NAME=demo\nOPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n",
+        );
+        let (report, total) = scan_report(std::slice::from_ref(&path));
+        assert_eq!(total, 1);
+        assert!(report.contains(&path.display().to_string()));
+        assert!(report.contains(":2"));
+        assert!(report.contains("keyvalet set openai <name>"));
+        assert!(
+            !report.contains("sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"),
+            "must only show the masked preview"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_file_with_no_secrets_reports_nothing() {
+        let (_dir, path) = write_tmp(".env", "APP_NAME=demo\nDEBUG=true\n");
+        let (report, total) = scan_report(&[path]);
+        assert_eq!(total, 0);
+        assert_eq!(report, "");
+    }
+
+    #[test]
+    fn a_missing_file_is_skipped_without_failing_the_rest_of_the_scan() {
+        let (_dir, present) =
+            write_tmp(".env", "KEY=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n");
+        let missing = present.parent().unwrap().join("does-not-exist");
+        let (_report, total) = scan_report(&[missing, present]);
+        assert_eq!(total, 1);
+    }
+
+    #[test]
+    fn aws_keys_suggest_the_dedicated_setup_tool_not_a_plain_set() {
+        // Not AWS's own well-known AKIA...EXAMPLE key -- `looks_random` filters out anything
+        // matching "example" as an obvious placeholder, which would defeat this test.
+        let (_dir, path) = write_tmp(".env", "AWS_ACCESS_KEY_ID=AKIAZQ3EXFAKE7NMKLPQ\n");
+        let (report, _total) = scan_report(&[path]);
+        assert!(report.contains("credential_setup_aws"));
     }
 }

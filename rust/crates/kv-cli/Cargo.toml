@@ -10,9 +10,13 @@ path = "src/main.rs"
 
 [dependencies]
 kv-core = { path = "../kv-core" }
+kv-hook = { path = "../kv-hook" }
 kv-i18n = { path = "../kv-i18n" }
 kv-platform = { path = "../kv-platform" }
 kv-vault = { path = "../kv-vault" }
 serde_json = "1"
 rpassword = "7"
 libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

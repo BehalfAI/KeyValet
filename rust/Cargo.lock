@@ -1040,12 +1040,14 @@ name = "kv-cli"
 version = "0.1.0"
 dependencies = [
  "kv-core",
+ "kv-hook",
  "kv-i18n",
  "kv-platform",
  "kv-vault",
  "libc",
  "rpassword",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
