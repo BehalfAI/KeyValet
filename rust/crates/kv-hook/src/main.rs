@@ -7,6 +7,10 @@
 //! For `cursor-shell`/`cursor-mcp` (Cursor), it's the opposite: Cursor's docs say a missing or
 //! schema-invalid response *blocks* the gated action, so every failure mode for these two modes
 //! instead prints an explicit `{"permission": "allow"}` -- see the module doc comment in `lib.rs`.
+//!
+//! For `grok-tool` (Grok Build), a deny is the exit code, not the JSON -- `exit(2)` on a hit,
+//! falling through to the default "print nothing, exit 0" otherwise, which is also Grok's own
+//! allow case -- see the module doc comment in `lib.rs`.
 
 use std::io::Read;
 
@@ -49,6 +53,12 @@ fn main() {
     match mode.as_str() {
         "cursor-shell" => print!("{}", kv_hook::handle_cursor_shell(&input)),
         "cursor-mcp" => print!("{}", kv_hook::handle_cursor_mcp(&input)),
+        "grok-tool" => {
+            if let Some(out) = kv_hook::handle_grok_tool(&input) {
+                print!("{out}");
+                std::process::exit(2);
+            }
+        }
         _ => {
             if let Some(out) = kv_hook::handle(&mode, &input) {
                 print!("{out}");

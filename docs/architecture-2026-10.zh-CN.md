@@ -320,7 +320,7 @@ pub trait TemplateSource: Send + Sync {
 | Claude Code | 插件 `hooks.json` 或 `settings.json` | `UserPromptSubmit`、`PreToolUse`（Write/Edit/MultiEdit/NotebookEdit/Bash）、`PermissionRequest`、`PostToolUse` | JSON：`permissionDecision` allow/deny/ask/defer、`updatedInput`、`additionalContext` | 现有实现迁移为适配器 |
 | Codex | `~/.codex/hooks.json` 或 `config.toml [hooks]` | `PreToolUse`（同名同结构） | 同 Claude Code | 官方文档承认不覆盖全部 shell 路径，文档标注为降级保护 |
 | Cursor | `~/.cursor/hooks.json`、`.cursor/hooks.json` | `beforeShellExecution`、`beforeMCPExecution`（2026-10 核实：这两个是仅有的能拒绝的事件；`beforeReadFile` 是只读观察型，拿不到否决权，`preToolUse` 是更泛化的工具级事件，这次没有用它，直接挂在前两个专用事件上） | stdout 一段 JSON：`{"permission": "allow"\|"deny"\|"ask", "user_message", "agent_message"}`；退出码 2 也等价于 deny，但正常路径是 stdout | `permission: "ask"` 虽然在 schema 里但 Cursor 不强制执行，等于静默放行——所以 `kv-hook` 从不输出 `ask`，`tool` 模式里判定为 ask 的场景在这两个事件下一律变成 deny。实现没有做 §4.1 设想的通用 `RuntimeAdapter`/manifest 抽象，而是在 `kv-hook` 里直接加了 `cursor-shell`/`cursor-mcp` 两个专用 CLI 子命令，复用同一套密钥检测核心；`beforeMCPExecution` 的 `tool_input` 是 JSON 字符串而不是对象，且工具名不是 Claude Code 的五种已知形状之一，所以改用递归扫描所有字符串字段的办法，而不是按工具名取字段 |
-| Grok | 待核实 | 待核实 | 待核实 | 先 MCP-only 接入；适配器为空实现，有 hook 能力后再填 |
+| Grok | `~/.grok/hooks/*.json`（用户级，默认信任）、`<project>/.grok/hooks/*.json`（项目级，需 `/hooks-trust`） | `PreToolUse`（唯一能拦截的事件；`UserPromptSubmit`/`PostToolUse`/`Stop` 等也原生支持，但只是观察型） | 退出码：0 = 放行，2 = 拒绝（2026-10 核实：Grok 会读 Claude Code 的 hook 配置做兼容，但不解析 `hookSpecificOutput.permissionDecision` 这个嵌套输出，读不懂就当放行——真正生效的只有退出码） | 不能 ask；MCP 原生支持（`grok mcp add`，工具命名 `server__tool`），不需要 Grok 专属代码 |
 
 安装：`keyvalet hooks install [--runtime all|claude-code|codex|cursor|grok]` 读 manifest 的安装元数据，检测已安装运行时，写入或合并配置文件，幂等。
 
@@ -921,7 +921,7 @@ Team v1 的管理面，服务端渲染，不引入 SPA 框架：askama 模板 + 
 
 ## 20. 未决问题
 
-1. **Grok**：xAI 编码 agent 的 MCP 与 hook 能力未核实；按 MCP-only 接入，manifest 留空。需要在阶段 0 补一次调研。
+1. **Grok**：✅ 2026-10 已调研并接入（见 §5.2 表格、`docs/runtimes.md`）：MCP 与 hooks 都是原生支持，`kv-hook grok-tool` 已实现。未决的只是「没有真实 Grok Build 环境跑过，置信度中等」，不是「完全没调研」。
 2. **Linux 的交互审批**：TTY 确认码的安全性弱于生物识别，只允许 Quick；是否接受依赖 `pinentry` 一类 GUI 工具待定。
 3. **Mac helper 从 stdin/stdout 迁到 Unix socket** 的时机：涉及 launchd 与 `sudo` 流程改造，建议阶段 1 末。
 4. **iOS 端 Nitro 证明验证库**：无现成库，需自行拼装并做互操作测试。

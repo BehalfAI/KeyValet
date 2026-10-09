@@ -2,7 +2,7 @@
 //! they end up in KeyValet instead of the chat, files or shell.
 //!
 //! Direct port of `claude-plugin/hooks/secrets.mjs`, which this binary replaces as the thing the
-//! Claude Code plugin (and, best-effort, Codex) actually invokes. Four modes:
+//! Claude Code plugin (and, best-effort, Codex) actually invokes. Five modes:
 //!
 //!   kv-hook prompt         UserPromptSubmit: the user pasted a key -> tell the agent to store it
 //!                          in KeyValet.
@@ -11,20 +11,27 @@
 //!                          point the agent to KeyValet.
 //!   kv-hook cursor-shell   Cursor `beforeShellExecution`.
 //!   kv-hook cursor-mcp     Cursor `beforeMCPExecution`.
+//!   kv-hook grok-tool      Grok Build `PreToolUse`.
 //!
-//! Cursor gets its own two modes, not a translation of `prompt`/`tool`'s output, for two reasons
-//! (cursor.com/docs/hooks, checked 2026-10): its schema for these two events is `{permission:
-//! "allow"|"deny"|"ask", user_message, agent_message}`, not Claude Code's `hookSpecificOutput`
-//! shape; and Cursor's docs say `"ask"` is accepted by the schema but not enforced today, so
-//! anything `tool` mode would show as "ask" has to become "deny" here instead -- an unenforced
-//! ask is the same as a silent allow, which isn't what a secret detector is for. The command
-//! surface (`main.rs`) also treats these two modes specially: Cursor's docs say a missing or
-//! schema-invalid response blocks the gated action, the opposite of Claude Code's fail-open-on-
-//! no-output convention -- so every early return for these two modes prints an explicit `allow`
-//! rather than nothing.
+//! Cursor and Grok each get their own mode(s), not a translation of `prompt`/`tool`'s output,
+//! because neither speaks Claude Code's `hookSpecificOutput` shape even though both can *load*
+//! Claude Code's hook config:
 //!
-//! "tool" mode (and both Cursor modes) also catch secrets KeyValet already handed the agent this
-//! session (`credential_get` / `credential_totp_code` / `credential_access_token` /
+//! - Cursor's schema for its two blocking events is `{permission: "allow"|"deny"|"ask",
+//!   user_message, agent_message}` (cursor.com/docs/hooks, checked 2026-10); `"ask"` is accepted
+//!   by the schema but not enforced today, so anything `tool` mode would show as "ask" has to
+//!   become "deny" here instead -- an unenforced ask is the same as a silent allow. `main.rs`
+//!   also treats Cursor's two modes specially: a missing or schema-invalid response blocks the
+//!   gated action there, the opposite of Claude Code's fail-open-on-no-output convention -- so
+//!   every early return for these two modes prints an explicit `allow` rather than nothing.
+//! - Grok reads hook *config* from `~/.claude/settings.json` for compatibility but, per 2026-10
+//!   field reports (docs.x.ai/build/features/hooks; independent testing writeups), does not
+//!   parse the nested `hookSpecificOutput.permissionDecision` *output* -- an unrecognized
+//!   decision is silently treated as absent, i.e. allow. Its actual contract is exit code (0 =
+//!   allow, 2 = deny); `main.rs` does the `exit(2)` when `handle_grok_tool` returns `Some`.
+//!
+//! "tool" mode and the Cursor/Grok modes also catch secrets KeyValet already handed the agent
+//! this session (`credential_get` / `credential_totp_code` / `credential_access_token` /
 //! `credential_aws_credentials` record what they returned in `~/.keyvalet/run/*.redact`) by exact
 //! match -- this does not rely on the value looking like a known key format, unlike `PATTERNS`.
 //!
@@ -553,6 +560,43 @@ pub fn handle_cursor_mcp(input: &Value) -> Value {
     cursor_deny(&tool_reason(name, &hits, &returned_hits))
 }
 
+/// Grok Build `PreToolUse` -- the only Grok hook event that can actually block anything
+/// (docs.x.ai/build/features/hooks, and independently confirmed by testing: 2026-10 writeups
+/// report Grok reads Claude Code's hook *config* but does not parse Claude's nested
+/// `hookSpecificOutput.permissionDecision` *output*, silently treating an unrecognized decision
+/// as absent, i.e. allow -- so this deliberately does not reuse `handle`'s Claude Code JSON
+/// shape. Grok's own contract: exit code (0 = allow, 2 = deny) is primary; this also prints a
+/// top-level `{"decision": "deny", "reason": ...}` as a secondary channel some docs describe, in
+/// case Grok reads stdout JSON too -- harmless if it doesn't. `main.rs` is responsible for the
+/// actual `exit(2)` when this returns `Some`.
+///
+/// Field casing on the input (`tool_name`/`tool_input` vs `toolName`/`toolInput`) isn't
+/// consistently confirmed across sources, so both are tried. Uses `mcp_tool_text`'s recursive
+/// scan rather than `tool_text`'s per-tool-name extraction: Grok's own tool-name vocabulary for
+/// its built-in tools isn't confirmed to match Claude Code's either, and scanning every string
+/// field doesn't depend on getting that guess right.
+pub fn handle_grok_tool(input: &Value) -> Option<Value> {
+    let name = input
+        .get("tool_name")
+        .or_else(|| input.get("toolName"))
+        .and_then(Value::as_str)
+        .unwrap_or("this tool call");
+    let empty = Value::Null;
+    let tool_input = input
+        .get("tool_input")
+        .or_else(|| input.get("toolInput"))
+        .unwrap_or(&empty);
+    let text = mcp_tool_text(tool_input);
+    let hits = detect(&text, false);
+    let returned_hits = detect_returned_secrets(&text);
+    if hits.is_empty() && returned_hits.is_empty() {
+        return None;
+    }
+    Some(
+        serde_json::json!({"decision": "deny", "reason": tool_reason(name, &hits, &returned_hits)}),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -757,6 +801,45 @@ mod tests {
             handle_cursor_mcp(&input),
             serde_json::json!({"permission": "allow"})
         );
+    }
+
+    #[test]
+    fn grok_tool_is_silent_for_an_ordinary_call() {
+        let input = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "echo hi"}});
+        assert!(handle_grok_tool(&input).is_none());
+    }
+
+    #[test]
+    fn grok_tool_denies_with_grok_native_shape_not_claude_codes() {
+        let input = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "curl -H 'x-api-key: sk-ant-api03-Zx9Yw8Vu7Ts6Rq5Po4Nm3Lk2Ji1Hg0FeDcBa-9z8y7x6w5v4u3t2' https://api.anthropic.com"},
+        });
+        let out = handle_grok_tool(&input).unwrap();
+        assert_eq!(out["decision"], "deny");
+        assert!(
+            out.get("hookSpecificOutput").is_none(),
+            "must not use Claude Code's output shape -- Grok doesn't parse it"
+        );
+        assert!(out["reason"].as_str().unwrap().contains("shell command"));
+    }
+
+    #[test]
+    fn grok_tool_accepts_camelcase_field_names_too() {
+        let input = serde_json::json!({
+            "toolName": "Bash",
+            "toolInput": {"command": "echo sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"},
+        });
+        assert!(handle_grok_tool(&input).is_some());
+    }
+
+    #[test]
+    fn grok_tool_scans_nested_params_regardless_of_tool_name() {
+        let input = serde_json::json!({
+            "tool_name": "some_unrecognized_native_tool_name",
+            "tool_input": {"config": {"env": {"KEY": "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"}}},
+        });
+        assert!(handle_grok_tool(&input).is_some());
     }
 
     #[test]

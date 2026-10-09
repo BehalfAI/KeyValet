@@ -187,6 +187,31 @@ elif [ -d "$HOME/.cursor" ]; then
   say "检测到已有 ~/.cursor/hooks.json，未覆盖；如需启用 KeyValet 的密钥检测，请手动加上 beforeShellExecution/beforeMCPExecution，command 用 \"$INSTALL_DIR/bin/kv-hook cursor-shell\" / \"$INSTALL_DIR/bin/kv-hook cursor-mcp\"" "Found an existing ~/.cursor/hooks.json, left untouched; to enable KeyValet's secret detection, manually add beforeShellExecution/beforeMCPExecution entries with command \"$INSTALL_DIR/bin/kv-hook cursor-shell\" / \"$INSTALL_DIR/bin/kv-hook cursor-mcp\""
 fi
 
+# Grok Build adapter (action-plan 4.3/4.2): personal hooks live in ~/.grok/hooks/*.json (one of
+# possibly several files in that directory, unlike Codex/Cursor's single hooks.json), always
+# trusted with no per-project gate. Writes KeyValet's own file there; never touches any other
+# file that directory might already have. See docs/runtimes.md for how confident we are in this.
+if [ -d "$HOME/.grok" ] && [ ! -e "$HOME/.grok/hooks/keyvalet.json" ]; then
+  mkdir -p "$HOME/.grok/hooks"
+  cat > "$HOME/.grok/hooks/keyvalet.json" <<EOF
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          { "type": "command", "command": "$INSTALL_DIR/bin/kv-hook grok-tool", "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}
+EOF
+  say "已为 Grok Build 写入 ~/.grok/hooks/keyvalet.json（密钥检测 hook，未独立核实 Grok 的 hook 行为，见 docs/runtimes.md）" "Wrote ~/.grok/hooks/keyvalet.json for Grok Build (secret-detection hook; Grok's hook behavior hasn't been independently verified, see docs/runtimes.md)"
+elif [ -d "$HOME/.grok" ]; then
+  say "检测到已有 ~/.grok/hooks/keyvalet.json，未覆盖" "Found an existing ~/.grok/hooks/keyvalet.json, left untouched"
+fi
+
 echo
 say "安装完成。" "Installation complete."
 echo
