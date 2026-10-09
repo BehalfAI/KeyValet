@@ -306,6 +306,6 @@ keyvalet grant-mode all                       # 切换授权范围（per-credent
 ## 开发
 
 ```sh
-npm install
-npm test        # 在临时目录中以普通用户身份测试凭证库与各协议（本地模拟服务端 + RFC/AWS 官方测试向量）
+cd rust
+cargo test --workspace --locked   # 在临时目录中以普通用户身份测试凭证库与各协议（本地模拟服务端 + RFC/AWS 官方测试向量），不需要 root
 ```

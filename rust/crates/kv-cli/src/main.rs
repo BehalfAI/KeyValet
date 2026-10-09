@@ -30,7 +30,8 @@ fn usage() -> String {
         \u{20}\u{20}audit [行数]                       查看审计日志（默认 50 行）\n\
         \u{20}\u{20}grant-mode [per-use|per-credential|per-session|remember [小时]|forget]\n\
         \u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}查看/设置授权模式：每次 / 每个凭证 / 每个会话按 Touch ID，或按一次后记住一段时间\n\
-        \u{20}\u{20}scan                               在常见配置文件（.env、~/.claude.json 等）里找可能的密钥（只检测，不改动文件）",
+        \u{20}\u{20}scan [--report-only]               在常见配置文件（.env、~/.claude.json 等）里找可能的密钥，弹窗勾选后导入并从原文件移除（备份在 <file>.bak-keyvalet）；加 --report-only 只报告不改动\n\
+        \u{20}\u{20}\u{20}\u{20}\u{20}\u{20}--report-only                  只扫描和报告，不弹窗、不导入、不改动任何文件",
         "Usage: keyvalet <command>\n\n\
         \u{20}\u{20}types                              List credential types\n\
         \u{20}\u{20}list [type]                        List credentials (without values)\n\
@@ -45,7 +46,8 @@ fn usage() -> String {
         \u{20}\u{20}audit [lines]                      Show the audit log (default 50 lines)\n\
         \u{20}\u{20}grant-mode [per-use|per-credential|per-session|remember [hours]|forget]\n\
         \u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}Show/set grant mode: Touch ID per use / per credential / per session, or once and remember for a while\n\
-        \u{20}\u{20}scan                               Look for possible secrets in common config files (.env, ~/.claude.json, ...); detects only, never changes a file",
+        \u{20}\u{20}scan [--report-only]               Look for possible secrets in common config files (.env, ~/.claude.json, ...); shows a checkbox dialog, imports what's picked, and removes it from the file (backup at <file>.bak-keyvalet); add --report-only to only report, never change anything\n\
+        \u{20}\u{20}\u{20}\u{20}\u{20}\u{20}--report-only                  Only scan and report; no dialog, no import, no file changes",
     )
 }
 
@@ -459,7 +461,7 @@ fn main() {
             let start = lines.len().saturating_sub(n);
             println!("{}", lines[start..].join("\n"));
         }
-        "scan" => scan(),
+        "scan" => scan(&args, &vault, &client),
         other => fatal(&kv_i18n::t(
             &format!("未知命令 {other}\n\n{}", usage()),
             &format!("Unknown command {other}\n\n{}", usage()),
@@ -519,18 +521,307 @@ fn scan_paths() -> Vec<std::path::PathBuf> {
     paths
 }
 
-/// `keyvalet scan` (action-plan 4.1): a deliberately read-only first slice. Finds secret-shaped
-/// strings in the usual places and prints where, with a suggested `keyvalet set` command for
-/// each -- but does not import anything or touch any file. The full plan (native checkbox
-/// dialog, import, placeholder rewrite, delete-the-plaintext-after-confirming) writes to the
-/// user's real config files; that's a materially riskier feature than reporting what's there, so
-/// it's left as a follow-up rather than shipped without a chance to review the rewrite logic
-/// specifically. Reuses `kv_hook::detect` (the exact same engine the `tool`/`prompt` hooks use)
-/// line by line, so results and recognized services match what the hooks would flag.
-fn scan() {
-    let (report, total) = scan_report(&scan_paths());
-    print!("{report}");
-    if total == 0 {
+struct ScanHit {
+    path: std::path::PathBuf,
+    line_no: usize,
+    hit: kv_hook::Hit,
+    /// The real, unmasked matched text -- needed to store the real value and to find/remove it
+    /// from the file. Never printed; only `hit.preview` goes to the terminal or a dialog.
+    raw: String,
+}
+
+/// The pure scanning step: given files (assumed to already exist -- `scan_paths` filters for
+/// that; a test can pass tempdir paths directly), reads each as text and detects line by line.
+/// Separated from path resolution and from the interactive/import steps below so each can be
+/// tested on its own.
+fn scan_hits(paths: &[std::path::PathBuf]) -> Vec<ScanHit> {
+    let mut out = Vec::new();
+    for path in paths {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue; // unreadable or not UTF-8 -- skip rather than fail the whole scan
+        };
+        for (i, line) in content.lines().enumerate() {
+            for (raw, hit) in kv_hook::detect_with_values(line, false) {
+                out.push(ScanHit {
+                    path: path.clone(),
+                    line_no: i + 1,
+                    hit,
+                    raw,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// What to do about a hit: credentials needing more than one secret field (e.g. AWS's key pair,
+/// flagged via `tool` rather than plain `id`) can't be created by `keyvalet set` -- it only ever
+/// takes a single value -- so this points at the MCP setup tool instead. `id` alone is the
+/// common case `set` actually handles; no `id` at all (an unrecognized generic secret) has no
+/// concrete type to suggest. Also used to decide which hits the interactive import below offers.
+fn suggestion(hit: &kv_hook::Hit) -> String {
+    match (&hit.tool, &hit.id) {
+        (Some(tool), _) => kv_i18n::t(
+            &format!("需要多字段设置，`keyvalet set` 做不了：请让接入 KeyValet MCP 的 AI agent 调用 {tool}"),
+            &format!("needs multi-field setup that `keyvalet set` can't do: ask an AI agent connected to KeyValet's MCP server to run {tool}"),
+        ),
+        (None, Some(id)) => format!("keyvalet set {id} <name>"),
+        (None, None) => "keyvalet set <type> <name>".to_string(),
+    }
+}
+
+/// The per-file, per-line report `scan` always prints first -- what a `--report-only` run, or a
+/// run that finds nothing importable, stops at.
+fn render_report(hits: &[ScanHit]) -> String {
+    let mut out = String::new();
+    let mut last: Option<&std::path::Path> = None;
+    for h in hits {
+        if last != Some(h.path.as_path()) {
+            out.push_str(&format!("{}\n", h.path.display()));
+            last = Some(h.path.as_path());
+        }
+        out.push_str(&format!(
+            "  :{}\t{} ({})\t{}\n",
+            h.line_no,
+            h.hit.label,
+            h.hit.preview,
+            suggestion(&h.hit)
+        ));
+    }
+    out
+}
+
+/// A dialog checkbox-list item label for one hit -- unique per (path, line, label, preview), so
+/// the string the user picks can be matched straight back to its `ScanHit` with no separate ID
+/// scheme. Never includes the real value, only the masked preview.
+/// `idx` (the item's position in the dialog's item list) makes this unique even when two
+/// different hits happen to render identically otherwise -- e.g. two distinct secrets on the
+/// same line whose masked previews happen to come out the same (`mask` only reveals a few
+/// prefix/suffix characters). Without that, matching the user's selection back by string equality
+/// could silently pick up both when only one was checked.
+fn dialog_label(idx: usize, h: &ScanHit) -> String {
+    format!(
+        "[{}] {} :{} -- {} ({})",
+        idx + 1,
+        h.path.display(),
+        h.line_no,
+        h.hit.label,
+        h.hit.preview
+    )
+}
+
+/// A deterministic default credential name from where it was found -- there's no further prompt
+/// per item, so the name has to come from somewhere recognizable. `.env` -> "env", `.env.local`
+/// -> "env-local", `.zshrc` -> "zshrc", `mcp.json` -> "mcp-json".
+fn credential_name_from_path(path: &std::path::Path) -> String {
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("secret");
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim_matches('-');
+    if cleaned.is_empty() {
+        "secret".to_string()
+    } else {
+        cleaned.to_string()
+    }
+}
+
+/// Picks a name that doesn't collide with an existing credential of the same type (checked
+/// against the real vault) or with another one picked earlier in this same run (`claimed`).
+/// Never overwrites -- on a collision it appends `-2`, `-3`, ... until one is free, since there's
+/// no reliable way to tell whether an existing same-type/same-name credential already holds this
+/// exact value without decrypting it.
+fn unique_name(
+    vault: &Vault,
+    ty: &str,
+    base: &str,
+    claimed: &mut std::collections::HashSet<String>,
+) -> String {
+    let mut candidate = base.to_string();
+    let mut n = 2;
+    while claimed.contains(&format!("{ty}/{candidate}"))
+        || vault.exists(ty, &candidate).unwrap_or(false)
+    {
+        candidate = format!("{base}-{n}");
+        n += 1;
+    }
+    claimed.insert(format!("{ty}/{candidate}"));
+    candidate
+}
+
+/// What a removed secret's value is replaced with in the file -- deliberately not a working
+/// substitute (there's no runtime that resolves a `${KEYVALET:...}`-style reference back into a
+/// real value yet, see docs/runtimes.md), so inserting one would make the file look migrated
+/// while silently breaking whatever reads it. An obviously-broken, loudly-named placeholder fails
+/// immediately and visibly instead, and points at the one thing that does work today:
+/// `keyvalet get` for manual rewiring.
+fn placeholder_for(ty: &str, name: &str) -> String {
+    format!("KEYVALET_MOVED_RUN_keyvalet_get_{ty}_{name}_TO_RETRIEVE")
+}
+
+/// Applies every `(line_no, real value -> placeholder)` replacement to `content`, scoped to the
+/// specific line each hit was found on -- not a global substitution. A global replace would also
+/// mangle an unselected secret elsewhere in the file if its exact text happened to appear as a
+/// substring of a selected one (e.g. one token containing another as a prefix); scoping to the
+/// line that `detect_with_values` actually matched on avoids that, and only has to touch the
+/// lines that need it. `split_inclusive('\n')` keeps whatever line ending each line already had
+/// (bare `\n` or `\r\n`) instead of normalizing them.
+fn rewrite_content(content: &str, replacements: &[(usize, String, String)]) -> String {
+    let mut by_line: std::collections::HashMap<usize, Vec<(&str, &str)>> = Default::default();
+    for (line_no, raw, placeholder) in replacements {
+        by_line
+            .entry(*line_no)
+            .or_default()
+            .push((raw.as_str(), placeholder.as_str()));
+    }
+    let mut out = String::with_capacity(content.len());
+    for (i, chunk) in content.split_inclusive('\n').enumerate() {
+        match by_line.get(&(i + 1)) {
+            None => out.push_str(chunk),
+            Some(subs) => {
+                let mut line = chunk.to_string();
+                for (raw, placeholder) in subs {
+                    line = line.replace(raw, placeholder);
+                }
+                out.push_str(&line);
+            }
+        }
+    }
+    out
+}
+
+/// `None` if `SUDO_UID` is `0`, matching `kv_platform::macos`'s `invoking_user` -- there's no
+/// real non-root user to drop privileges to in that case (e.g. kv-cli invoked via `sudo -u root
+/// sudo ...`), so the caller should refuse rather than running osascript as root itself.
+fn sudo_invoking_user() -> Option<(u32, u32)> {
+    let uid: u32 = std::env::var("SUDO_UID").ok()?.parse().ok()?;
+    let gid: u32 = std::env::var("SUDO_GID").ok()?.parse().ok()?;
+    if uid == 0 {
+        return None;
+    }
+    Some((uid, gid))
+}
+
+fn escape_applescript_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Runs an AppleScript with privileges dropped to the user who invoked `sudo` -- root can't reach
+/// that user's GUI session directly. Mirrors what
+/// `kv_platform::macos::RootUserDialogConfirmer` does for the helper daemon, duplicated here in
+/// miniature: that version is async (tokio, for the helper's long-running event loop) and kv-cli
+/// is a plain synchronous binary, so pulling in tokio for one dialog call wasn't worth it.
+/// `None` means the dialog couldn't even be attempted (no `SUDO_UID`/`SUDO_GID` -- e.g. kv-cli
+/// invoked as literal root, not via `sudo` -- or `osascript` itself failed to run).
+fn run_osascript_as_user(script: &str, args: &[&str]) -> Option<(i32, String)> {
+    let (uid, gid) = sudo_invoking_user()?;
+    use std::os::unix::process::CommandExt;
+    let mut cmd = std::process::Command::new(kv_platform::paths::OSASCRIPT_BIN);
+    cmd.arg("-e").arg(script).arg("--").args(args);
+    cmd.uid(uid)
+        .gid(gid)
+        .current_dir("/")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .stdin(std::process::Stdio::null());
+    let out = cmd.output().ok()?;
+    Some((
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+    ))
+}
+
+/// Shows a native multi-select checkbox-style list in the invoking user's GUI session
+/// (AppleScript's `choose from list ... with multiple selections allowed`). `None` means the
+/// dialog couldn't be shown at all (see `run_osascript_as_user`). `Some(vec![])` covers both
+/// Cancel and "OK with nothing checked" -- the same outcome here (import nothing) -- so callers
+/// don't need to tell them apart. Items are passed as actual argv list elements, not interpolated
+/// into the script text, so arbitrary file paths/previews in them can't affect the AppleScript
+/// itself.
+fn choose_from_list(prompt: &str, items: &[String]) -> Option<Vec<String>> {
+    if items.is_empty() {
+        return Some(Vec::new());
+    }
+    let script = format!(
+        r#"on run argv
+  try
+    with timeout of 120 seconds
+      set r to choose from list argv with title "KeyValet" with prompt "{}" with multiple selections allowed and empty selection allowed
+    end timeout
+  on error
+    return ""
+  end try
+  if r is false then return ""
+  set out to ""
+  repeat with i in r
+    set out to out & i & linefeed
+  end repeat
+  return out
+end run"#,
+        escape_applescript_string(prompt)
+    );
+    let item_refs: Vec<&str> = items.iter().map(String::as_str).collect();
+    let (code, out) = run_osascript_as_user(&script, &item_refs)?;
+    if code != 0 {
+        return None;
+    }
+    Some(
+        out.lines()
+            .map(str::to_string)
+            .filter(|s| !s.is_empty())
+            .collect(),
+    )
+}
+
+/// Shows a native two-button confirmation in the invoking user's GUI session. `false` on Cancel,
+/// on a timeout, or if the dialog couldn't be shown at all -- "did nothing" is always the safe
+/// default for this tool.
+fn confirm_yes_no(message: &str, yes_label: &str, no_label: &str) -> bool {
+    let script = format!(
+        r#"on run argv
+  try
+    with timeout of 120 seconds
+      set r to display dialog "{}" with title "KeyValet" buttons {{"{}", "{}"}} default button "{}" cancel button "{}" with icon caution
+    end timeout
+  on error
+    return "{}"
+  end try
+  return button returned of r
+end run"#,
+        escape_applescript_string(message),
+        escape_applescript_string(no_label),
+        escape_applescript_string(yes_label),
+        escape_applescript_string(yes_label),
+        escape_applescript_string(no_label),
+        escape_applescript_string(no_label),
+    );
+    matches!(run_osascript_as_user(&script, &[]), Some((0, out)) if out.trim() == yes_label)
+}
+
+/// `keyvalet scan` (action-plan 4.1). Scans the usual places, prints what it found, then -- the
+/// `tool`-less, `id`-having hits only, since those are the only ones `keyvalet set` can create
+/// correctly -- offers a native checkbox dialog to import some of them into the vault. Anything
+/// imported gets removed from its source file (backed up first) and replaced with an
+/// obviously-broken placeholder rather than a working substitute, since there's no runtime yet
+/// that resolves a reference back into a real value (see `placeholder_for`). Ends by asking,
+/// in one more native dialog, whether to delete the just-made backups now or keep them -- that's
+/// the "confirm, then delete the backup" step from the original plan: an explicit choice made
+/// right here, not an automatic deletion with no way to verify anything still works first.
+fn scan(args: &[String], vault: &Vault, client: &Value) {
+    let report_only = args.iter().any(|a| a == "--report-only");
+    let hits = scan_hits(&scan_paths());
+    print!("{}", render_report(&hits));
+    if hits.is_empty() {
         println!(
             "{}",
             kv_i18n::t(
@@ -538,68 +829,272 @@ fn scan() {
                 "No obvious secrets found in the usual places."
             )
         );
-    } else {
-        println!();
+        return;
+    }
+    println!();
+    println!(
+        "{}",
+        kv_i18n::t(
+            &format!("共 {} 条可能的密钥。", hits.len()),
+            &format!("{} possible secret(s) total.", hits.len())
+        )
+    );
+    if report_only {
         println!(
             "{}",
             kv_i18n::t(
-                &format!("共 {total} 条可能的密钥。只是检测，没有改动任何文件：要收进 KeyValet，用上面建议的命令逐条 set，再手动从原文件删掉。"),
-                &format!("{total} possible secret(s) total. This only detects, it didn't change any file: to store one in KeyValet, run the suggested `keyvalet set` command for it, then remove it from the original file by hand."),
+                "只是检测，没有改动任何文件：要收进 KeyValet，用上面建议的命令逐条处理。",
+                "This only detects, it didn't change any file: handle each one with the suggested command above."
+            )
+        );
+        return;
+    }
+
+    let importable: Vec<&ScanHit> = hits
+        .iter()
+        .filter(|h| h.hit.tool.is_none() && h.hit.id.is_some())
+        .collect();
+    if importable.is_empty() {
+        println!(
+            "{}",
+            kv_i18n::t(
+                "这些都需要按上面的建议手动处理，没有能直接导入的。",
+                "All of these need manual handling per the suggestions above; none can be imported directly."
+            )
+        );
+        return;
+    }
+
+    let items: Vec<String> = importable
+        .iter()
+        .enumerate()
+        .map(|(i, h)| dialog_label(i, h))
+        .collect();
+    let prompt = kv_i18n::t(
+        &format!("KeyValet 在这些地方发现了 {} 个可能的密钥。勾选要收进 KeyValet 的，不勾选就不会动那一条。", importable.len()),
+        &format!("KeyValet found {} possible secret(s) in these places. Check the ones to move into KeyValet; anything left unchecked is not touched.", importable.len()),
+    );
+    let Some(selected) = choose_from_list(&prompt, &items) else {
+        println!(
+            "{}",
+            kv_i18n::t(
+                "没能弹出选择窗口（没有通过 sudo 调用，或 osascript 失败），跳过导入；可以用上面建议的命令手动处理。",
+                "Couldn't show the selection dialog (not invoked via sudo, or osascript failed); skipping import. Handle them by hand with the suggested commands above."
+            )
+        );
+        return;
+    };
+    if selected.is_empty() {
+        println!(
+            "{}",
+            kv_i18n::t(
+                "没有勾选任何一条，没有做任何改动。",
+                "Nothing was checked; no changes were made."
+            )
+        );
+        return;
+    }
+    // Matched back by looking up the exact item string's position, not by re-deriving the label
+    // from the hit: the `[N]` prefix in `dialog_label` only disambiguates two hits that would
+    // otherwise render identically, so this has to go through the same strings the dialog showed.
+    let chosen: Vec<&ScanHit> = selected
+        .iter()
+        .filter_map(|s| items.iter().position(|it| it == s))
+        .map(|i| importable[i])
+        .collect();
+
+    let mut claimed_names = std::collections::HashSet::new();
+    // The name actually assigned travels with each imported hit -- `unique_name` may have
+    // disambiguated it (e.g. "env-2"), and the rewrite step below needs that exact name for the
+    // placeholder, not whatever `credential_name_from_path` would recompute from scratch.
+    let mut imported: Vec<(&ScanHit, String)> = Vec::new();
+    for h in &chosen {
+        let ty = h.hit.id.clone().unwrap();
+        let base = credential_name_from_path(&h.path);
+        let name = unique_name(vault, &ty, &base, &mut claimed_names);
+        let mut target = Map::new();
+        target.insert("type".into(), json!(ty));
+        target.insert("name".into(), json!(name));
+        target.insert("op".into(), json!("scanImport"));
+        let result = vault.set(SetParams {
+            r#type: ty.clone(),
+            name: name.clone(),
+            value: Some(h.raw.clone()),
+            description: Some(kv_i18n::t(
+                &format!("keyvalet scan 从 {}:{} 导入", h.path.display(), h.line_no),
+                &format!(
+                    "Imported by keyvalet scan from {}:{}",
+                    h.path.display(),
+                    h.line_no
+                ),
+            )),
+            type_description: Some(kv_i18n::t(
+                "keyvalet scan 自动创建",
+                "Auto-created by keyvalet scan",
+            )),
+            ..Default::default()
+        });
+        match result {
+            Ok(_) => {
+                target.insert("ok".into(), json!(true));
+                target.insert("client".into(), client.clone());
+                let _ = vault.audit(target);
+                println!(
+                    "{}",
+                    kv_i18n::t(
+                        &format!(
+                            "已导入 {ty}/{name}（来自 {}:{}）",
+                            h.path.display(),
+                            h.line_no
+                        ),
+                        &format!(
+                            "Imported {ty}/{name} (from {}:{})",
+                            h.path.display(),
+                            h.line_no
+                        )
+                    )
+                );
+                imported.push((h, name.clone()));
+            }
+            Err(e) => {
+                target.insert("ok".into(), json!(false));
+                target.insert("error".into(), json!(e.0));
+                target.insert("client".into(), client.clone());
+                let _ = vault.audit(target);
+                println!(
+                    "{}",
+                    kv_i18n::t(
+                        &format!("导入 {ty}/{name} 失败：{}，跳过（原文件未改动）", e.0),
+                        &format!(
+                            "Failed to import {ty}/{name}: {}, skipping (original file untouched)",
+                            e.0
+                        )
+                    )
+                );
+            }
+        }
+    }
+
+    if imported.is_empty() {
+        println!(
+            "{}",
+            kv_i18n::t(
+                "没有成功导入的，原文件都没有改动。",
+                "Nothing was imported successfully; no file was changed."
+            )
+        );
+        return;
+    }
+
+    let mut by_path: std::collections::BTreeMap<std::path::PathBuf, Vec<(&ScanHit, &str)>> =
+        Default::default();
+    for (h, name) in &imported {
+        by_path
+            .entry(h.path.clone())
+            .or_default()
+            .push((h, name.as_str()));
+    }
+    let mut backups = Vec::new();
+    for (path, hs) in &by_path {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue; // changed/vanished since the scan -- leave it alone
+        };
+        // The exact name assigned at import time (which may be e.g. "env-2" if "env" was already
+        // taken) -- not recomputed from the path, or two hits imported from the same file under
+        // disambiguated names would both get a placeholder pointing at just the first one.
+        let replacements: Vec<(usize, String, String)> = hs
+            .iter()
+            .map(|(h, name)| {
+                (
+                    h.line_no,
+                    h.raw.clone(),
+                    placeholder_for(&h.hit.id.clone().unwrap(), name),
+                )
+            })
+            .collect();
+        let mut backup = std::path::PathBuf::from(format!("{}.bak-keyvalet", path.display()));
+        let mut n = 2;
+        while backup.exists() {
+            backup = std::path::PathBuf::from(format!("{}.bak-keyvalet-{n}", path.display()));
+            n += 1;
+        }
+        if std::fs::copy(path, &backup).is_err() {
+            println!(
+                "{}",
+                kv_i18n::t(
+                    &format!("无法备份 {}，跳过改写这个文件（已导入的凭证仍然有效）", path.display()),
+                    &format!("Couldn't back up {}, skipping the rewrite for this file (the already-imported credentials are still valid)", path.display())
+                )
+            );
+            continue;
+        }
+        let new_content = rewrite_content(&content, &replacements);
+        if let Err(e) = std::fs::write(path, new_content) {
+            // `fs::write` truncates on open before writing, so a failure partway through can
+            // leave the file already-truncated rather than genuinely untouched -- the backup is
+            // the only way back at that point, so it must not be deleted here.
+            println!(
+                "{}",
+                kv_i18n::t(
+                    &format!("写入 {} 失败（{e}），文件内容可能已经被截断或损坏；备份保留在 {}，可以手动复制回去恢复", path.display(), backup.display()),
+                    &format!("Failed to write {} ({e}); its contents may already be truncated or corrupted. The backup was kept at {} -- copy it back by hand to recover", path.display(), backup.display())
+                )
+            );
+            continue;
+        }
+        println!(
+            "{}",
+            kv_i18n::t(
+                &format!(
+                    "已从 {} 移除 {} 条，备份在 {}",
+                    path.display(),
+                    hs.len(),
+                    backup.display()
+                ),
+                &format!(
+                    "Removed {} secret(s) from {}, backup at {}",
+                    hs.len(),
+                    path.display(),
+                    backup.display()
+                )
+            )
+        );
+        backups.push(backup);
+    }
+
+    if backups.is_empty() {
+        return;
+    }
+    let message = kv_i18n::t(
+        &format!("已导入 {} 个凭证，改写了 {} 个文件。现在删除刚才的备份文件吗？如果还没确认改写后一切正常，建议先保留。", imported.len(), backups.len()),
+        &format!("Imported {} credential(s) and rewrote {} file(s). Delete the backups made just now? If you haven't confirmed everything still works after the rewrite, it's safer to keep them for now.", imported.len(), backups.len()),
+    );
+    let delete_label = kv_i18n::t("删除备份", "Delete backups");
+    let keep_label = kv_i18n::t("保留备份", "Keep backups");
+    if confirm_yes_no(&message, &delete_label, &keep_label) {
+        for b in &backups {
+            let _ = std::fs::remove_file(b);
+        }
+        println!(
+            "{}",
+            kv_i18n::t("已删除备份文件。", "Backup files deleted.")
+        );
+    } else {
+        println!(
+            "{}",
+            kv_i18n::t(
+                "保留了备份文件，路径见上面的输出。",
+                "Kept the backup files; see the paths printed above."
             )
         );
     }
 }
 
-/// The pure part of `scan`: given a list of files (assumed to already exist -- `scan_paths`
-/// filters for that; a test can skip straight to passing in tempdir paths), reads each, detects
-/// line by line, and renders the per-file report. Returns the rendered text and the total hit
-/// count so `scan` can decide which closing message to print without re-parsing its own output.
-fn scan_report(paths: &[std::path::PathBuf]) -> (String, usize) {
-    let mut out = String::new();
-    let mut total = 0usize;
-    for path in paths {
-        let Ok(content) = std::fs::read_to_string(path) else {
-            continue; // unreadable or not UTF-8 -- skip rather than fail the whole scan
-        };
-        let hits: Vec<(usize, kv_hook::Hit)> = content
-            .lines()
-            .enumerate()
-            .flat_map(|(i, line)| {
-                kv_hook::detect(line, false)
-                    .into_iter()
-                    .map(move |h| (i + 1, h))
-            })
-            .collect();
-        if hits.is_empty() {
-            continue;
-        }
-        total += hits.len();
-        out.push_str(&format!("{}\n", path.display()));
-        for (line_no, hit) in hits {
-            // `tool` means the credential needs more than one secret field (e.g. AWS is a key
-            // pair) -- `keyvalet set` only ever takes a single value, so it can't create one of
-            // these correctly. Only an MCP-connected agent can run the dedicated setup tool
-            // right now; `id` alone (no `tool`) is the common case `set` actually handles.
-            let suggestion = match (&hit.tool, &hit.id) {
-                (Some(tool), _) => kv_i18n::t(
-                    &format!("需要多字段设置，`keyvalet set` 做不了：请让接入 KeyValet MCP 的 AI agent 调用 {tool}"),
-                    &format!("needs multi-field setup that `keyvalet set` can't do: ask an AI agent connected to KeyValet's MCP server to run {tool}"),
-                ),
-                (None, Some(id)) => format!("keyvalet set {id} <name>"),
-                (None, None) => "keyvalet set <type> <name>".to_string(),
-            };
-            out.push_str(&format!(
-                "  :{line_no}\t{} ({})\t{suggestion}\n",
-                hit.label, hit.preview
-            ));
-        }
-    }
-    (out, total)
-}
-
 #[cfg(test)]
 mod scan_tests {
-    use super::scan_report;
+    use super::{
+        credential_name_from_path, render_report, rewrite_content, scan_hits, unique_name,
+    };
     use std::io::Write;
 
     fn write_tmp(name: &str, content: &str) -> (tempfile::TempDir, std::path::PathBuf) {
@@ -618,8 +1113,10 @@ mod scan_tests {
             ".env",
             "APP_NAME=demo\nOPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n",
         );
-        let (report, total) = scan_report(std::slice::from_ref(&path));
-        assert_eq!(total, 1);
+        let hits = scan_hits(std::slice::from_ref(&path));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].raw, "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789");
+        let report = render_report(&hits);
         assert!(report.contains(&path.display().to_string()));
         assert!(report.contains(":2"));
         assert!(report.contains("keyvalet set openai <name>"));
@@ -632,9 +1129,9 @@ mod scan_tests {
     #[test]
     fn an_ordinary_file_with_no_secrets_reports_nothing() {
         let (_dir, path) = write_tmp(".env", "APP_NAME=demo\nDEBUG=true\n");
-        let (report, total) = scan_report(&[path]);
-        assert_eq!(total, 0);
-        assert_eq!(report, "");
+        let hits = scan_hits(&[path]);
+        assert!(hits.is_empty());
+        assert_eq!(render_report(&hits), "");
     }
 
     #[test]
@@ -642,8 +1139,8 @@ mod scan_tests {
         let (_dir, present) =
             write_tmp(".env", "KEY=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n");
         let missing = present.parent().unwrap().join("does-not-exist");
-        let (_report, total) = scan_report(&[missing, present]);
-        assert_eq!(total, 1);
+        let hits = scan_hits(&[missing, present]);
+        assert_eq!(hits.len(), 1);
     }
 
     #[test]
@@ -651,7 +1148,105 @@ mod scan_tests {
         // Not AWS's own well-known AKIA...EXAMPLE key -- `looks_random` filters out anything
         // matching "example" as an obvious placeholder, which would defeat this test.
         let (_dir, path) = write_tmp(".env", "AWS_ACCESS_KEY_ID=AKIAZQ3EXFAKE7NMKLPQ\n");
-        let (report, _total) = scan_report(&[path]);
+        let hits = scan_hits(&[path]);
+        assert!(hits[0].hit.tool.is_some());
+        let report = render_report(&hits);
         assert!(report.contains("credential_setup_aws"));
+    }
+
+    #[test]
+    fn credential_names_come_from_the_file_they_were_found_in() {
+        assert_eq!(
+            credential_name_from_path(std::path::Path::new(".env")),
+            "env"
+        );
+        assert_eq!(
+            credential_name_from_path(std::path::Path::new(".env.local")),
+            "env-local"
+        );
+        assert_eq!(
+            credential_name_from_path(std::path::Path::new(".zshrc")),
+            "zshrc"
+        );
+        assert_eq!(
+            credential_name_from_path(std::path::Path::new("/a/b/mcp.json")),
+            "mcp-json"
+        );
+    }
+
+    #[test]
+    fn unique_name_avoids_both_vault_collisions_and_same_run_collisions() {
+        let dir = tempfile::tempdir().unwrap();
+        // A fresh subdirectory, not the tempdir root itself: `Vault::init` only chmods a
+        // directory it creates -- an already-existing one (the tempdir root) keeps whatever
+        // permissions the OS gave it and fails the "not group/world readable" check.
+        let vault = kv_vault::Vault::new(dir.path().join("vault"));
+        vault.init().unwrap();
+        vault
+            .set(kv_vault::SetParams {
+                r#type: "openai".into(),
+                name: "env".into(),
+                value: Some("sk-proj-abcdefghijklmnopqrstuvwxyz0123456789".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let mut claimed = std::collections::HashSet::new();
+        // Collides with the credential that already exists in the vault.
+        assert_eq!(unique_name(&vault, "openai", "env", &mut claimed), "env-2");
+        // Collides with the name just claimed above, within this same run.
+        assert_eq!(unique_name(&vault, "openai", "env", &mut claimed), "env-3");
+        // A different type never collides with "openai/env".
+        assert_eq!(unique_name(&vault, "anthropic", "env", &mut claimed), "env");
+    }
+
+    #[test]
+    fn rewrite_removes_the_real_value_and_leaves_an_obviously_broken_placeholder() {
+        let content =
+            "APP_NAME=demo\nOPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n";
+        let out = rewrite_content(
+            content,
+            &[(
+                2,
+                "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789".to_string(),
+                super::placeholder_for("openai", "env"),
+            )],
+        );
+        assert!(!out.contains("sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"));
+        assert!(out.contains("KEYVALET_MOVED_RUN_keyvalet_get_openai_env_TO_RETRIEVE"));
+        assert!(
+            out.contains("APP_NAME=demo"),
+            "untouched lines must survive as-is"
+        );
+    }
+
+    #[test]
+    fn rewrite_only_touches_the_specific_line_a_hit_was_found_on() {
+        // "secret" (the selected, imported value) is also a literal substring of
+        // "unrelated-secret-token" on another line, which was never selected. A global
+        // find-and-replace across the whole file would mangle that unrelated line too; scoping
+        // the replacement to line 1 must leave line 2 completely alone.
+        let content = "KEY=secret\nOTHER=unrelated-secret-token\n";
+        let out = rewrite_content(
+            content,
+            &[(1, "secret".to_string(), "PLACEHOLDER".to_string())],
+        );
+        assert_eq!(out, "KEY=PLACEHOLDER\nOTHER=unrelated-secret-token\n");
+    }
+
+    #[test]
+    fn dialog_labels_stay_distinct_even_when_two_hits_render_identically_otherwise() {
+        let (_dir, path) = write_tmp(
+            ".env",
+            "A=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\nB=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n",
+        );
+        let hits = scan_hits(&[path]);
+        assert_eq!(hits.len(), 2);
+        // Same file, different lines -- dialog_label must still differ, driven by the `[N]`
+        // index rather than anything derived from the hit itself.
+        let a = super::dialog_label(0, &hits[0]);
+        let b = super::dialog_label(1, &hits[1]);
+        assert_ne!(a, b);
+        assert!(a.starts_with("[1]"));
+        assert!(b.starts_with("[2]"));
     }
 }

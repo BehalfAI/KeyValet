@@ -16,7 +16,7 @@ cargo test --workspace --locked
 
 CI runs exactly these four commands; a PR with `cargo clippy` warnings or unformatted code will not pass. Tests run as your normal user in temporary directories with local mock servers — no root, no network, no Touch ID needed. Install (`./scripts/install.sh`) only when you want to try the real flow.
 
-The TypeScript tree under `src/` predates the Rust rewrite and is kept for now; `npm install && npm test` still exercises it. New work goes in `rust/`.
+There used to be a TypeScript implementation under `src/`; it's gone now that the Rust rewrite in `rust/` is the only implementation. All new work goes there.
 
 ## Ground rules
 
@@ -37,7 +37,7 @@ The catalog lives in `scripts/build-catalog.mjs` (regenerate with `npm run templ
 
 ## Localization
 
-User-facing text is bilingual: wrap it with `t("中文", "English")` from `src/shared/i18n.ts`. In the root helper, call `t()` at the point of use (the language is set during the handshake), never in module-level constants. Tests run with `KEYVALET_LANG=zh`; `src/test/i18n.test.ts` checks that the English UI contains no Chinese.
+User-facing text is bilingual: wrap it with `kv_i18n::t("中文", "English")` (`rust/crates/kv-i18n`). In the root helper, call `t()` at the point of use (the language is set during the handshake), never in module-level constants. Tests run with `KEYVALET_LANG=zh`. Outside of `t()` calls, source code (comments, identifiers, non-bilingual strings) is English only.
 
 ## Reporting security issues
 

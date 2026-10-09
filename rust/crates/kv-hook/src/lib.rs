@@ -231,6 +231,18 @@ pub struct Hit {
 /// Find secrets in text. A match claimed by one pattern is blanked out before testing the next,
 /// broader one, so e.g. an Anthropic key isn't *also* reported as a generic bearer token.
 pub fn detect(text: &str, generic: bool) -> Vec<Hit> {
+    detect_with_values(text, generic)
+        .into_iter()
+        .map(|(_, h)| h)
+        .collect()
+}
+
+/// Same matching as `detect`, but also returns the real, unmasked matched text alongside each
+/// `Hit` -- needed only by `kv-cli scan`'s import step (to store the real value and find it in
+/// the file to remove it). Kept out of `Hit` itself so the common case (the `tool`/`prompt`
+/// hooks, which only ever need the masked `preview`) never carries a live secret in a struct that
+/// derives `Debug` -- one stray `{:?}` of a `Hit` must not be able to leak a real value.
+pub fn detect_with_values(text: &str, generic: bool) -> Vec<(String, Hit)> {
     if text.len() < 16 {
         return Vec::new();
     }
@@ -247,13 +259,16 @@ pub fn detect(text: &str, generic: bool) -> Vec<Hit> {
             if !seen.insert(v.to_string()) {
                 continue;
             }
-            hits.push(Hit {
-                id: Some(p.id.to_string()),
-                label: p.label.to_string(),
-                preview: if p.no_entropy { v.to_string() } else { mask(v) },
-                tool: p.tool.map(str::to_string),
-                ambiguous: p.ambiguous,
-            });
+            hits.push((
+                v.to_string(),
+                Hit {
+                    id: Some(p.id.to_string()),
+                    label: p.label.to_string(),
+                    preview: if p.no_entropy { v.to_string() } else { mask(v) },
+                    tool: p.tool.map(str::to_string),
+                    ambiguous: p.ambiguous,
+                },
+            ));
         }
         rest = re.replace_all(&rest, " ").to_string();
     }
@@ -267,13 +282,16 @@ pub fn detect(text: &str, generic: bool) -> Vec<Hit> {
                 continue;
             }
             seen.insert(v.to_string());
-            hits.push(Hit {
-                id: None,
-                label: "secret (password / token)".to_string(),
-                preview: mask(v),
-                tool: None,
-                ambiguous: false,
-            });
+            hits.push((
+                v.to_string(),
+                Hit {
+                    id: None,
+                    label: "secret (password / token)".to_string(),
+                    preview: mask(v),
+                    tool: None,
+                    ambiguous: false,
+                },
+            ));
         }
     }
     hits

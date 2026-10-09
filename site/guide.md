@@ -224,11 +224,11 @@ Each command runs through `sudo -k`, so it asks for your password every time.
 ## Development
 
 ```sh
-npm install
-npm test          # unit + integration tests in temp dirs with local mock servers; no root needed
+cd rust
+cargo test --workspace --locked   # unit + integration tests in temp dirs with local mock servers; no root needed
 ```
 
-Layout: `src/server` (MCP server, runs as you) · `src/helper` (root helper: vault, protocols, proxy, Touch ID gate) · `src/native/touchid.swift` · `src/cli` · `scripts/` (install, catalog build, optional n8n import).
+Layout: `rust/crates/kv-mcp` (MCP server, runs as you) · `kv-helper` (root helper: vault, protocols, proxy, Touch ID gate) · `kv-touchid` · `kv-cli` · `kv-hook` (secret-detection hook) · `scripts/` (install, catalog build, optional n8n import).
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md).
 

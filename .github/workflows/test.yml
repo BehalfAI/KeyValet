@@ -13,13 +13,10 @@ jobs:
         with:
           node-version: 20
       - run: npm ci
-      - run: npm test
       - name: Catalog is up to date
         run: |
           npm run --silent templates:build
           git diff --exit-code templates/catalog.json
-      - name: Touch ID helper compiles
-        run: swiftc -O -o /tmp/touchid src/native/touchid.swift
 
   rust:
     runs-on: macos-latest
