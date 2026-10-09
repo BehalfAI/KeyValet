@@ -49,3 +49,79 @@ fn dirs_home() -> std::path::PathBuf {
         .map(std::path::PathBuf::from)
         .unwrap_or_default()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn resolves_a_small_existing_file_to_its_absolute_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.txt");
+        std::fs::write(&path, b"hello").unwrap();
+        let resolved = resolve_secret_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(resolved, std::path::absolute(&path).unwrap());
+    }
+
+    #[test]
+    fn rejects_a_nonexistent_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does-not-exist");
+        let err = resolve_secret_file(path.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("not found") || err.contains("不存在"));
+    }
+
+    #[test]
+    fn rejects_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve_secret_file(dir.path().to_str().unwrap()).unwrap_err();
+        assert!(err.contains("regular file") || err.contains("普通文件"));
+    }
+
+    #[test]
+    fn rejects_a_file_over_64kb() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.bin");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(&vec![0u8; 64 * 1024 + 1]).unwrap();
+        let err = resolve_secret_file(path.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("too large") || err.contains("过大"));
+    }
+
+    #[test]
+    fn accepts_a_file_exactly_at_the_64kb_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exactly.bin");
+        std::fs::write(&path, vec![0u8; 64 * 1024]).unwrap();
+        assert!(resolve_secret_file(path.to_str().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn tilde_prefix_expands_to_the_real_home_directory() {
+        // Doesn't create or touch anything under $HOME -- a nonexistent path still proves
+        // expansion happened, because the error message shows the expanded absolute path, not
+        // a literal "~/...".
+        let home = std::env::var("HOME").unwrap();
+        let err = resolve_secret_file("~/kv-mcp-test-file-that-definitely-does-not-exist-xyz123")
+            .unwrap_err();
+        assert!(
+            err.contains(&home),
+            "expected the error to mention the expanded home dir {home}, got: {err}"
+        );
+    }
+
+    #[test]
+    fn read_secret_file_returns_the_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.txt");
+        std::fs::write(&path, b"sekrit-value").unwrap();
+        assert_eq!(read_secret_file(&path).unwrap(), "sekrit-value");
+    }
+
+    #[test]
+    fn read_secret_file_on_a_missing_path_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_secret_file(&dir.path().join("nope")).is_err());
+    }
+}

@@ -362,3 +362,182 @@ pub async fn graph_mail_test(opts: GraphMailOpts<'_>) -> Result<GraphMailResult,
         error: None,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn xoauth2_builds_the_expected_sasl_initial_response() {
+        let out = xoauth2("user@example.com", "tok-123");
+        let decoded = STANDARD.decode(out).unwrap();
+        assert_eq!(
+            decoded,
+            b"user=user@example.com\x01auth=Bearer tok-123\x01\x01"
+        );
+    }
+
+    #[test]
+    fn find_crlf_locates_the_first_line_terminator() {
+        assert_eq!(find_crlf(b"foo\r\nbar"), Some(3));
+        assert_eq!(find_crlf(b"no terminator here"), None);
+        assert_eq!(find_crlf(b"\r\n"), Some(0));
+    }
+
+    #[test]
+    fn clip_truncates_to_a_character_count_not_a_byte_count() {
+        assert_eq!(clip("hello world", 5), "hello");
+        assert_eq!(clip("short", 100), "short");
+        // Multi-byte characters: clip(_, 2) must not panic by cutting mid-codepoint.
+        assert_eq!(clip("日本語", 2), "日本");
+    }
+
+    #[tokio::test]
+    async fn graph_mail_test_reports_folder_and_recent_messages_on_success() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/me/mailFolders/inbox"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer tok-abc",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "displayName": "Inbox", "totalItemCount": 42, "unreadItemCount": 3
+                })),
+            )
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/me/mailFolders/inbox/messages"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "value": [{
+                        "receivedDateTime": "2026-01-01T00:00:00Z",
+                        "from": {"emailAddress": {"address": "sender@example.com"}},
+                        "subject": "Hello",
+                    }]
+                })),
+            )
+            .mount(&server)
+            .await;
+
+        let result = graph_mail_test(GraphMailOpts {
+            access_token: "tok-abc",
+            folder: None,
+            top: None,
+            base_url: Some(&server.uri()),
+        })
+        .await
+        .unwrap();
+
+        assert!(result.ok);
+        assert_eq!(result.folder, Some("Inbox".to_string()));
+        assert_eq!(result.total, Some(42));
+        assert_eq!(result.unread, Some(3));
+        let recent = result.recent.unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].from, "sender@example.com");
+        assert_eq!(recent[0].subject, "Hello");
+    }
+
+    #[tokio::test]
+    async fn graph_mail_test_surfaces_the_graph_error_code_and_message_on_failure() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/me/mailFolders/inbox"))
+            .respond_with(wiremock::ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "error": {"code": "InvalidAuthenticationToken", "message": "Access token is expired"}
+            })))
+            .mount(&server)
+            .await;
+
+        let result = graph_mail_test(GraphMailOpts {
+            access_token: "tok-expired",
+            folder: None,
+            top: None,
+            base_url: Some(&server.uri()),
+        })
+        .await
+        .unwrap();
+
+        assert!(!result.ok);
+        assert_eq!(result.http_status, Some(401));
+        assert_eq!(
+            result.error,
+            Some("InvalidAuthenticationToken: Access token is expired".to_string())
+        );
+        // Must not have gone on to call the messages endpoint after the folder lookup failed.
+        assert!(result.recent.is_none());
+    }
+
+    #[tokio::test]
+    async fn graph_mail_test_fails_if_the_messages_request_fails_after_the_folder_succeeds() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/me/mailFolders/inbox"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "displayName": "Inbox", "totalItemCount": 1, "unreadItemCount": 0
+                })),
+            )
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/me/mailFolders/inbox/messages"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(500).set_body_json(serde_json::json!({
+                    "error": {"code": "InternalServerError"}
+                })),
+            )
+            .mount(&server)
+            .await;
+
+        let result = graph_mail_test(GraphMailOpts {
+            access_token: "tok-abc",
+            folder: None,
+            top: None,
+            base_url: Some(&server.uri()),
+        })
+        .await
+        .unwrap();
+
+        assert!(!result.ok);
+        assert_eq!(result.http_status, Some(500));
+    }
+
+    #[tokio::test]
+    async fn graph_mail_test_uses_the_requested_folder_in_the_request_path() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/me/mailFolders/sentitems"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "displayName": "Sent Items"
+                })),
+            )
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/me/mailFolders/sentitems/messages",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"value": []})),
+            )
+            .mount(&server)
+            .await;
+
+        let result = graph_mail_test(GraphMailOpts {
+            access_token: "tok-abc",
+            folder: Some("sentitems"),
+            top: None,
+            base_url: Some(&server.uri()),
+        })
+        .await
+        .unwrap();
+        assert!(result.ok);
+        assert_eq!(result.folder, Some("Sent Items".to_string()));
+    }
+}

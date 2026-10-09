@@ -914,3 +914,115 @@ impl Server {
         .await
     }
 }
+
+#[cfg(test)]
+mod helper_tests {
+    use super::*;
+
+    #[test]
+    fn type_from_template_converts_camel_case_to_snake_case() {
+        assert_eq!(type_from_template("openAiApi"), "open_ai_api");
+    }
+
+    #[test]
+    fn type_from_template_leaves_plain_lowercase_ids_unchanged() {
+        assert_eq!(type_from_template("openai"), "openai");
+    }
+
+    #[test]
+    fn type_from_template_trims_a_leading_non_alnum_character() {
+        assert_eq!(type_from_template("-openai"), "openai");
+    }
+
+    #[test]
+    fn type_from_template_falls_back_to_api_key_when_empty() {
+        assert_eq!(type_from_template(""), "api_key");
+        assert_eq!(type_from_template("---"), "api_key");
+    }
+
+    #[test]
+    fn type_from_template_is_capped_at_64_characters() {
+        let long = "a".repeat(100);
+        assert_eq!(type_from_template(&long).len(), 64);
+    }
+
+    #[test]
+    fn host_from_url_template_renders_placeholders_and_extracts_the_host() {
+        let attrs = [("region".to_string(), "us".to_string())].into();
+        assert_eq!(
+            host_from_url_template("https://api.{{region}}.example.com/path", &attrs),
+            Some("api.us.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn host_from_url_template_rejects_non_https() {
+        let attrs = Default::default();
+        assert_eq!(
+            host_from_url_template("http://api.example.com", &attrs),
+            None
+        );
+    }
+
+    #[test]
+    fn host_from_url_template_rejects_an_unresolved_placeholder_in_the_host() {
+        // Missing attrs entry: the host ends up containing the literal "zzsecretzz" marker
+        // instead of a real value, and must not be reported as a usable host.
+        let attrs = Default::default();
+        assert_eq!(
+            host_from_url_template("https://{{missing}}.example.com", &attrs),
+            None
+        );
+    }
+
+    #[test]
+    fn host_from_url_template_rejects_an_unparseable_url() {
+        let attrs = Default::default();
+        assert_eq!(host_from_url_template("not a url", &attrs), None);
+    }
+
+    #[test]
+    fn clean_label_strips_control_characters_and_caps_length() {
+        assert_eq!(clean_label("hello\x00\x1fworld"), "hello  world");
+        assert_eq!(clean_label(&"x".repeat(200)).len(), 100);
+    }
+
+    #[test]
+    fn value_to_string_unwraps_a_json_string_without_quotes() {
+        assert_eq!(value_to_string(&json!("hello")), "hello");
+    }
+
+    #[test]
+    fn value_to_string_renders_other_json_types_as_their_text_form() {
+        assert_eq!(value_to_string(&json!(42)), "42");
+        assert_eq!(value_to_string(&json!(true)), "true");
+    }
+
+    #[test]
+    fn sdk_env_fills_in_known_templates_when_the_url_is_present() {
+        let urls = serde_json::json!({"api.openai.com": "https://api.openai.com"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let env = sdk_env(Some("openai"), &urls, "sk-test");
+        assert!(env.contains(&(
+            "OPENAI_BASE_URL".to_string(),
+            "https://api.openai.com/v1".to_string()
+        )));
+        assert!(env.contains(&("OPENAI_API_KEY".to_string(), "sk-test".to_string())));
+    }
+
+    #[test]
+    fn sdk_env_is_empty_for_an_unknown_template() {
+        let urls = Map::new();
+        assert!(sdk_env(Some("not-a-real-template"), &urls, "sk-test").is_empty());
+    }
+
+    #[test]
+    fn sdk_env_is_empty_when_the_template_s_url_entry_is_missing() {
+        // "openai" is known, but with no matching host in `urls` the pair is incomplete and
+        // nothing should be emitted (no half-configured SDK env).
+        let urls = Map::new();
+        assert!(sdk_env(Some("openai"), &urls, "sk-test").is_empty());
+    }
+}

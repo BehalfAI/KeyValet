@@ -34,3 +34,7 @@ tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 webpki-roots = "1"
 anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3"
+wiremock = "0.6"

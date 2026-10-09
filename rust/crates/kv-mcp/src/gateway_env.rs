@@ -138,3 +138,29 @@ pub fn cleanup_gateway_env() {
         let _ = std::fs::remove_file(f);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // write_gateway_env/write_secret_file/record_secrets/cleanup_gateway_env are deliberately not
+    // tested here: run_dir() is hardcoded to $HOME/.keyvalet/run (not injectable) and CREATED is
+    // a single global shared across the whole test binary, so exercising them directly would
+    // write real files into the developer's actual home directory and risk one test's cleanup
+    // deleting another concurrently-running test's files. sanitize/quote are the pure,
+    // self-contained parts.
+
+    #[test]
+    fn sanitize_keeps_the_allowed_characters_and_replaces_the_rest() {
+        assert_eq!(sanitize("session-abc_123.env"), "session-abc_123.env");
+        assert_eq!(sanitize("user@host:/path"), "user@host:_path");
+        assert_eq!(sanitize("has spaces/slashes"), "has_spaces_slashes");
+    }
+
+    #[test]
+    fn quote_wraps_in_single_quotes_and_escapes_embedded_ones() {
+        assert_eq!(quote("plain"), "'plain'");
+        assert_eq!(quote("it's"), r"'it'\''s'");
+        assert_eq!(quote(""), "''");
+    }
+}

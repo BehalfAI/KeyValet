@@ -392,3 +392,49 @@ async fn read_limited(res: reqwest::Response, limit: usize, host: &str) -> Resul
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escape_html_escapes_the_five_html_special_characters() {
+        assert_eq!(
+            escape_html(r#"<script>&"'</script>"#),
+            "&#60;script&#62;&#38;&#34;&#39;&#60;/script&#62;"
+        );
+    }
+
+    #[test]
+    fn escape_html_leaves_plain_text_untouched() {
+        assert_eq!(escape_html("plain text 123"), "plain text 123");
+    }
+
+    #[test]
+    fn page_embeds_the_title_and_body_in_the_html_template() {
+        let html = page("Authorization successful", "You can close this page.");
+        assert!(html.contains("Authorization successful"));
+        assert!(html.contains("You can close this page."));
+        assert!(html.starts_with("<!doctype html>"));
+    }
+
+    // discover_oidc's success path needs a real HTTPS endpoint (it hardcodes scheme == "https"
+    // and the system's real root certificates, with no injection seam for a local test server),
+    // so only the failure paths that never reach the network are covered here.
+
+    #[tokio::test]
+    async fn discover_oidc_rejects_a_non_https_issuer() {
+        let Err(err) = discover_oidc("http://issuer.example.com").await else {
+            panic!("expected a non-https issuer to be rejected");
+        };
+        assert!(err.contains("https"));
+    }
+
+    #[tokio::test]
+    async fn discover_oidc_rejects_an_unparseable_issuer() {
+        let Err(err) = discover_oidc("not a url").await else {
+            panic!("expected an unparseable issuer to be rejected");
+        };
+        assert!(err.contains("issuer") || err.contains("Invalid"));
+    }
+}
