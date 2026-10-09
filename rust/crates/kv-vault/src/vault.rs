@@ -90,7 +90,18 @@ impl Vault {
         }
         let mut key = [0u8; KEY_BYTES];
         key.copy_from_slice(&raw);
-        *self.key.lock().unwrap() = Some(Zeroizing::new(key));
+        let mut guard = self.key.lock().unwrap();
+        *guard = Some(Zeroizing::new(key));
+        // Best-effort: ask the OS to never swap out the page(s) holding the master key, so it
+        // can't end up on disk in a swap file if this machine's swap isn't encrypted. Failure
+        // (e.g. a locked-memory rlimit) isn't fatal -- this is defense in depth on top of the
+        // zeroize-on-drop handling, not the only thing standing between the key and disk.
+        if let Some(k) = guard.as_ref() {
+            unsafe {
+                libc::mlock(k.as_ptr() as *const libc::c_void, KEY_BYTES);
+            }
+        }
+        drop(guard);
 
         if self.data_path.exists() {
             self.assert_private(&self.data_path, false)?;
@@ -461,7 +472,7 @@ impl Vault {
 
     /// Reads a static credential's value. A protocol-based credential's secrets cannot be read this way.
     pub fn get(&self, ty: &str, name: &str) -> Result<GetResult> {
-        let (ty, name, c) = self.get_record(ty, name)?;
+        let (ty, name, mut c) = self.get_record(ty, name)?;
         if c.kind.is_some() && c.kind != Some(Kind::Static) {
             let kind = c.kind_or_static().as_str();
             return Err(VaultError::new(
@@ -475,14 +486,18 @@ impl Vault {
                 &format!("\"{ty}/{name}\" is proxy-only; its secret cannot be read. Use credential_http_request instead"),
             ));
         }
+        // `c` implements Drop (to scrub its secret fields when it goes out of scope), which means
+        // a field can't be moved out of it directly -- std::mem::take moves the value out and
+        // leaves an empty default behind instead, same effect as a move without actually cloning
+        // the secret into a second allocation first.
         Ok(GetResult {
             r#type: ty,
             name,
-            value: c.value,
-            fields: c.secrets,
-            description: c.description,
-            attributes: c.attributes,
-            updated_at: c.updated_at,
+            value: std::mem::take(&mut c.value),
+            fields: std::mem::take(&mut c.secrets),
+            description: std::mem::take(&mut c.description),
+            attributes: std::mem::take(&mut c.attributes),
+            updated_at: std::mem::take(&mut c.updated_at),
         })
     }
 

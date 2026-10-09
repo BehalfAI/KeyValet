@@ -191,11 +191,11 @@ pub async fn configure_http<C: Confirmer>(
             // Can't raise an error from here (`update_http`'s closure returns the new config, not a
             // Result); leave the record unchanged instead of applying a stale confirmation, and let
             // the post-check below turn this into a "please retry" error for the caller.
-            return rec.http;
+            return rec.http.clone();
         }
         Some(next_clone.clone())
     })?;
-    let final_http = vault.get_record(&ty, &name)?.2.http;
+    let final_http = vault.get_record(&ty, &name)?.2.http.clone();
     if final_http
         .as_ref()
         .map(|h| serde_json::to_value(h).unwrap())

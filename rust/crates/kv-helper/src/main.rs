@@ -233,6 +233,18 @@ async fn authenticate(
 #[tokio::main]
 async fn main() {
     unsafe { libc::umask(0o077) };
+    // A core dump on crash would write this process's whole memory -- including the master key
+    // and every decrypted secret currently in play -- to a file on disk in one shot. Zeroing
+    // secrets on drop (CredentialRecord's Drop impl) doesn't help against that: a crash dumps
+    // whatever was live at that instant, zeroed-and-already-freed memory or not. Disabling the
+    // dump entirely removes that path rather than trying to guess which crash is "safe."
+    unsafe {
+        let limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        libc::setrlimit(libc::RLIMIT_CORE, &limit);
+    }
     let self_path = std::env::current_exe().unwrap_or_default();
     if let Err(e) = verify_root_environment(&self_path, std::path::Path::new(HELPER_BIN), &[]) {
         fatal(&e);

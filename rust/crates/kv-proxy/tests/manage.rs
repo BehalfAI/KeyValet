@@ -337,7 +337,7 @@ async fn a_config_change_during_confirmation_is_detected_not_overwritten() {
     // The sneaky concurrent write must survive untouched -- the stale confirmation must not overwrite it.
     let (_, _, record) = vault.get_record("api_key", "svc").unwrap();
     assert_eq!(
-        record.http.unwrap().allowed_hosts,
+        record.http.clone().unwrap().allowed_hosts,
         vec!["sneaky.example.com".to_string()]
     );
 }

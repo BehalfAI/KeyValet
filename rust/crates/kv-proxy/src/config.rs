@@ -451,10 +451,22 @@ mod tests {
     use serde_json::json;
 
     fn static_rec() -> CredentialRecord {
+        // Not `..Default::default()`: CredentialRecord's Drop impl means the compiler can't move
+        // fields out of a temporary Default::default() for struct-update syntax either, so every
+        // field is listed explicitly instead.
         CredentialRecord {
+            kind: None,
             value: "secret-value".into(),
+            config: None,
+            secrets: None,
+            state: None,
+            generation: None,
+            http: None,
+            template: None,
+            description: String::new(),
             attributes: [("subdomain".to_string(), "api".to_string())].into(),
-            ..Default::default()
+            created_at: String::new(),
+            updated_at: String::new(),
         }
     }
 

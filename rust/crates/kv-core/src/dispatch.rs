@@ -649,14 +649,24 @@ fn set_static(vault: &Vault, p: &JsonMap) -> kv_vault::Result<Value> {
             let attributes = if !given.is_empty() || !vault.exists(&ty, &name).unwrap_or(false) {
                 given
             } else {
-                vault.get_record(&ty, &name)?.2.attributes
+                vault.get_record(&ty, &name)?.2.attributes.clone()
             };
+            // Not `..Default::default()`: CredentialRecord's Drop impl (it scrubs secret fields
+            // on drop) means the compiler can't move fields out of a temporary Default::default()
+            // for struct-update syntax either, so every field is listed explicitly instead.
             let synthetic = CredentialRecord {
                 kind: Some(Kind::Static),
                 value: value.clone().unwrap_or_default(),
+                config: None,
                 secrets: secrets.clone(),
+                state: None,
+                generation: None,
+                http: None,
+                template: None,
+                description: String::new(),
                 attributes,
-                ..Default::default()
+                created_at: String::new(),
+                updated_at: String::new(),
             };
             Some(kv_proxy::config::validate_http_config(
                 raw,
