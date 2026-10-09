@@ -1,18 +1,30 @@
-//! KeyValet hook for agent coding runtimes (Claude Code, Codex, …): notices secrets so they end
-//! up in KeyValet instead of the chat, files or shell.
+//! KeyValet hook for agent coding runtimes (Claude Code, Codex, Cursor, …): notices secrets so
+//! they end up in KeyValet instead of the chat, files or shell.
 //!
 //! Direct port of `claude-plugin/hooks/secrets.mjs`, which this binary replaces as the thing the
-//! Claude Code plugin (and, best-effort, Codex) actually invokes. Two modes, same contract as the
-//! JS version:
+//! Claude Code plugin (and, best-effort, Codex) actually invokes. Four modes:
 //!
-//!   kv-hook prompt   UserPromptSubmit: the user pasted a key -> tell the agent to store it in
-//!                    KeyValet.
-//!   kv-hook tool     PreToolUse (Write/Edit/MultiEdit/NotebookEdit/Bash): a literal key is about
-//!                    to be written to a file or a command -> ask the user first and point the
-//!                    agent to KeyValet.
+//!   kv-hook prompt         UserPromptSubmit: the user pasted a key -> tell the agent to store it
+//!                          in KeyValet.
+//!   kv-hook tool           PreToolUse (Write/Edit/MultiEdit/NotebookEdit/Bash): a literal key is
+//!                          about to be written to a file or a command -> ask the user first and
+//!                          point the agent to KeyValet.
+//!   kv-hook cursor-shell   Cursor `beforeShellExecution`.
+//!   kv-hook cursor-mcp     Cursor `beforeMCPExecution`.
 //!
-//! "tool" mode also catches secrets KeyValet already handed the agent this session
-//! (`credential_get` / `credential_totp_code` / `credential_access_token` /
+//! Cursor gets its own two modes, not a translation of `prompt`/`tool`'s output, for two reasons
+//! (cursor.com/docs/hooks, checked 2026-10): its schema for these two events is `{permission:
+//! "allow"|"deny"|"ask", user_message, agent_message}`, not Claude Code's `hookSpecificOutput`
+//! shape; and Cursor's docs say `"ask"` is accepted by the schema but not enforced today, so
+//! anything `tool` mode would show as "ask" has to become "deny" here instead -- an unenforced
+//! ask is the same as a silent allow, which isn't what a secret detector is for. The command
+//! surface (`main.rs`) also treats these two modes specially: Cursor's docs say a missing or
+//! schema-invalid response blocks the gated action, the opposite of Claude Code's fail-open-on-
+//! no-output convention -- so every early return for these two modes prints an explicit `allow`
+//! rather than nothing.
+//!
+//! "tool" mode (and both Cursor modes) also catch secrets KeyValet already handed the agent this
+//! session (`credential_get` / `credential_totp_code` / `credential_access_token` /
 //! `credential_aws_credentials` record what they returned in `~/.keyvalet/run/*.redact`) by exact
 //! match -- this does not rely on the value looking like a known key format, unlike `PATTERNS`.
 //!
@@ -323,6 +335,26 @@ pub fn tool_text(tool_name: &str, input: &Value) -> String {
     }
 }
 
+fn flatten_strings(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::String(s) => out.push(s.clone()),
+        Value::Array(items) => items.iter().for_each(|i| flatten_strings(i, out)),
+        Value::Object(obj) => obj.values().for_each(|i| flatten_strings(i, out)),
+        _ => {}
+    }
+}
+
+/// Every string value anywhere in an arbitrary MCP tool call's params, depth-first. Used instead
+/// of `tool_text` for Cursor's `beforeMCPExecution` (and any other "gate every MCP tool call, not
+/// just five named shapes" caller): the tool being gated there can be any MCP server's tool, with
+/// a param shape `tool_text` has no name-based case for, so scanning every string field is a
+/// strictly broader net that still costs little for the small param objects these calls carry.
+fn mcp_tool_text(input: &Value) -> String {
+    let mut out = Vec::new();
+    flatten_strings(input, &mut out);
+    out.join("\n")
+}
+
 /// `~/.keyvalet/run/*.redact`, one file per still-live session (written by `recordSecrets` in the
 /// MCP server, deleted when that session ends). Ignores files older than a day so a crashed
 /// session that skipped cleanup doesn't keep flagging long-dead values forever.
@@ -386,10 +418,13 @@ pub fn detect_returned_secrets(text: &str) -> Vec<ReturnedHit> {
 }
 
 pub fn tool_reason(tool_name: &str, hits: &[Hit], returned_hits: &[ReturnedHit]) -> String {
-    let where_ = if tool_name == "Bash" {
-        "this shell command"
-    } else {
-        "this file"
+    let where_ = match tool_name {
+        "Bash" => "this shell command",
+        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => "this file",
+        // An MCP tool call that isn't one of Claude Code's five named shapes above (e.g. an
+        // arbitrary tool Cursor's `beforeMCPExecution` is gating) -- neither "file" nor "shell
+        // command" describes it accurately.
+        _ => "this tool call",
     };
     let mut parts = Vec::new();
     if !hits.is_empty() {
@@ -468,6 +503,54 @@ pub fn handle(mode: &str, input: &Value) -> Option<Value> {
         }
         _ => None,
     }
+}
+
+/// `{"permission": "allow"}` -- Cursor's schema for `beforeShellExecution`/`beforeMCPExecution`
+/// (see the module doc comment); the only field every caller below needs when there's nothing to
+/// flag.
+fn cursor_allow() -> Value {
+    serde_json::json!({"permission": "allow"})
+}
+
+fn cursor_deny(reason: &str) -> Value {
+    serde_json::json!({"permission": "deny", "user_message": reason, "agent_message": reason})
+}
+
+/// Cursor `beforeShellExecution`: input `{"command": "...", "cwd": "...", ...}`. Always returns a
+/// decision (never `None`) -- see the module doc comment on why Cursor needs that.
+pub fn handle_cursor_shell(input: &Value) -> Value {
+    let command = input
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let hits = detect(command, false);
+    let returned_hits = detect_returned_secrets(command);
+    if hits.is_empty() && returned_hits.is_empty() {
+        return cursor_allow();
+    }
+    cursor_deny(&tool_reason("Bash", &hits, &returned_hits))
+}
+
+/// Cursor `beforeMCPExecution`: input `{"tool_name": "...", "tool_input": "<json-encoded
+/// string>", ...}` -- note `tool_input` is a JSON string here, not an object (unlike Claude
+/// Code's `tool` mode), so it needs its own parse step. Always returns a decision.
+pub fn handle_cursor_mcp(input: &Value) -> Value {
+    let tool_input: Value = input
+        .get("tool_input")
+        .and_then(Value::as_str)
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or(Value::Null);
+    let text = mcp_tool_text(&tool_input);
+    let hits = detect(&text, false);
+    let returned_hits = detect_returned_secrets(&text);
+    if hits.is_empty() && returned_hits.is_empty() {
+        return cursor_allow();
+    }
+    let name = input
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .unwrap_or("this tool call");
+    cursor_deny(&tool_reason(name, &hits, &returned_hits))
 }
 
 #[cfg(test)]
@@ -600,6 +683,80 @@ mod tests {
     #[test]
     fn handle_unknown_mode_is_silent() {
         assert!(handle("something-else", &serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn cursor_shell_allows_an_ordinary_command() {
+        let input = serde_json::json!({"command": "echo hi", "cwd": "/tmp"});
+        assert_eq!(
+            handle_cursor_shell(&input),
+            serde_json::json!({"permission": "allow"})
+        );
+    }
+
+    #[test]
+    fn cursor_shell_denies_a_command_carrying_a_key() {
+        let input = serde_json::json!({
+            "command": "curl -H 'x-api-key: sk-ant-api03-Zx9Yw8Vu7Ts6Rq5Po4Nm3Lk2Ji1Hg0FeDcBa-9z8y7x6w5v4u3t2' https://api.anthropic.com",
+        });
+        let out = handle_cursor_shell(&input);
+        assert_eq!(out["permission"], "deny");
+        assert!(out["user_message"]
+            .as_str()
+            .unwrap()
+            .contains("shell command"));
+        assert!(!out["user_message"]
+            .as_str()
+            .unwrap()
+            .contains("sk-ant-api03-Zx9Yw8Vu7Ts6Rq5Po4Nm3Lk2Ji1Hg0FeDcBa-9z8y7x6w5v4u3t2"));
+    }
+
+    #[test]
+    fn cursor_shell_never_returns_ask_even_internally() {
+        // Cursor's schema accepts "ask" but doesn't enforce it -- this hook must never emit it.
+        let input =
+            serde_json::json!({"command": "echo sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"});
+        let out = handle_cursor_shell(&input);
+        assert_ne!(out["permission"], "ask");
+    }
+
+    #[test]
+    fn cursor_mcp_allows_a_tool_call_with_no_secret() {
+        let input = serde_json::json!({
+            "tool_name": "some_mcp_server__do_thing",
+            "tool_input": serde_json::to_string(&serde_json::json!({"query": "hello"})).unwrap(),
+        });
+        assert_eq!(
+            handle_cursor_mcp(&input),
+            serde_json::json!({"permission": "allow"})
+        );
+    }
+
+    #[test]
+    fn cursor_mcp_denies_a_tool_call_carrying_a_key_in_a_nested_param() {
+        // tool_input's param names aren't any of the five Claude Code tool shapes, and the key is
+        // nested inside an object -- mcp_tool_text has to find it by scanning every string field.
+        let input = serde_json::json!({
+            "tool_name": "some_mcp_server__do_thing",
+            "tool_input": serde_json::to_string(&serde_json::json!({
+                "config": {"env": {"OPENAI_API_KEY": "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"}},
+            })).unwrap(),
+        });
+        let out = handle_cursor_mcp(&input);
+        assert_eq!(out["permission"], "deny");
+        assert!(out["agent_message"]
+            .as_str()
+            .unwrap()
+            .contains("this tool call"));
+    }
+
+    #[test]
+    fn cursor_mcp_allows_when_tool_input_is_malformed() {
+        let input = serde_json::json!({"tool_name": "x", "tool_input": "not valid json"});
+        assert_eq!(
+            handle_cursor_mcp(&input),
+            serde_json::json!({"permission": "allow"})
+        );
     }
 
     #[test]

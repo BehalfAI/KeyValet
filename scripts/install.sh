@@ -165,6 +165,28 @@ elif [ -d "$HOME/.codex" ]; then
   say "检测到已有 ~/.codex/hooks.json，未覆盖；如需启用 KeyValet 的密钥检测，请手动在 PreToolUse 里加一条 command: \"$INSTALL_DIR/bin/kv-hook tool\"" "Found an existing ~/.codex/hooks.json, left untouched; to enable KeyValet's secret detection, manually add a PreToolUse command: \"$INSTALL_DIR/bin/kv-hook tool\""
 fi
 
+# Cursor adapter (action-plan 4.2): native hooks.json schema (not the Claude Code one), gating
+# beforeShellExecution and beforeMCPExecution. Same never-overwrite/never-fail-the-install rule
+# as the Codex block above.
+if [ -d "$HOME/.cursor" ] && [ ! -e "$HOME/.cursor/hooks.json" ]; then
+  cat > "$HOME/.cursor/hooks.json" <<EOF
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      { "command": "$INSTALL_DIR/bin/kv-hook cursor-shell", "timeout": 10 }
+    ],
+    "beforeMCPExecution": [
+      { "command": "$INSTALL_DIR/bin/kv-hook cursor-mcp", "timeout": 10 }
+    ]
+  }
+}
+EOF
+  say "已为 Cursor 写入 ~/.cursor/hooks.json（密钥检测 hook）" "Wrote ~/.cursor/hooks.json for Cursor (secret-detection hook)"
+elif [ -d "$HOME/.cursor" ]; then
+  say "检测到已有 ~/.cursor/hooks.json，未覆盖；如需启用 KeyValet 的密钥检测，请手动加上 beforeShellExecution/beforeMCPExecution，command 用 \"$INSTALL_DIR/bin/kv-hook cursor-shell\" / \"$INSTALL_DIR/bin/kv-hook cursor-mcp\"" "Found an existing ~/.cursor/hooks.json, left untouched; to enable KeyValet's secret detection, manually add beforeShellExecution/beforeMCPExecution entries with command \"$INSTALL_DIR/bin/kv-hook cursor-shell\" / \"$INSTALL_DIR/bin/kv-hook cursor-mcp\""
+fi
+
 echo
 say "安装完成。" "Installation complete."
 echo

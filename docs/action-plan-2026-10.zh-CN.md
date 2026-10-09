@@ -91,9 +91,9 @@
 | # | 任务 | 产出 | 完成标准 |
 | --- | --- | --- | --- |
 | 4.1 | `代码` `keyvalet scan`：扫描 `.env*`、`~/.claude.json`、`.cursor/mcp.json`、`~/.codex/config.toml`、shell rc；原生窗口勾选；导入；替换占位符；确认后删备份（P J2） | `kv-cli scan` + MCP 工具 `credential_scan` | 10 条密钥 2 分钟内迁完；原文件 grep 不到有效密钥 |
-| 4.2 | `代码` Cursor 适配器原型（`~/.cursor/hooks.json`，退出码 2） | 适配器 | 在 Cursor 里写 key 进文件被拒并给出替代命令 |
-| 4.3 | `代码` 核实 Grok 的 MCP 与 hook 能力；MCP 配置写进安装脚本 | `docs/runtimes.md` 一节 | 文档写明支持程度 |
-| 4.4 | `代码` MCP SDK 升级到 2026-07-28 规范；per-session 绑 stdio 进程 | 依赖升级 | 现有测试通过 |
+| 4.2 | `代码` Cursor 适配器原型（`~/.cursor/hooks.json`，退出码 2） | ✅ 已完成，且先去核实了 Cursor 的真实 hook 契约（原计划写的"退出码 2"只是其中一种路径，不是全部）：真正的决策通道是 stdout 的一段 JSON（`{"permission": "allow"\|"deny"\|"ask", ...}`），退出码 2 只是等价快捷方式；能拒绝的事件只有 `beforeShellExecution`/`beforeMCPExecution`，`beforeReadFile` 是观察型、没有否决权（跟架构文档原来写的不一样，已经在架构文档里更正）；`permission: "ask"` 在 schema 里但 Cursor 不强制执行，所以 `kv-hook` 在这两个事件下从不输出 ask，一律降级成 deny。`kv-hook` 加了两个新子命令 `cursor-shell`/`cursor-mcp`，复用同一套密钥检测核心；`beforeMCPExecution` 的工具名不是 Claude Code 的五种已知形状，`tool_input` 还是 JSON 字符串不是对象，所以新写了一个递归扫描所有字符串字段的办法（`mcp_tool_text`），不按字段名取值。还处理了一个 Cursor 特有的坏天气路径：Cursor 的文档说这两个事件如果没收到合法响应就会直接拒绝放行（跟 Claude Code"没输出就放行"正好反过来），所以 `kv-hook` 在这两个模式下，不管是 `KEYVALET_HOOKS=off`、读 stdin 失败还是 JSON 解析失败，都会明确打印一个 `{"permission":"allow"}` 而不是什么都不打印。`install.sh` 在 `~/.cursor` 目录存在且没有 `hooks.json` 时写入配置，已有文件则不覆盖。6 个新单测 | `cargo test -p kv-hook`：命令里带密钥时拒绝且不是 ask；MCP 工具调用嵌套参数里的密钥也能被扫到；`tool_input` 解析失败时放行而不是卡死 |
+| 4.3 | `代码` 核实 Grok 的 MCP 与 hook 能力；MCP 配置写进安装脚本 | ⏸ 未开始 | — |
+| 4.4 | `代码` MCP SDK 升级到 2026-07-28 规范；per-session 绑 stdio 进程 | ✅ 其实早就达标，这次只是确认：`kv-mcp` 用的 `rmcp = "3"` 解析到 3.5.1，这个版本的 `ProtocolVersion::LATEST` 本身就是 `2026-07-28`（`rmcp` 的 CHANGELOG 能看到这个版本号下的真实改动，不是占位），kv-mcp 没有在任何地方把协议版本锁定在更老的值，所以是跟着 SDK 默认走的最新规范，不需要额外改代码；「per-session 绑 stdio 进程」这条本来就是 Rust 重写时就定下的设计（`kv-mcp/src/session.rs` 的 `HelperSession`：一个 MCP server 进程 = 一个 agent 会话，进程退出会话就结束），不是这次新做的 | `cargo test` 全过；`rmcp` 的 `ProtocolVersion::LATEST == V_2026_07_28` |
 | 4.5 | `市场` 提交 Claude Code 官方插件市场、Codex plugins、cursor.directory | 三处提交 | 至少一处上架 |
 | 4.6 | `市场` Product Hunt（star 与反馈攒够后）；事故复盘第二篇（Comment and Control） | PH 页 + 博客 | — |
 | 4.7 | `市场` 开始外联设计合作伙伴：从 HN/Reddit 评论和 GitHub issue 里挑 20 个目标，每周 5 封（M 附录 A） | 外联记录表 | 第 8 周前至少 3 次通话 |

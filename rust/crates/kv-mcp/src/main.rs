@@ -115,3 +115,18 @@ async fn main() -> anyhow::Result<()> {
     shutdown();
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    /// Action-plan 4.4: kv-mcp doesn't pin an MCP protocol version anywhere, so it follows
+    /// whatever rmcp's own default is. This pins that assumption to a concrete version instead of
+    /// an implicit "whatever the dependency happens to default to" -- if rmcp ever moves `LATEST`
+    /// off 2026-07-28, this is the test that should make us notice and re-check the action plan.
+    #[test]
+    fn rmcp_latest_protocol_version_is_2026_07_28() {
+        assert_eq!(
+            rmcp::model::ProtocolVersion::LATEST,
+            rmcp::model::ProtocolVersion::V_2026_07_28
+        );
+    }
+}
