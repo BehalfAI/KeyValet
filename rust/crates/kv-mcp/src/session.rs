@@ -737,3 +737,71 @@ mod request_hint_tests {
         assert!(http_request_hint(&p).is_none());
     }
 }
+
+#[cfg(test)]
+mod misc_tests {
+    use super::*;
+
+    #[test]
+    fn gen_session_id_is_twelve_lowercase_hex_characters() {
+        let id = gen_session_id();
+        assert_eq!(id.len(), 12);
+        assert!(id
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn gen_session_id_is_not_the_same_every_call() {
+        // Astronomically unlikely to collide (2^48 space) unless the RNG itself is broken.
+        assert_ne!(gen_session_id(), gen_session_id());
+    }
+
+    #[test]
+    fn iso_formats_as_rfc3339_with_millis_and_a_z_suffix() {
+        let t = std::time::UNIX_EPOCH + Duration::from_millis(1_234);
+        assert_eq!(iso(t), "1970-01-01T00:00:01.234Z");
+    }
+
+    #[test]
+    fn describe_sudo_failure_recognizes_the_missing_passwordless_rule() {
+        let msg = describe_sudo_failure("sudo: a password is required");
+        assert!(msg.contains("sudoers.d/keyvalet") || msg.contains("install.sh"));
+    }
+
+    #[test]
+    fn describe_sudo_failure_recognizes_a_user_not_in_sudoers() {
+        let msg = describe_sudo_failure("guang is not in the sudoers file");
+        assert!(msg.to_lowercase().contains("sudo") || msg.contains("install.sh"));
+        let msg2 = describe_sudo_failure("sorry, user guang is not allowed to execute");
+        assert!(msg2.contains("install.sh"));
+    }
+
+    #[test]
+    fn describe_sudo_failure_falls_back_to_the_last_lines_of_stderr() {
+        let msg = describe_sudo_failure("line one\nline two\nline three\nline four");
+        // Only the last 3 lines, oldest first.
+        assert!(!msg.contains("line one"));
+        assert!(msg.contains("line two"));
+        assert!(msg.contains("line three"));
+        assert!(msg.contains("line four"));
+    }
+
+    #[test]
+    fn describe_sudo_failure_on_empty_stderr_is_a_generic_message() {
+        let msg = describe_sudo_failure("");
+        assert!(msg.contains("Unlock failed") || msg.contains("解锁失败"));
+    }
+
+    #[test]
+    fn install_problem_is_none_on_a_correctly_installed_machine() {
+        // Environment-dependent, like kv_platform::trust's own
+        // root_owned_read_only_system_paths_are_trusted test: only assert on a machine where
+        // KeyValet is actually installed (this is the exact regression check for the /etc
+        // symlink bug fixed in kv_platform::trust::untrusted_reason -- that bug made this
+        // return Some(...) on every stock Mac, permanently blocking MCP unlock).
+        if std::path::Path::new(kv_platform::paths::INSTALL_DIR).is_dir() {
+            assert_eq!(install_problem(), None);
+        }
+    }
+}

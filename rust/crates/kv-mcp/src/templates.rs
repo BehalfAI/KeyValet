@@ -447,3 +447,229 @@ pub fn oauth_provider_names() -> String {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn storage_only_template() -> CredentialTemplate {
+        CredentialTemplate {
+            id: "test-storage".into(),
+            name: "Test storage-only".into(),
+            source: "builtin".into(),
+            docs: None,
+            kind: "static".into(),
+            fields: vec![TemplateField {
+                name: "value".into(),
+                label: "Value".into(),
+                secret: true,
+                required: true,
+                default: None,
+                description: None,
+                options: None,
+            }],
+            inject: None,
+            test: None,
+            hosts: vec![],
+            oauth2: None,
+        }
+    }
+
+    #[test]
+    fn placeholders_extracts_field_names_in_first_seen_order_without_duplicates() {
+        let v1 = Some("Bearer {{token}}");
+        let v2 = Some("{{token}} and {{apiKey}} and {{ token }}");
+        let v3: Option<&str> = None;
+        assert_eq!(
+            placeholders(&[v1, v2, v3]),
+            vec!["token".to_string(), "apiKey".to_string()]
+        );
+    }
+
+    #[test]
+    fn placeholders_on_text_with_no_braces_is_empty() {
+        assert_eq!(
+            placeholders(&[Some("no placeholders here")]),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn inject_strings_collects_header_query_and_basic_auth_values() {
+        let rule = InjectRule {
+            headers: Some([("Authorization".to_string(), "Bearer {{token}}".to_string())].into()),
+            query: Some([("api_key".to_string(), "{{key}}".to_string())].into()),
+            basic: Some(BasicAuth {
+                username: "{{user}}".into(),
+                password: "{{password}}".into(),
+            }),
+        };
+        let mut strings = inject_strings(Some(&rule));
+        strings.sort();
+        let mut expected = vec![
+            "Bearer {{token}}".to_string(),
+            "{{key}}".to_string(),
+            "{{user}}".to_string(),
+            "{{password}}".to_string(),
+        ];
+        expected.sort();
+        assert_eq!(strings, expected);
+    }
+
+    #[test]
+    fn inject_strings_on_none_is_empty() {
+        assert_eq!(inject_strings(None), Vec::<String>::new());
+    }
+
+    #[test]
+    fn injected_placeholders_extracts_field_names_from_an_inject_rule() {
+        let rule = InjectRule {
+            headers: Some([("X-Api-Key".to_string(), "{{key}}".to_string())].into()),
+            query: None,
+            basic: None,
+        };
+        assert_eq!(injected_placeholders(Some(&rule)), vec!["key".to_string()]);
+    }
+
+    #[test]
+    fn builtin_templates_cover_the_four_generic_http_auth_shapes() {
+        for id in ["bearer", "header", "query", "basic"] {
+            let tpl = get_template(id).unwrap_or_else(|| panic!("missing builtin template {id}"));
+            assert_eq!(tpl.source, "builtin");
+            assert_eq!(tpl.kind, "static");
+        }
+    }
+
+    #[test]
+    fn get_template_is_case_insensitive_and_trims_whitespace() {
+        assert!(get_template("BEARER").is_some());
+        assert!(get_template("  bearer  ").is_some());
+        assert!(get_template("does-not-exist").is_none());
+    }
+
+    #[test]
+    fn the_bundled_catalog_is_loaded_alongside_the_builtins() {
+        // "openai" comes from templates/catalog.json, not builtin_templates() -- this is the
+        // only way to tell the catalog actually got merged in, not just the 4 generic templates.
+        let tpl = get_template("openai").expect("bundled catalog should include openai");
+        assert_eq!(tpl.source, "catalog");
+        assert_eq!(tpl.hosts, vec!["api.openai.com".to_string()]);
+    }
+
+    #[test]
+    fn search_templates_ranks_exact_match_above_prefix_above_contains() {
+        // "basic" is an exact id match; anything just starting with or containing "basic" (if
+        // the catalog ever grows one) must rank below it. Bearer is unrelated and shouldn't
+        // appear in a search for "basic".
+        let results = search_templates(Some("basic"), None, 10);
+        assert_eq!(results[0].id, "basic");
+        assert!(!results.iter().any(|t| t.id == "bearer"));
+    }
+
+    #[test]
+    fn search_templates_respects_the_kind_filter_and_limit() {
+        let all_static = search_templates(None, Some("static"), 1000);
+        assert!(all_static.iter().all(|t| t.kind == "static"));
+        assert!(
+            all_static.len() > 4,
+            "expects the catalog to be loaded too, not just builtins"
+        );
+
+        let limited = search_templates(None, Some("static"), 2);
+        assert_eq!(limited.len(), 2);
+    }
+
+    #[test]
+    fn search_templates_with_an_unknown_kind_returns_nothing() {
+        assert!(search_templates(Some("bearer"), Some("nonexistent-kind"), 10).is_empty());
+    }
+
+    #[test]
+    fn summarize_labels_proxy_support_by_template_shape() {
+        let storage_only = summarize(&storage_only_template());
+        assert_eq!(
+            storage_only["proxy"],
+            kv_i18n::t("不可代理（仅存储）", "Not proxyable (storage only)")
+        );
+        assert_eq!(storage_only["can_test"], false);
+
+        let bearer = get_template("bearer").unwrap();
+        let injectable = summarize(bearer);
+        assert_eq!(injectable["proxy"], kv_i18n::t("可代理调用", "Proxyable"));
+
+        let mut oauth_tpl = storage_only_template();
+        oauth_tpl.kind = "oauth2".into();
+        let oauth = summarize(&oauth_tpl);
+        assert_eq!(
+            oauth["proxy"],
+            kv_i18n::t(
+                "授权后可代理（需设置允许的域名）",
+                "Proxyable after authorization (allowed hosts must be set)"
+            )
+        );
+    }
+
+    #[test]
+    fn summarize_only_lists_field_names_that_are_secret() {
+        let tpl = get_template("header").unwrap(); // headerName (not secret), key (secret)
+        let summary = summarize(tpl);
+        assert_eq!(summary["secret_fields"], serde_json::json!(["key"]));
+    }
+
+    #[test]
+    fn template_detail_includes_the_full_field_list_and_a_how_to_use_hint() {
+        let tpl = get_template("bearer").unwrap();
+        let detail = template_detail(tpl);
+        assert_eq!(detail["source"], "builtin");
+        assert!(detail["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["name"] == "token"));
+        assert!(
+            detail["how_to_use"]
+                .as_str()
+                .unwrap()
+                .contains("credential_set"),
+            "static templates should be told to use credential_set, not credential_oauth_login"
+        );
+    }
+
+    #[test]
+    fn template_detail_for_an_oauth2_template_points_at_oauth_login_instead() {
+        let mut oauth_tpl = storage_only_template();
+        oauth_tpl.id = "test-oauth".into();
+        oauth_tpl.kind = "oauth2".into();
+        let detail = template_detail(&oauth_tpl);
+        assert!(detail["how_to_use"]
+            .as_str()
+            .unwrap()
+            .contains("credential_oauth_login"));
+        assert!(detail["how_to_use"]
+            .as_str()
+            .unwrap()
+            .contains("test-oauth"));
+    }
+
+    #[test]
+    fn resolve_oauth_provider_finds_a_builtin_preset_by_exact_name() {
+        // resolve_preset's lookup is case-sensitive (a plain HashMap::get, unlike
+        // get_template's lowercased lookup) -- this documents the real behavior rather than
+        // assuming case-insensitivity.
+        assert!(resolve_oauth_provider("github", None).unwrap().is_some());
+    }
+
+    #[test]
+    fn resolve_oauth_provider_returns_none_for_an_unknown_provider() {
+        assert!(resolve_oauth_provider("not-a-real-provider", None)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn oauth_provider_names_lists_the_builtin_presets() {
+        let names = oauth_provider_names();
+        assert!(names.contains("google"));
+        assert!(names.contains("github"));
+    }
+}

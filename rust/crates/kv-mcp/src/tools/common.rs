@@ -244,3 +244,87 @@ pub async fn guard_overwrite(
 
 #[allow(dead_code)]
 pub type Session = HelperSession;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn norm_trims_and_lowercases() {
+        assert_eq!(norm("  OpenAI  "), "openai");
+        assert_eq!(norm("already-lower"), "already-lower");
+    }
+
+    #[test]
+    fn safe_display_accepts_a_value_matching_the_pattern() {
+        assert_eq!(
+            safe_display("client-123_abc@host:/path", &CLIENT_ID_RE, "client_id").unwrap(),
+            "client-123_abc@host:/path"
+        );
+    }
+
+    #[test]
+    fn safe_display_rejects_a_value_that_would_break_out_of_the_dialog_format() {
+        // Anything outside the strict allowed charset is rejected -- this is what stops an
+        // agent from injecting misleading text into a native confirmation dialog.
+        assert!(safe_display("has spaces", &CLIENT_ID_RE, "client_id").is_err());
+        assert!(safe_display("has\nnewline", &CLIENT_ID_RE, "client_id").is_err());
+        assert!(safe_display("", &CLIENT_ID_RE, "client_id").is_err());
+    }
+
+    #[test]
+    fn safe_display_rejects_a_value_over_the_length_limit() {
+        let too_long = "a".repeat(201);
+        assert!(safe_display(&too_long, &CLIENT_ID_RE, "client_id").is_err());
+    }
+
+    #[test]
+    fn https_host_accepts_a_plain_https_url() {
+        assert_eq!(
+            https_host("https://api.openai.com/v1/models", "apiUrl").unwrap(),
+            "api.openai.com"
+        );
+    }
+
+    #[test]
+    fn https_host_keeps_a_non_default_port() {
+        assert_eq!(
+            https_host("https://example.com:8443/x", "apiUrl").unwrap(),
+            "example.com:8443"
+        );
+    }
+
+    #[test]
+    fn https_host_rejects_plain_http() {
+        assert!(https_host("http://api.openai.com", "apiUrl").is_err());
+    }
+
+    #[test]
+    fn https_host_rejects_an_unparseable_url() {
+        assert!(https_host("not a url", "apiUrl").is_err());
+    }
+
+    #[test]
+    fn https_host_rejects_a_host_with_unexpected_characters() {
+        // IPv6 literals ([::1]) and userinfo-style hosts aren't in the allowed charset.
+        assert!(https_host("https://[::1]/x", "apiUrl").is_err());
+    }
+
+    #[test]
+    fn ok_and_fail_build_single_text_block_results() {
+        assert!(!ok("done").is_error.unwrap_or(false));
+        assert!(fail("broke").is_error.unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn wrap_passes_through_an_ok_result_unchanged() {
+        let r = wrap(async { Ok(ok("done")) }).await;
+        assert!(!r.is_error.unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn wrap_converts_an_error_into_a_fail_result() {
+        let r = wrap(async { Err("boom".to_string()) }).await;
+        assert!(r.is_error.unwrap_or(false));
+    }
+}
