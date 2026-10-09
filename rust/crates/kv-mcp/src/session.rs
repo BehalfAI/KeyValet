@@ -98,12 +98,23 @@ pub struct Requester<'a> {
     purpose: String,
     target: Option<CredentialTarget>,
 }
+/// Matches TS's `scoped()`: `request: (op, params) => this.request(op, { ...params, purpose
+/// }, ...)` -- every call through a `Requester` carries its purpose automatically, so individual
+/// tool handlers don't each have to remember to insert it (and real ones didn't:
+/// credential_imap_test's accessToken request, and others, omitted it and failed outright with
+/// "A purpose is required for this operation" until this was added).
+fn with_purpose(mut params: Map<String, Value>, purpose: &str) -> Map<String, Value> {
+    params.insert("purpose".into(), Value::String(purpose.to_string()));
+    params
+}
+
 impl Requester<'_> {
     pub async fn request<T: serde::de::DeserializeOwned>(
         &self,
         op: &str,
         params: Map<String, Value>,
     ) -> Result<T, SessionError> {
+        let params = with_purpose(params, &self.purpose);
         let v = self
             .session
             .request_value(op, params, &self.purpose, self.target.as_ref())
@@ -741,6 +752,23 @@ mod request_hint_tests {
 #[cfg(test)]
 mod misc_tests {
     use super::*;
+
+    #[test]
+    fn with_purpose_inserts_the_purpose_into_the_params() {
+        let params = with_purpose(Map::new(), "test the thing");
+        assert_eq!(params["purpose"], "test the thing");
+    }
+
+    #[test]
+    fn with_purpose_overrides_any_purpose_the_caller_already_set() {
+        // A caller passing its own (possibly stale, possibly absent) "purpose" must not win over
+        // the Requester's real one -- this is what actually fixed credential_imap_test et al.,
+        // not just adding the key when it was missing.
+        let mut params = Map::new();
+        params.insert("purpose".into(), serde_json::json!("stale or wrong"));
+        let params = with_purpose(params, "the real purpose");
+        assert_eq!(params["purpose"], "the real purpose");
+    }
 
     #[test]
     fn gen_session_id_is_twelve_lowercase_hex_characters() {
