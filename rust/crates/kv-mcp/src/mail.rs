@@ -541,3 +541,28 @@ mod tests {
         assert_eq!(result.folder, Some("Sent Items".to_string()));
     }
 }
+
+#[cfg(test)]
+mod tls_provider_tests {
+    /// Regression test for a real crash (SIGABRT) found by live-testing credential_imap_test
+    /// against a real oauth2 credential: both the `ring` and `aws-lc-rs` crypto provider
+    /// features end up enabled in the kv-mcp binary (this crate's own rustls dependency asks for
+    /// `ring` directly; reqwest/hyper-rustls's transitive rustls dependency pulls in `aws-lc-rs`
+    /// by default; Cargo's feature unification turns both on for the single resolved rustls
+    /// crate). With both present, a plain `rustls::ClientConfig::builder()` -- exactly what
+    /// `imap_xoauth2_test` calls -- refuses to guess which provider to use and panics, which
+    /// aborts the process in a release build. `main()` now installs one explicitly before
+    /// anything else can touch TLS; this mirrors that and checks the actual symptom (does
+    /// `ClientConfig::builder()` panic), not just that the install call itself succeeds. No
+    /// network needed -- the panic happens before any connection is attempted.
+    #[test]
+    fn client_config_builder_does_not_panic_once_a_default_provider_is_installed() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let root_store = rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        };
+        let _ = rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+    }
+}

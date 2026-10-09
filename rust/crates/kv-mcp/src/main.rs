@@ -69,6 +69,17 @@ impl ServerHandler for Server {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Both the `ring` and `aws-lc-rs` crypto provider features end up enabled in this binary
+    // (kv-mcp's own rustls dependency asks for `ring` directly -- used by mail.rs's manual
+    // ClientConfig::builder() for IMAP -- while reqwest/hyper-rustls's transitive rustls
+    // dependency pulls in `aws-lc-rs` by default; Cargo's feature unification turns both on for
+    // the single resolved rustls crate). With both present, rustls refuses to guess which one a
+    // plain `ClientConfig::builder()` should use -- it panics (which aborts, in a release build)
+    // the first time anything calls it, which is exactly what crashed kv-mcp the first time
+    // credential_imap_test actually ran this code path live. Installing one explicitly here,
+    // before anything else can touch TLS, removes the ambiguity process-wide for every caller
+    // (ours and reqwest's).
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let ttl_minutes: u64 = std::env::var("KEYVALET_SESSION_TTL_MINUTES")
         .ok()
         .and_then(|v| v.parse().ok())
