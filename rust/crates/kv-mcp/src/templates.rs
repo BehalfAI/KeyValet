@@ -264,9 +264,8 @@ fn builtin_templates() -> Vec<CredentialTemplate> {
     ]
 }
 
-fn load_catalog(file: &str) -> Vec<CredentialTemplate> {
-    let path = std::path::Path::new(kv_platform::paths::TEMPLATES_DIR).join(file);
-    let Ok(text) = std::fs::read_to_string(path) else {
+fn load_catalog_from(dir: &std::path::Path, file: &str) -> Vec<CredentialTemplate> {
+    let Ok(text) = std::fs::read_to_string(dir.join(file)) else {
         return Vec::new();
     };
     #[derive(Deserialize)]
@@ -278,24 +277,39 @@ fn load_catalog(file: &str) -> Vec<CredentialTemplate> {
         .unwrap_or_default()
 }
 
+fn load_catalog(file: &str) -> Vec<CredentialTemplate> {
+    load_catalog_from(
+        std::path::Path::new(kv_platform::paths::TEMPLATES_DIR),
+        file,
+    )
+}
+
+/// Merge by priority; when ids match (case-insensitive), keep the higher-priority one.
+fn merge_templates(
+    templates: impl IntoIterator<Item = CredentialTemplate>,
+) -> Vec<CredentialTemplate> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for t in templates {
+        let k = t.id.to_lowercase();
+        if seen.insert(k) {
+            out.push(t);
+        }
+    }
+    out
+}
+
 static ALL_TEMPLATES: OnceLock<Vec<CredentialTemplate>> = OnceLock::new();
 
 /// Merge by priority; when ids match (case-insensitive), keep the higher-priority one.
 pub fn all_templates() -> &'static [CredentialTemplate] {
     ALL_TEMPLATES.get_or_init(|| {
-        let mut seen = std::collections::HashSet::new();
-        let mut out = Vec::new();
-        for t in builtin_templates()
-            .into_iter()
-            .chain(load_catalog("catalog.json"))
-            .chain(load_catalog("n8n-catalog.json"))
-        {
-            let k = t.id.to_lowercase();
-            if seen.insert(k) {
-                out.push(t);
-            }
-        }
-        out
+        merge_templates(
+            builtin_templates()
+                .into_iter()
+                .chain(load_catalog("catalog.json"))
+                .chain(load_catalog("n8n-catalog.json")),
+        )
     })
 }
 
@@ -312,9 +326,18 @@ pub fn search_templates(
     kind: Option<&str>,
     limit: usize,
 ) -> Vec<&'static CredentialTemplate> {
+    search_in(all_templates(), query, kind, limit)
+}
+
+fn search_in<'a>(
+    templates: &'a [CredentialTemplate],
+    query: Option<&str>,
+    kind: Option<&str>,
+    limit: usize,
+) -> Vec<&'a CredentialTemplate> {
     let q = query.unwrap_or("").trim().to_lowercase();
-    let mut scored: Vec<(f64, &'static CredentialTemplate)> = Vec::new();
-    for t in all_templates() {
+    let mut scored: Vec<(f64, &'a CredentialTemplate)> = Vec::new();
+    for t in templates {
         if let Some(k) = kind {
             if t.kind != k {
                 continue;
@@ -547,11 +570,27 @@ mod tests {
         assert!(get_template("does-not-exist").is_none());
     }
 
+    /// The templates shipped in the repository -- not the installed copy under
+    /// `kv_platform::paths::TEMPLATES_DIR`, which doesn't exist on machines without KeyValet.
+    fn merged_with_repo_catalog() -> Vec<CredentialTemplate> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../templates");
+        merge_templates(
+            builtin_templates()
+                .into_iter()
+                .chain(load_catalog_from(&dir, "catalog.json"))
+                .chain(load_catalog_from(&dir, "n8n-catalog.json")),
+        )
+    }
+
     #[test]
     fn the_bundled_catalog_is_loaded_alongside_the_builtins() {
         // "openai" comes from templates/catalog.json, not builtin_templates() -- this is the
         // only way to tell the catalog actually got merged in, not just the 4 generic templates.
-        let tpl = get_template("openai").expect("bundled catalog should include openai");
+        let merged = merged_with_repo_catalog();
+        let tpl = merged
+            .iter()
+            .find(|t| t.id == "openai")
+            .expect("bundled catalog should include openai");
         assert_eq!(tpl.source, "catalog");
         assert_eq!(tpl.hosts, vec!["api.openai.com".to_string()]);
     }
@@ -568,14 +607,15 @@ mod tests {
 
     #[test]
     fn search_templates_respects_the_kind_filter_and_limit() {
-        let all_static = search_templates(None, Some("static"), 1000);
+        let merged = merged_with_repo_catalog();
+        let all_static = search_in(&merged, None, Some("static"), 1000);
         assert!(all_static.iter().all(|t| t.kind == "static"));
         assert!(
             all_static.len() > 4,
             "expects the catalog to be loaded too, not just builtins"
         );
 
-        let limited = search_templates(None, Some("static"), 2);
+        let limited = search_in(&merged, None, Some("static"), 2);
         assert_eq!(limited.len(), 2);
     }
 
