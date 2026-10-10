@@ -1,10 +1,15 @@
++++
+title = "使用指南"
+description = "KeyValet 的工作方式：凭证库、授权、代理调用、hook 和审计日志。"
++++
+
 # KeyValet
 
 **给你的 AI agent 一把「代客钥匙」，而不是你的万能钥匙。**
 
 KeyValet 是一个运行在 macOS 本机的「AI agent 凭证代理」。Claude Code、Cursor、Codex 等 agent 可以通过 MCP **使用**你的 API key、OAuth 账号等凭证，但看不到它们。每个凭证都要你用 Touch ID 授权，每次使用都会连同目的一起记录下来。
 
-[English](guide.md) · [安全模型](../SECURITY.md)
+[安全模型](https://github.com/KeyValet/KeyValet/blob/main/SECURITY.md)
 
 > **状态**：早期版本（0.1），仅支持 macOS。界面支持英文和简体中文，跟随 macOS 系统语言；也可以用 `KEYVALET_LANG=en|zh` 指定。
 
@@ -189,7 +194,7 @@ credential_oauth_login { provider: "gmailOAuth2", client_id: "...", name: "..." 
 ```
 credential_configure_http {
   name: "my-api", allowed_hosts: ["api.example.com"],
-  inject: { headers: { "X-Api-Key": "{{value}}" } },
+  inject: { headers: { "X-Api-Key": "{{ "{{" }}value}}" } },
   test: { url: "https://api.example.com/me" }, purpose: "..."
 }
 ```
@@ -257,7 +262,7 @@ Cursor 有官方插件（`cursor-plugin/`，安装器复制到 `~/.cursor/plugin
 
 - 读取凭证（`credential_get`）、获取 token、TOTP 码或 AWS 临时凭证、测试邮箱、写入、修改、删除凭证，以及解锁（`credential_unlock`），都**必须**传 `purpose`；
 - 会话授权弹窗显示凭证和这次授权实际放开的能力，由 root helper 根据凭证记录生成，例如「使用 openai（本会话）/ 可读取明文凭证（AI 可见）」；proxy_only 凭证显示「仅代理请求（AI 看不到明文）」。会话解锁只显示凭证库的授权范围。弹窗不显示 purpose，来源目录和完整用途放在审计日志中；
-- 会话授权允许在该会话中使用凭证，不限于某条 HTTP 请求。逐次授权显示真实操作及其绑定的全部参数：`credential_http_request` 显示 method、host、path、查询参数、agent 设置的请求头和请求体摘要，获取令牌显示 scopes / 仓库 / 权限，AWS 显示有效期；均由 root helper 根据完整操作生成，agent 的展示文案不能替换。不支持的方法、不在允许列表的域名、与凭证种类不符的操作在弹窗前就被拒绝；
+- 会话授权允许在该会话中使用凭证，不限于某条 HTTP 请求。逐次授权显示真实操作及其绑定的全部参数：`credential_http_request` 显示 method、host、path、查询参数、agent 设置的请求头和请求体行（对已知 API——OpenAI、Anthropic、GitHub、Stripe、Slack、AWS——按固定的业务字段白名单生成，如 model、amount、channel，绝不显示任意请求体内容；其他域名显示截短的原始预览），获取令牌显示 scopes / 仓库 / 权限，AWS 显示有效期；均由 root helper 根据完整操作生成，agent 的展示文案不能替换。不支持的方法、不在允许列表的域名、与凭证种类不符的操作在弹窗前就被拒绝；
 - 每条操作都写入审计日志，记录时间、会话 ID、操作、凭证、种类、目的、结果、来源目录，**不含任何凭证值**；
 - root helper 会再检查一次：缺少 `purpose` 的读取或修改请求一律拒绝；
 - 用 `credential_audit_log` 查询，可按本会话（`this_session_only`）、凭证、操作、起始时间过滤。
@@ -330,7 +335,7 @@ keyvalet recovery-read list     # 应急：用恢复口令只读访问（types /
 
 设置完成后运行一次 `keyvalet recovery-check`，之后不确定口令时也可以再运行：它在 root CLI 中用恢复口令解密，只显示凭证条数。若本机 Secure Enclave 无法使用（例如系统更新后认证失败），vault 不会回退到文件密钥。此时可用 `keyvalet recovery-read types|list|get <type> <name>` 以恢复口令读取凭证：写入会被拒绝，helper 与 AI 会话无法使用该模式，每次使用都记入审计。要恢复正常使用，在 Secure Enclave 正常的 Mac 上运行 `keyvalet recover-vault`。恢复口令可能泄露时运行 `keyvalet rotate-recovery`：硬件解锁后同时更换硬件密钥、凭证库密钥和口令，旧口令不能再打开当前凭证库（旧备份仍可用旧口令打开）。
 
-硬件私钥不可导出；复制当前 vault 文件后，旧文件密钥也无法解密新密文。但派生 AES 密钥和凭证明文仍会进入普通进程内存。加密密钥表示绑定的是这台 Mac 的 Secure Enclave，而不是 KeyValet：被攻破的 root 无需等待解锁，可以自己发起派生、使用任意认证文案，获批一次即取得 AES 主密钥（设备绑定挡不住 root，因为 root 能读取绑定文件）；也可以在获准解锁期间截获密钥或明文。截获 AES 主密钥后，轮换前仍可离线解密。出现意料之外的系统认证弹窗时要警惕。历史 `master.key` 副本加历史 vault 备份仍可解密，删除文件不保证抹除 APFS 快照或 SSD 残留。详见 [SECURITY.md](../SECURITY.md)。
+硬件私钥不可导出；复制当前 vault 文件后，旧文件密钥也无法解密新密文。但派生 AES 密钥和凭证明文仍会进入普通进程内存。加密密钥表示绑定的是这台 Mac 的 Secure Enclave，而不是 KeyValet：被攻破的 root 无需等待解锁，可以自己发起派生、使用任意认证文案，获批一次即取得 AES 主密钥（设备绑定挡不住 root，因为 root 能读取绑定文件）；也可以在获准解锁期间截获密钥或明文。截获 AES 主密钥后，轮换前仍可离线解密。出现意料之外的系统认证弹窗时要警惕。历史 `master.key` 副本加历史 vault 备份仍可解密，删除文件不保证抹除 APFS 快照或 SSD 残留。详见 [SECURITY.md](https://github.com/KeyValet/KeyValet/blob/main/SECURITY.md)。
 
 ## 开发
 

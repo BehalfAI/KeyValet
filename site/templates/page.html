@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block og_type %}article{% endblock %}
+{% block content %}
+<div class="wrap">
+  <main class="prose">
+    <h1>{{ page.title }}</h1>
+    {% if page.description %}<p class="page-intro">{{ page.description }}</p>{% endif %}
+    {{ page.content | safe }}
+  </main>
+</div>
+{% endblock %}

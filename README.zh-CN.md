@@ -4,7 +4,7 @@
 
 KeyValet 让 Claude Code、Cursor、Devin 等 AI agent 使用你的 API key 和 OAuth 账号，却看不到它们。每个凭证由你用 Touch ID 批准，由 KeyValet 代为调用，每次使用都有记录。
 
-[官网](https://keyvalet.dev/) · [使用指南](site/guide.zh-CN.md) · [安全模型](SECURITY.md) · [English](README.md)
+[官网](https://keyvalet.dev/) · [使用指南](https://keyvalet.dev/zh-CN/guide/) · [安全模型](SECURITY.md) · [English](README.md)
 
 ## 安装
 
@@ -12,7 +12,7 @@ KeyValet 让 Claude Code、Cursor、Devin 等 AI agent 使用你的 API key 和 
 curl -fsSL https://keyvalet.dev/install.sh | sh
 ```
 
-需要 macOS 14 或更高版本的 Apple Silicon Mac（安装器使用发行版的预编译 arm64 二进制；Intel Mac 改为源码构建，需要 Rust 工具链（`cargo`，来自 [rustup.rs](https://rustup.rs)）和 Xcode 命令行工具）。安装时要输一次密码。会自动配置好 Claude Code；检测到 Cursor 时安装器也会装好插件（`~/.cursor/plugins/local/keyvalet`，重启 Cursor 生效）；Devin CLI 用户执行 `devin plugins install KeyValet/KeyValet#devin-plugin` 安装插件；其他 MCP 客户端见[使用指南](site/guide.zh-CN.md#安装)。
+需要 macOS 14 或更高版本的 Apple Silicon Mac（安装器使用发行版的预编译 arm64 二进制；Intel Mac 改为源码构建，需要 Rust 工具链（`cargo`，来自 [rustup.rs](https://rustup.rs)）和 Xcode 命令行工具）。安装时要输一次密码。会自动配置好 Claude Code；检测到 Cursor 时安装器也会装好插件（`~/.cursor/plugins/local/keyvalet`，重启 Cursor 生效）；Devin CLI 用户执行 `devin plugins install KeyValet/KeyValet#devin-plugin` 安装插件；其他 MCP 客户端见[使用指南](https://keyvalet.dev/zh-CN/guide/#安装)。
 
 ## 怎么用
 
@@ -42,11 +42,11 @@ OAuth、refresh token、私钥都留在 KeyValet 里，agent 只拿到短期 tok
 - **密码处理**：原始工具结果不额外落盘；锁定即清理主动导出的临时文件。helper 将每次批准绑定到完整操作；
 - **审计日志**：每次解锁、读取、调用都连同目的一起记录。只在本机，不上云。
 
-**macOS 必须使用 Secure Enclave。**安装时直接初始化硬件 vault，或迁移已有文件密钥 vault；恢复口令在终端或本机隐藏输入框中设置。每个新会话都需要 Touch ID 或系统密码认证，`remember` 模式也一样。已移除文件密钥运行模式和软件回退。硬件私钥不可导出，但派生 AES 密钥会进入 helper 内存，被攻破的 root 也能自行发起派生，因此不能保证抵御被攻破的 root。Secure Enclave 无法使用时，可用 `keyvalet recovery-read` 以恢复口令只读访问。详见[设置与恢复说明](site/guide.zh-CN.md#secure-enclave-主密钥)。
+**macOS 必须使用 Secure Enclave。**安装时直接初始化硬件 vault，或迁移已有文件密钥 vault；恢复口令在终端或本机隐藏输入框中设置。每个新会话都需要 Touch ID 或系统密码认证，`remember` 模式也一样。已移除文件密钥运行模式和软件回退。硬件私钥不可导出，但派生 AES 密钥会进入 helper 内存，被攻破的 root 也能自行发起派生，因此不能保证抵御被攻破的 root。Secure Enclave 无法使用时，可用 `keyvalet recovery-read` 以恢复口令只读访问。详见[设置与恢复说明](https://keyvalet.dev/zh-CN/guide/#secure-enclave-主密钥)。
 
 ## 了解更多
 
-- [使用指南](site/guide.zh-CN.md)：概念、全部工具、模板、网关、命令行
+- [使用指南](https://keyvalet.dev/zh-CN/guide/)：概念、全部工具、模板、网关、命令行
 - [安全模型](SECURITY.md)：能保证什么，不能保证什么
 - [参与贡献](CONTRIBUTING.md) · [行为准则](CODE_OF_CONDUCT.md) · [治理](GOVERNANCE.md) · [商标政策](TRADEMARK.md)
 

@@ -1,0 +1,103 @@
+<!doctype html>
+{% set obj = page | default(value=section) -%}
+<html lang="{{ lang | default(value=config.default_language) }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+{% if obj -%}
+  {% set t = obj.title | default(value=config.title) -%}
+  {% set d = obj.description | default(value=config.description) -%}
+  {% set canonical = obj.permalink -%}
+{% else -%}
+  {% set t = config.title -%}
+  {% set d = config.description -%}
+  {% set canonical = config.base_url -%}
+{% endif -%}
+<title>{% if t is starting_with(pat="KeyValet") %}{{ t }}{% else %}{{ t }} · KeyValet{% endif %}</title>
+<meta name="description" content="{{ d }}">
+<link rel="canonical" href="{{ canonical }}">
+<meta property="og:title" content="{{ t }}">
+<meta property="og:description" content="{{ d }}">
+<meta property="og:image" content="{{ config.base_url }}/og.png">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="640">
+<meta property="og:url" content="{{ canonical }}">
+<meta property="og:type" content="{% block og_type %}website{% endblock %}">
+<meta name="twitter:card" content="summary_large_image">
+{% if obj -%}
+<link rel="alternate" hreflang="{{ lang }}" href="{{ obj.permalink }}">
+{%- if lang == config.default_language %}
+<link rel="alternate" hreflang="x-default" href="{{ obj.permalink }}">
+{%- endif %}
+{%- for tr in obj.translations %}
+{%- if tr.lang != lang %}
+<link rel="alternate" hreflang="{{ tr.lang }}" href="{{ tr.permalink }}">
+{%- if tr.lang == config.default_language %}
+<link rel="alternate" hreflang="x-default" href="{{ tr.permalink }}">
+{%- endif %}
+{%- endif %}
+{%- endfor %}
+{%- endif %}
+<meta name="theme-color" content="#173A2E">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/css/site.css">
+</head>
+<body>
+<div class="wrap">
+  <nav aria-label="Main">
+    {% if lang == "zh-CN" -%}
+    <a class="brand" href="/zh-CN/">
+    {%- else -%}
+    <a class="brand" href="/">
+    {%- endif %}
+      <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="#F4D7CC" stroke-width="3"/><path d="M16 16 L27 27 M22 22 L25 19 M25 25 L28 22" stroke="#F4D7CC" stroke-width="3" stroke-linecap="round" fill="none"/></svg>
+      KeyValet
+    </a>
+    <span class="spacer"></span>
+    {% if lang == "zh-CN" -%}
+    <a class="navlink" href="/zh-CN/guide/">使用指南</a>
+    <a class="navlink" href="/zh-CN/compare/">对比</a>
+    <a class="navlink" href="/zh-CN/pricing/">定价</a>
+    <a class="navlink" href="/zh-CN/security/">安全</a>
+    <a class="navlink" href="/zh-CN/blog/">博客</a>
+    {%- else -%}
+    <a class="navlink" href="/guide/">Guide</a>
+    <a class="navlink" href="/compare/">Compare</a>
+    <a class="navlink" href="/pricing/">Pricing</a>
+    <a class="navlink" href="/security/">Security</a>
+    <a class="navlink" href="/blog/">Blog</a>
+    {%- endif %}
+    <a class="gh" href="{{ config.extra.repo }}">GitHub</a>
+    {% set other_link = "" -%}
+    {% if obj -%}
+      {%- for tr in obj.translations -%}
+        {%- if tr.lang != lang -%}
+          {%- set_global other_link = tr.permalink -%}
+        {%- endif -%}
+      {%- endfor -%}
+    {%- endif -%}
+    {% if lang == "zh-CN" -%}
+    <a class="navlink" hreflang="en" href="{% if other_link != "" %}{{ other_link }}{% else %}/{% endif %}">English</a>
+    {%- else -%}
+    <a class="navlink" hreflang="zh-CN" href="{% if other_link != "" %}{{ other_link }}{% else %}/zh-CN/{% endif %}">中文</a>
+    {%- endif %}
+  </nav>
+</div>
+{% block content %}{% endblock %}
+<div class="wrap">
+  <footer>
+    <span>KeyValet · Apache-2.0 · Simvito Limited</span>
+    <span>
+      <a href="{{ config.extra.repo }}">GitHub</a> ·
+      {% if lang == "zh-CN" -%}
+      <a href="/zh-CN/security/">安全</a> · <a href="/zh-CN/guide/">使用指南</a> ·
+      <a hreflang="en" href="{% if other_link != "" %}{{ other_link }}{% else %}/{% endif %}">English</a>
+      {%- else -%}
+      <a href="/security/">Security</a> · <a href="/guide/">Guide</a> ·
+      <a hreflang="zh-CN" href="{% if other_link != "" %}{{ other_link }}{% else %}/zh-CN/{% endif %}">中文</a>
+      {%- endif %}
+    </span>
+  </footer>
+</div>
+</body>
+</html>

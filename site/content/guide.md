@@ -1,10 +1,15 @@
++++
+title = "Guide"
+description = "How KeyValet works: vault, approvals, proxy calls, hooks and the audit log."
++++
+
 # KeyValet
 
 **Give your AI agents a valet key, not your master key.**
 
 KeyValet is a local credential broker for AI agents on macOS. It lets agents such as Claude Code, Cursor and Codex *use* your API keys, OAuth accounts and other secrets over [MCP](https://modelcontextprotocol.io) — without the secrets ever entering the model's context. You approve each credential with Touch ID, and every use is logged with its stated purpose.
 
-[简体中文](guide.zh-CN.md) · [Security model](../SECURITY.md)
+[Security model](https://github.com/KeyValet/KeyValet/blob/main/SECURITY.md)
 
 > **Status:** early (0.1). macOS only. UI in English and 简体中文 — follows your macOS language; override with `KEYVALET_LANG=en|zh`.
 
@@ -49,7 +54,7 @@ KeyValet's answer: **secrets stay on your machine, owned by root. Agents ask; yo
 
 - Not a password manager for humans (no UI, sync or browser autofill).
 - Not a team secret manager.
-- Not a sandbox: once you grant a session a credential, a malicious agent with shell access could misuse *that* grant. KeyValet narrows the blast radius (per-credential grants, proxy-only, host allowlists, short-lived tokens) and records everything. See [SECURITY.md](../SECURITY.md).
+- Not a sandbox: once you grant a session a credential, a malicious agent with shell access could misuse *that* grant. KeyValet narrows the blast radius (per-credential grants, proxy-only, host allowlists, short-lived tokens) and records everything. See [SECURITY.md](https://github.com/KeyValet/KeyValet/blob/main/SECURITY.md).
 
 ## Requirements
 
@@ -154,7 +159,7 @@ Disable the hooks with `KEYVALET_HOOKS=off` in the environment the agent runs in
 
 Every tool that reads, uses or changes a credential **requires** a `purpose`. The root helper enforces this too. Session approval prompts show the credential and what the grant exposes (for example a plaintext-readable warning for credentials that aren't `proxy_only`); per-use prompts also show the exact request; session unlocks show the vault scope. The purpose is not shown in prompts. Source directories and the full purpose remain in the audit log (`/var/db/keyvalet/audit.log`, root-only, rotated at 10 MB).
 
-A session approval covers that credential for the session, rather than a particular HTTP endpoint. A per-use approval covers exactly one matching operation and shows every parameter it is bound to: for HTTP requests the method, host, path, query, agent-set headers and a body preview; for tokens the scopes, repositories and permissions; for AWS the lifetime. The root helper derives this from the complete operation; agent-provided display hints cannot replace it. Unsupported methods, hosts outside the allowlist and operations the credential kind can't perform are refused before any prompt.
+A session approval covers that credential for the session, rather than a particular HTTP endpoint. A per-use approval covers exactly one matching operation and shows every parameter it is bound to: for HTTP requests the method, host, path, query, agent-set headers and a body line (for known APIs — OpenAI, Anthropic, GitHub, Stripe, Slack, AWS — built by the helper from a fixed whitelist of business fields such as `model`, `amount` or `channel`, never arbitrary body content; other hosts get a shortened raw preview); for tokens the scopes, repositories and permissions; for AWS the lifetime. The root helper derives this from the complete operation; agent-provided display hints cannot replace it. Unsupported methods, hosts outside the allowlist and operations the credential kind can't perform are refused before any prompt.
 
 ### Proxy calls
 
@@ -249,7 +254,7 @@ Back up the **latest** `/var/db/keyvalet/vault.enc` using an administrator accou
 
 Run `keyvalet recovery-check` once after setup, and again whenever you are unsure of the passphrase. It decrypts with the passphrase in the root CLI and reports only a credential count. If Secure Enclave stops working on this Mac (for example, system authentication fails after an OS update), the vault does not fall back to a file key. `keyvalet recovery-read types|list|get <type> <name>` reads credentials with the recovery passphrase instead; writes are rejected, the helper and AI sessions cannot use this mode, and each use is audited. To resume normal use, run `keyvalet recover-vault` on a Mac where Secure Enclave works. If the recovery passphrase may have been exposed, run `keyvalet rotate-recovery`: after a hardware unlock it replaces the hardware key, vault key and passphrase together, so the old passphrase no longer opens the current vault (older backups still open with it).
 
-Secure Enclave protection keeps the hardware private key nonexportable and prevents copied current vault files from being decrypted using the old file key. The derived AES key and credential plaintext still enter ordinary process memory. The encrypted key representation is bound to this Mac's Secure Enclave, not to KeyValet, so compromised root does not need to wait for an unlock: it can request a derivation itself, with any prompt text, and one approval yields the AES key (device binding doesn't help here, since root can read the binding file). It can also capture the key or plaintext during an approved unlock. Capturing the AES key permits offline decryption until rotation. Treat an unexpected system authentication prompt as a warning sign. Old `master.key` copies plus old vault backups remain decryptable, and deletion cannot guarantee forensic erasure from APFS snapshots or SSDs. See [SECURITY.md](../SECURITY.md).
+Secure Enclave protection keeps the hardware private key nonexportable and prevents copied current vault files from being decrypted using the old file key. The derived AES key and credential plaintext still enter ordinary process memory. The encrypted key representation is bound to this Mac's Secure Enclave, not to KeyValet, so compromised root does not need to wait for an unlock: it can request a derivation itself, with any prompt text, and one approval yields the AES key (device binding doesn't help here, since root can read the binding file). It can also capture the key or plaintext during an approved unlock. Capturing the AES key permits offline decryption until rotation. Treat an unexpected system authentication prompt as a warning sign. Old `master.key` copies plus old vault backups remain decryptable, and deletion cannot guarantee forensic erasure from APFS snapshots or SSDs. See [SECURITY.md](https://github.com/KeyValet/KeyValet/blob/main/SECURITY.md).
 
 ## Development
 

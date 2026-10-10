@@ -4,7 +4,7 @@
 
 KeyValet lets Claude Code, Cursor, Devin and other AI agents use your API keys and OAuth accounts — without ever seeing them. You approve each credential with Touch ID, KeyValet makes the call, and every use is logged.
 
-[Website](https://keyvalet.dev/) · [Guide](site/guide.md) · [Security](SECURITY.md) · [简体中文](README.zh-CN.md)
+[Website](https://keyvalet.dev/) · [Guide](https://keyvalet.dev/guide/) · [Security](SECURITY.md) · [简体中文](README.zh-CN.md)
 
 ## Install
 
@@ -46,7 +46,7 @@ OAuth, refresh tokens and private keys stay in KeyValet; the agent only ever get
 
 ## Learn more
 
-- [Guide](site/guide.md) — concepts, all tools, templates, gateway, CLI
+- [Guide](https://keyvalet.dev/guide/) — concepts, all tools, templates, gateway, CLI
 - [Security model](SECURITY.md) — what KeyValet guarantees, and what it doesn't
 - [Contributing](CONTRIBUTING.md) · [Code of Conduct](CODE_OF_CONDUCT.md) · [Governance](GOVERNANCE.md) · [Trademark policy](TRADEMARK.md)
 

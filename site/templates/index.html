@@ -1,0 +1,338 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="wrap">
+  <header class="hero">
+    <div>
+      {% if lang == "zh-CN" -%}
+      <h1>给 AI agent 一把代客钥匙，而不是你的万能钥匙。</h1>
+      <p class="lede">KeyValet 是 macOS 上给 AI agent 用的本地凭证代管。Claude Code、Codex、Cursor 等 MCP agent 可以使用你的 API key 和 OAuth 账号，却看不到它们：秘密留在 Secure Enclave 保护、只有 root 能读的凭证库里，由你用 Touch ID 批准——按凭证或按次——逐次弹窗显示的是真实请求。</p>
+      <p class="name-note">代客钥匙能开车，打不开后备箱。</p>
+      <div class="cta">
+        <a class="btn primary" href="#install">在 macOS 上安装</a>
+        <a class="btn ghost" href="{{ config.extra.repo }}">查看源码</a>
+      </div>
+      <p class="fine">开源（Apache-2.0），免费。完全在你的 Mac 上运行，支持任何 MCP 客户端。</p>
+      {%- else -%}
+      <h1>Give your AI agents a valet key, not your master key.</h1>
+      <p class="lede">KeyValet is a local credential broker for AI agents on macOS. Claude Code, Codex, Cursor and other MCP agents use your API keys and OAuth accounts without ever seeing them: the secrets stay in a Secure Enclave-protected, root-only vault, you approve with Touch ID — per credential or per use — and per-use prompts show the real request.</p>
+      <p class="name-note">A valet key starts the car but doesn’t open the trunk.</p>
+      <div class="cta">
+        <a class="btn primary" href="#install">Install on macOS</a>
+        <a class="btn ghost" href="{{ config.extra.repo }}">Read the source</a>
+      </div>
+      <p class="fine">Open source (Apache-2.0), free. Runs entirely on your Mac. Works with any MCP client.</p>
+      {%- endif %}
+    </div>
+
+    <figure class="ticket" aria-label="Example of a KeyValet approval">
+      <div class="head">
+        <strong>KeyValet</strong>
+        <span>No. 0bfd243</span>
+      </div>
+      {% if lang == "zh-CN" -%}
+      <dl>
+        <dt>凭证</dt><dd><code>openai/main</code></dd>
+        <dt>申请方</dt><dd>Claude Code</dd>
+        <dt>请求</dt><dd><code>GET api.openai.com</code><br><code>/v1/models</code></dd>
+        <dt>批准方式</dt><dd>你的指纹</dd>
+        <dt>有效期</dt><dd>仅这一次调用（逐次授权）</dd>
+      </dl>
+      <div class="tear" role="presentation"></div>
+      <p class="foot">钥匙留在 KeyValet 手里，agent 只拿到结果。</p>
+      <div class="stamp" aria-hidden="true">已批准<small>Touch ID</small></div>
+      {%- else -%}
+      <dl>
+        <dt>Credential</dt><dd><code>openai/main</code></dd>
+        <dt>Asked by</dt><dd>Claude Code</dd>
+        <dt>Request</dt><dd><code>GET api.openai.com</code><br><code>/v1/models</code></dd>
+        <dt>Approved by</dt><dd>Your fingerprint</dd>
+        <dt>Valid for</dt><dd>This call only (per-use mode)</dd>
+      </dl>
+      <div class="tear" role="presentation"></div>
+      <p class="foot">The key stays with the valet. The agent gets the answer.</p>
+      <div class="stamp" aria-hidden="true">APPROVED<small>with Touch ID</small></div>
+      {%- endif %}
+    </figure>
+  </header>
+</div>
+
+{% if config.extra.demo_gif -%}
+<div class="wrap">
+  <figure class="demo"><img src="/demo.gif" alt="60-second demo"></figure>
+</div>
+{%- endif %}
+
+<div class="wrap">
+  <ul class="supports">
+    {% if lang == "zh-CN" -%}
+    <li><strong>agent 永远看不到密钥</strong><span>由 KeyValet 注入，agent 只拿到响应。</span></li>
+    <li><strong>由你用指纹批准</strong><span>默认按凭证授权，也可以逐次——逐次弹窗显示真实请求，而不是一句「允许吗」。</span></li>
+    <li><strong>一个凭证库，所有 agent 共用</strong><span>Claude Code、Codex、Cursor、Grok、Devin 用同一套凭据、审批和审计。</span></li>
+    {%- else -%}
+    <li><strong>The agent never sees the key</strong><span>KeyValet injects it and the agent only gets the response.</span></li>
+    <li><strong>You approve with your fingerprint</strong><span>Per credential by default, per call if you want — and per-use prompts show the real request, not just “allow?”.</span></li>
+    <li><strong>One vault for every agent</strong><span>Claude Code, Codex, Cursor, Grok and Devin share the same credentials, approvals and audit log.</span></li>
+    {%- endif %}
+  </ul>
+</div>
+
+<section>
+  <div class="wrap">
+    {% if lang == "zh-CN" -%}
+    <h2>agent 需要钥匙时，发生了什么</h2>
+    <p class="intro">四步完成，秘密始终留在只有 root 能读的凭证库里。</p>
+    <ol class="flow">
+      <li>
+        <h3>agent 发出请求</h3>
+        <p>通过 MCP 说明要用哪个凭证、为了什么。</p>
+      </li>
+      <li>
+        <h3>你来批准</h3>
+        <p>Touch ID 弹窗显示凭证和这次授权放开的能力。逐次模式下显示真实请求——方法、域名、路径，以及已知 API 的关键业务字段——按一次，只授权这一笔。</p>
+      </li>
+      <li>
+        <h3>KeyValet 代为调用</h3>
+        <p>root 进程注入 key，只发往你允许的域名，并抹掉响应里回显的秘密。</p>
+      </li>
+      <li>
+        <h3>agent 拿到结果</h3>
+        <p>返回响应，记录会话、目的和结果。会话结束，授权随之失效。</p>
+      </li>
+    </ol>
+    {%- else -%}
+    <h2>What happens when an agent needs a key</h2>
+    <p class="intro">Four steps, and the secret never leaves the root-only vault.</p>
+    <ol class="flow">
+      <li>
+        <h3>The agent asks</h3>
+        <p>Over MCP, naming the credential and saying why it needs it.</p>
+      </li>
+      <li>
+        <h3>You approve</h3>
+        <p>Touch ID shows the credential and what the grant allows. In per-use mode it shows the real request — method, host, path, plus the business fields that matter for known APIs — and one touch approves exactly that call.</p>
+      </li>
+      <li>
+        <h3>KeyValet makes the call</h3>
+        <p>A root helper injects the key, only toward hosts you allowed, and redacts anything that echoes it back.</p>
+      </li>
+      <li>
+        <h3>The agent gets the answer</h3>
+        <p>Response in; session, purpose and result logged. The grant ends with the session.</p>
+      </li>
+    </ol>
+    {%- endif %}
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    {% if lang == "zh-CN" -%}
+    <h2>万能钥匙与代客钥匙</h2>
+    <p class="intro">把 key 写进 <code>.env</code> 或贴进对话，等于交出了万能钥匙。</p>
+    {%- else -%}
+    <h2>A master key versus a valet key</h2>
+    <p class="intro">Putting keys in <code>.env</code> or pasting them into chat hands over the master key.</p>
+    {%- endif %}
+    <table class="compare">
+      <thead>
+        {% if lang == "zh-CN" -%}
+        <tr><th scope="col"></th><th scope="col">万能钥匙：.env、贴进对话的 key</th><th scope="col">代客钥匙：KeyValet</th></tr>
+        {%- else -%}
+        <tr><th scope="col"></th><th scope="col">Master key: .env, pasted keys</th><th scope="col">Valet key: KeyValet</th></tr>
+        {%- endif %}
+      </thead>
+      <tbody>
+        {% if lang == "zh-CN" -%}
+        <tr>
+          <th scope="row">agent 看到什么</th>
+          <td>明文 key，留在上下文和日志里</td>
+          <td>只有响应。长期秘密不出 root 进程。</td>
+        </tr>
+        <tr>
+          <th scope="row">谁来决定</th>
+          <td>没人，文件能读就能用</td>
+          <td>你，按 Touch ID 批准——每次、每个凭证或每个会话</td>
+        </tr>
+        <tr>
+          <th scope="row">能发往哪里</th>
+          <td>agent 发到哪就是哪</td>
+          <td>只能发往你允许的域名，不跟随跳转</td>
+        </tr>
+        <tr>
+          <th scope="row">事后能查到什么</th>
+          <td>什么都查不到</td>
+          <td>每次使用的会话、目的和结果，写在只有 root 能读的审计日志里</td>
+        </tr>
+        <tr>
+          <th scope="row">存在哪里</th>
+          <td>明文文件，或别人的云上</td>
+          <td>你 Mac 上 Secure Enclave 保护、只有 root 能读的加密凭证库</td>
+        </tr>
+        {%- else -%}
+        <tr>
+          <th scope="row">What the agent sees</th>
+          <td>The plaintext key, in its context and logs</td>
+          <td>Only the response. Long-term secrets never leave root.</td>
+        </tr>
+        <tr>
+          <th scope="row">Who decides</th>
+          <td>Nobody, once the file is readable</td>
+          <td>You, with Touch ID — per use, per credential, or per session</td>
+        </tr>
+        <tr>
+          <th scope="row">Where it can go</th>
+          <td>Anywhere the agent sends it</td>
+          <td>Only the hosts you allowed, no redirects</td>
+        </tr>
+        <tr>
+          <th scope="row">What you can check later</th>
+          <td>Nothing</td>
+          <td>Every use, with session, purpose and result, in a root-only audit log</td>
+        </tr>
+        <tr>
+          <th scope="row">Where it lives</th>
+          <td>Plaintext files, or someone else’s cloud</td>
+          <td>A Secure Enclave-protected, encrypted vault on your Mac that only root can read</td>
+        </tr>
+        {%- endif %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    {% if lang == "zh-CN" -%}
+    <h2>认证的事交给它，agent 不用操心</h2>
+    <p class="intro">agent 拿到的是短期 token 或代理后的响应。refresh token、私钥和种子都留在凭证库里。</p>
+    <ul class="speaks">
+      <li><strong>API key 与 token</strong><span>约 50 个现成模板（OpenAI、Anthropic、Gemini、GitHub、Stripe、Notion、Slack 等），以及通用的 bearer、header、query、basic 认证。</span></li>
+      <li><strong>OAuth 2.0</strong><span>浏览器登录（PKCE）、设备码、客户端凭证，自动刷新。支持 Google、GitHub、Microsoft 和任意 OIDC 服务。</span></li>
+      <li><strong>给 SDK 用的本地网关</strong><span>把 SDK 的 base URL 指向 KeyValet（<code>OPENAI_BASE_URL</code> 风格），支持流式输出，程序拿不到真实 key。</span></li>
+      <li><strong>Google service account 与 GitHub App</strong><span>在凭证库内签名换取 token，agent 只拿到一小时有效的 token。</span></li>
+      <li><strong>AWS</strong><span>STS 临时凭证、AssumeRole，并可用保存的 TOTP 种子完成 MFA。</span></li>
+      <li><strong>TOTP 与签名 JWT</strong><span>当前的两步验证码；按模板签发 App Store Connect 这类 JWT。</span></li>
+    </ul>
+    {%- else -%}
+    <h2>It handles the auth, so agents don’t have to</h2>
+    <p class="intro">Agents receive short-lived tokens or proxied responses. Refresh tokens, private keys and seeds stay in the vault.</p>
+    <ul class="speaks">
+      <li><strong>API keys &amp; tokens</strong><span>About 50 ready-made templates — OpenAI, Anthropic, Gemini, GitHub, Stripe, Notion, Slack — plus generic bearer, header, query and basic auth.</span></li>
+      <li><strong>OAuth 2.0</strong><span>Browser sign-in with PKCE, device code, client credentials, automatic refresh. Google, GitHub, Microsoft, any OIDC provider.</span></li>
+      <li><strong>Local gateway for SDKs</strong><span>Point an SDK’s base URL at KeyValet (<code>OPENAI_BASE_URL</code>-style); streaming works and the program never holds the real key.</span></li>
+      <li><strong>Google service accounts &amp; GitHub Apps</strong><span>Signed JWT exchanges inside the vault; agents get one-hour tokens.</span></li>
+      <li><strong>AWS</strong><span>STS temporary credentials, AssumeRole, and MFA codes from a stored TOTP seed.</span></li>
+      <li><strong>TOTP &amp; signed JWTs</strong><span>Current two-factor codes; App Store Connect–style JWTs from a template.</span></li>
+    </ul>
+    {%- endif %}
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    {% if lang == "zh-CN" -%}
+    <h2>能找到的密钥，帮你收进凭证库</h2>
+    <p class="intro">钥匙不会自己走进凭证库，所以 KeyValet 帮你把它们找出来。</p>
+    <ul class="speaks">
+      <li><strong>keyvalet scan</strong><span>在 <code>.env*</code>、<code>~/.claude.json</code>、<code>.cursor/mcp.json</code>、<code>~/.codex/config.toml</code> 和 shell 启动文件里找可能的密钥；勾选后按匹配模板导入为「仅代理」，并从原文件移除（留备份）。</span></li>
+      <li><strong>编辑器 hook</strong><span>Claude Code、Codex、Cursor、Grok、Devin 的原生 hook 适配器：粘贴或硬编码进文件、命令行的 key 会被识别并引导进 KeyValet。</span></li>
+      <li><strong>审计日志</strong><span>每次解锁、授权、读取、取 token、代理调用和配置修改都记录在只有 root 能读的日志里——秘密本身从不写入。</span></li>
+    </ul>
+    {%- else -%}
+    <h2>It finds the keys you already have</h2>
+    <p class="intro">Keys don’t walk into a vault by themselves, so KeyValet helps collect them.</p>
+    <ul class="speaks">
+      <li><strong>keyvalet scan</strong><span>Finds possible secrets in <code>.env*</code>, <code>~/.claude.json</code>, <code>.cursor/mcp.json</code>, <code>~/.codex/config.toml</code> and shell rc files; you check what to import, it stores them proxy-only from their matching template and removes them from the file (with a backup).</span></li>
+      <li><strong>Editor hooks</strong><span>Native hook adapters for Claude Code, Codex, Cursor, Grok Build and Devin CLI: a key pasted or hard-coded into a file or command is flagged and redirected into KeyValet before it lands.</span></li>
+      <li><strong>Audit log</strong><span>Every unlock, grant, read, token fetch, proxied call and configuration change lands in a root-only log — the secrets themselves never do.</span></li>
+    </ul>
+    {%- endif %}
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    {% if lang == "zh-CN" -%}
+    <h2>能保证什么，不能保证什么</h2>
+    <p class="intro">凭证工具应该讲清楚自己的边界。完整的安全模型见 <a href="https://github.com/KeyValet/KeyValet/blob/main/SECURITY.md">SECURITY.md</a>，或本站的<a href="/zh-CN/security/">安全摘要</a>。</p>
+    <div class="limits">
+      <div>
+        <h3>能保证</h3>
+        <ul>
+          <li>没有设备主人认证，任何凭证都用不了。</li>
+          <li>协议凭证的长期秘密不出 root 进程；仅代理凭证永不返回明文。</li>
+          <li>新增域名、放宽规则、覆盖或删除都要你确认，由 root 进程强制，而不是面向 agent 的服务端。</li>
+          <li>每次使用都有记录，记录里从不出现秘密。</li>
+        </ul>
+      </div>
+      <div>
+        <h3>不能保证</h3>
+        <ul>
+          <li>你授权过的 agent，可以在授权范围内滥用这次授权。</li>
+          <li>目的是 agent 的自述，记录但不做核验；root 或 macOS 被攻破也防不住。</li>
+          <li>用 <code>credential_get</code> 取出的值会进入 agent 的上下文。</li>
+        </ul>
+      </div>
+    </div>
+    {%- else -%}
+    <h2>What it guarantees, and what it doesn’t</h2>
+    <p class="intro">A credential tool should be precise about its limits. The full model is in <a href="https://github.com/KeyValet/KeyValet/blob/main/SECURITY.md">SECURITY.md</a>, or read the <a href="/security/">security summary</a>.</p>
+    <div class="limits">
+      <div>
+        <h3>Guaranteed</h3>
+        <ul>
+          <li>No credential is used without device-owner authentication.</li>
+          <li>Long-term protocol secrets never leave the root helper; proxy-only credentials are never returned.</li>
+          <li>Adding hosts, loosening rules, overwriting or deleting needs your confirmation — enforced by root, not by the agent-facing server.</li>
+          <li>Every use is logged; secrets never are.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Not guaranteed</h3>
+        <ul>
+          <li>An agent you granted a credential can misuse that grant within its scope.</li>
+          <li>The purpose is the agent’s claim — recorded, never verified; compromised root or macOS is out of scope too.</li>
+          <li>Values you choose to reveal with <code>credential_get</code> are in the agent’s context.</li>
+        </ul>
+      </div>
+    </div>
+    {%- endif %}
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    {% if lang == "zh-CN" -%}
+    <h2>安装</h2>
+    <div class="install">
+      <div>
+        <p>一条命令。它会下载由 Simvito Limited Developer ID 签名的发布包并校验 SHA256SUMS，要你输一次密码，并自动配置好已安装的 Claude Code、Codex、Cursor、Grok、Devin CLI。重跑即可升级。</p>
+        <pre><code>curl -fsSL https://keyvalet.dev/install.sh | sh</code></pre>
+        <p>需要 Apple Silicon、macOS 14+（Intel 可从源码构建）。卸载：<code>curl -fsSL https://keyvalet.dev/install.sh | sh -s -- --uninstall</code></p>
+      </div>
+      <div>
+        <p>然后直接对 agent 说：</p>
+        <pre><code>“用 KeyValet 的 openai 模板保存我的 OpenAI key。”
+“用 KeyValet 列出我的 OpenAI 模型。”</code></pre>
+        <p>key 由你在原生对话框里输入，使用时由你用 Touch ID 批准。agent 始终看不到它。</p>
+      </div>
+    </div>
+    {%- else -%}
+    <h2>Install</h2>
+    <div class="install">
+      <div>
+        <p>One command. It downloads the release package signed with Simvito Limited’s Developer ID, verifies it against SHA256SUMS, asks for your password once, and sets up Claude Code, Codex, Cursor, Grok and Devin CLI if they’re installed. Run it again to upgrade.</p>
+        <pre><code>curl -fsSL https://keyvalet.dev/install.sh | sh</code></pre>
+        <p>Needs Apple Silicon with macOS 14+ (Intel builds from source). Uninstall with <code>curl -fsSL https://keyvalet.dev/install.sh | sh -s -- --uninstall</code></p>
+      </div>
+      <div>
+        <p>Then just ask your agent:</p>
+        <pre><code>“Store my OpenAI key in KeyValet with the openai template.”
+“Use KeyValet to list my OpenAI models.”</code></pre>
+        <p>You type the key into a native dialog, and approve its use with Touch ID. The agent never sees it.</p>
+      </div>
+    </div>
+    {%- endif %}
+  </div>
+</section>
+{% endblock %}

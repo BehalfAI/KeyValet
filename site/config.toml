@@ -1,0 +1,17 @@
+base_url = "https://keyvalet.dev"
+title = "KeyValet"
+description = "A local credential broker for AI agents on macOS."
+default_language = "en"
+generate_feeds = true
+feed_filenames = ["atom.xml"]
+build_search_index = false
+
+
+[languages."zh-CN"]
+title = "KeyValet"
+description = "macOS 上给 AI agent 用的本地凭证代管。"
+generate_feeds = true
+
+[extra]
+repo = "https://github.com/KeyValet/KeyValet"
+demo_gif = false

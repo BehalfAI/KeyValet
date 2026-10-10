@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="wrap">
+  <main class="prose">
+    <h1>{{ section.title }}</h1>
+    {% if section.description %}<p class="page-intro">{{ section.description }}</p>{% endif %}
+    {{ section.content | safe }}
+    {% for p in section.pages %}
+    <h3><a href="{{ p.permalink }}">{{ p.title }}</a></h3>
+    {% if p.date %}<p><small>{{ p.date }}</small>{% if p.description %} — {{ p.description }}{% endif %}</p>
+    {% elif p.description %}<p>{{ p.description }}</p>{% endif %}
+    {% endfor %}
+  </main>
+</div>
+{% endblock %}

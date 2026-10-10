@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="wrap">
+  <main class="prose">
+    {% if lang == "zh-CN" -%}
+    <h1>404 — 页面不存在</h1>
+    <p class="page-intro">这个页面不存在或已移动。回到 <a href="/zh-CN/">首页</a> 看看。</p>
+    {%- else -%}
+    <h1>404 — page not found</h1>
+    <p class="page-intro">This page doesn’t exist or has moved. Head back to the <a href="/">home page</a>.</p>
+    {%- endif %}
+  </main>
+</div>
+{% endblock %}

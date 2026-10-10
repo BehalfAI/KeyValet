@@ -18,6 +18,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Install Zola 0.23.6
+        run: |
+          curl -fsSL -o zola.tar.gz https://github.com/getzola/zola/releases/download/v0.23.6/zola-v0.23.6-x86_64-unknown-linux-gnu.tar.gz
+          echo "8f5132b3522412d04e395e0b25f6d68613ad272a873e54a2b3ebf664873024a4  zola.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf zola.tar.gz -C "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Build site
+        working-directory: site
+        run: zola build
       # Plain npx instead of cloudflare/wrangler-action@v3: that action defaults to wrangler 3.90.0
       # and its failures surfaced only as "npx failed with exit code 1", with no wrangler output.
       - name: Deploy site/ to Cloudflare Pages
@@ -30,7 +40,7 @@ jobs:
           set -o pipefail
           # On failure, also surface wrangler's last lines as an annotation (readable without
           # admin access to the job log; GitHub masks secret values in both).
-          if ! npx --yes wrangler@4.147.0 pages deploy site --project-name=keyvalet --branch=main 2>&1 | tee wrangler.log; then
+          if ! npx --yes wrangler@4.147.0 pages deploy site/public --project-name=keyvalet --branch=main 2>&1 | tee wrangler.log; then
             echo "::error title=wrangler pages deploy failed::$(tail -n 15 wrangler.log | sed 's/\x1b\[[0-9;]*m//g; s/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
             exit 1
           fi
