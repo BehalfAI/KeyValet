@@ -63,6 +63,43 @@ jobs:
           [ -n "$SIGN_IDENTITY" ] || { echo "Developer ID identity for PWCRJPY7YC not found in the imported p12" >&2; exit 1; }
           echo "SIGN_IDENTITY=$SIGN_IDENTITY" >> "$GITHUB_ENV"
       - run: REQUIRE_SIGNED=1 scripts/package-release.sh "$TAG"
+      # Apple notarizes the exact signed binaries that are in the tarball (tickets cannot be
+      # stapled to bare Mach-O files; Gatekeeper looks them up online). No release without it.
+      - name: Notarize the binaries
+        timeout-minutes: 50
+        env:
+          ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          set -eu
+          KEY="$RUNNER_TEMP/asc-notary.p8"
+          trap 'rm -f "$KEY"' EXIT
+          (umask 077; printf '%s' "$ASC_KEY_P8_BASE64" | /usr/bin/base64 -D > "$KEY")
+          BIN="dist/keyvalet-$TAG-macos-arm64/bin"
+          ZIP="$RUNNER_TEMP/kv-bin.zip"
+          /usr/bin/ditto -c -k --keepParent "$BIN" "$ZIP"
+          OUT="$RUNNER_TEMP/notary.json"
+          /usr/bin/xcrun notarytool submit "$ZIP" --key "$KEY" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" \
+            --wait --timeout 45m --output-format json > "$OUT" || true
+          STATUS=$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status",""))' "$OUT" 2>/dev/null || true)
+          ID=$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("id",""))' "$OUT" 2>/dev/null || true)
+          echo "Notarization $ID: ${STATUS:-no status}"
+          if [ "$STATUS" != "Accepted" ]; then
+            [ -n "$ID" ] && /usr/bin/xcrun notarytool log "$ID" --key "$KEY" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" || true
+            exit 1
+          fi
+          # Gatekeeper's online ticket lookup can lag the Accepted status briefly.
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            if /usr/sbin/spctl -a -t exec "$BIN/kv-helper" 2>/dev/null; then
+              /usr/sbin/spctl -a -vv -t exec "$BIN/kv-helper"
+              exit 0
+            fi
+            sleep 10
+          done
+          /usr/sbin/spctl -a -vv -t exec "$BIN/kv-helper" || true
+          echo "Gatekeeper does not accept the notarized binaries yet" >&2
+          exit 1
       - name: Check release notes exist
         if: github.event_name == 'push'
         run: test -f ".github/release-notes/$TAG.md"
