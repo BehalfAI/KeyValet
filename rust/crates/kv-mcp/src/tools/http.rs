@@ -772,11 +772,22 @@ impl Server {
             let mut p = Map::new();
             p.insert("type".into(), json!(ty));
             p.insert("name".into(), json!(a.name));
-            p.insert("method".into(), json!(a.method));
+            // Optional fields are inserted only when present: a JSON null `body` reaches the
+            // proxy as `Some(Null)`, which rejects GET/HEAD outright. (The helper also treats
+            // null as absent now; this keeps the wire form canonical.)
+            if let Some(v) = a.method {
+                p.insert("method".into(), json!(v));
+            }
             p.insert("url".into(), json!(a.url));
-            p.insert("headers".into(), json!(a.headers));
-            p.insert("query".into(), json!(a.query));
-            p.insert("body".into(), json!(a.body));
+            if let Some(v) = a.headers {
+                p.insert("headers".into(), json!(v));
+            }
+            if let Some(v) = a.query {
+                p.insert("query".into(), json!(v));
+            }
+            if let Some(v) = a.body {
+                p.insert("body".into(), json!(v));
+            }
             let r: Value = s.request("httpRequest", p).await?;
             Ok(ok_data(kv_i18n::t("响应：", "Response:"), r))
         })
@@ -846,22 +857,27 @@ impl Server {
             let mut p = Map::new();
             p.insert("type".into(), json!(ty));
             p.insert("name".into(), json!(a.name));
-            p.insert("allowed_hosts".into(), json!(a.allowed_hosts));
-            p.insert("inject".into(), json!(a.inject));
-            p.insert(
-                "test".into(),
-                match a.test {
-                    Some(mut t) => {
-                        if let Some(obj) = t.as_object_mut() {
-                            obj.entry("method").or_insert(json!("GET"));
-                        }
-                        t
-                    }
-                    None => Value::Null,
-                },
-            );
-            p.insert("proxy_only".into(), json!(a.proxy_only));
-            p.insert("remove".into(), json!(a.remove));
+            // Optional fields are inserted only when present: `Some(Null)` is not the same as
+            // absent in httpConfigure -- it would overwrite the stored inject/hosts/test with
+            // null.
+            if let Some(v) = a.allowed_hosts {
+                p.insert("allowed_hosts".into(), json!(v));
+            }
+            if let Some(v) = a.inject {
+                p.insert("inject".into(), json!(v));
+            }
+            if let Some(mut t) = a.test {
+                if let Some(obj) = t.as_object_mut() {
+                    obj.entry("method").or_insert(json!("GET"));
+                }
+                p.insert("test".into(), json!(t));
+            }
+            if let Some(v) = a.proxy_only {
+                p.insert("proxy_only".into(), json!(v));
+            }
+            if let Some(v) = a.remove {
+                p.insert("remove".into(), json!(v));
+            }
             let r: Value = s.request("httpConfigure", p).await?;
             Ok(ok_data(
                 kv_i18n::t("代理配置已更新：", "Proxy configuration updated:"),

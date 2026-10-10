@@ -60,6 +60,12 @@ fn get_bool(p: &JsonMap, key: &str) -> bool {
 fn get_f64(p: &JsonMap, key: &str) -> Option<f64> {
     p.get(key).and_then(Value::as_f64)
 }
+/// `None` for a missing key AND for an explicit JSON null: clients that serialize omitted
+/// optional fields as `null` (the MCP server does this) must behave exactly like clients that
+/// leave the key out -- prompt preview, the per-use binding digest and execution all agree.
+fn get_val<'a>(p: &'a JsonMap, key: &str) -> Option<&'a Value> {
+    p.get(key).filter(|v| !v.is_null())
+}
 fn get_str_map(p: &JsonMap, key: &str) -> Option<std::collections::HashMap<String, String>> {
     let obj = p.get(key)?.as_object()?;
     Some(
@@ -287,6 +293,7 @@ fn operation_binding(vault: &Vault, op: Op, p: &JsonMap) -> kv_vault::Result<Str
         &get_str(p, "name").unwrap_or_default(),
     )?;
     let mut bound = p.clone();
+    bound.retain(|_, v| !v.is_null());
     bound.insert(
         "__keyvalet_context".into(),
         json!({
@@ -365,7 +372,7 @@ fn grant_request_description(
             .into_iter()
             .collect();
         headers.sort();
-        let body = p.get("body").map(|b| match b {
+        let body = get_val(p, "body").map(|b| match b {
             Value::String(s) => s.clone(),
             other => other.to_string(),
         });
@@ -615,7 +622,7 @@ async fn settings_op<G: AuthorizeGate, C: Confirmer>(
         );
         return Ok(v);
     }
-    if p.get("grant_mode").is_none() && p.get("remember_hours").is_none() {
+    if get_val(p, "grant_mode").is_none() && get_val(p, "remember_hours").is_none() {
         return Ok(settings_view(
             &current,
             auth.as_deref().map(SessionAuth::snapshot).as_ref(),
@@ -821,7 +828,7 @@ fn field_key_ok(k: &str) -> bool {
 fn check_secrets(
     p: &JsonMap,
 ) -> kv_vault::Result<Option<std::collections::HashMap<String, String>>> {
-    let Some(v) = p.get("secrets") else {
+    let Some(v) = get_val(p, "secrets") else {
         return Ok(None);
     };
     let Some(obj) = v.as_object() else {
@@ -983,7 +990,7 @@ async fn access_token_op(vault: &Vault, p: &JsonMap) -> kv_vault::Result<Value> 
         kv_protocols::index::AccessTokenParams {
             scopes: str_array(p, "scopes"),
             repositories: str_array(p, "repositories"),
-            permissions: p.get("permissions").cloned(),
+            permissions: get_val(p, "permissions").cloned(),
             force: get_bool(p, "force"),
             via_proxy: false, // set only internally by the proxy layer, never from an external request
         },
@@ -1060,10 +1067,10 @@ async fn http_configure_op<C: Confirmer>(
             name: &name,
             purpose: &purpose,
             remove: get_bool(p, "remove"),
-            inject: p.get("inject"),
-            allowed_hosts: p.get("allowed_hosts"),
+            inject: get_val(p, "inject"),
+            allowed_hosts: get_val(p, "allowed_hosts"),
             proxy_only: p.get("proxy_only").and_then(Value::as_bool),
-            test: p.get("test"),
+            test: get_val(p, "test"),
         },
         confirmer,
     )
@@ -1082,7 +1089,7 @@ async fn http_request_op(vault: &Vault, p: &JsonMap) -> kv_vault::Result<Value> 
             url: get_str(p, "url").unwrap_or_default(),
             headers: get_str_map(p, "headers").unwrap_or_default(),
             query: get_str_map(p, "query").unwrap_or_default(),
-            body: p.get("body").cloned(),
+            body: get_val(p, "body").cloned(),
         },
     )
     .await?;

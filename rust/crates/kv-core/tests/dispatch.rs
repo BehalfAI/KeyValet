@@ -1187,6 +1187,113 @@ async fn set_with_inline_http_then_http_request_injects_the_credential() {
 }
 
 #[tokio::test]
+async fn a_get_with_a_null_body_is_the_same_as_no_body_and_reaches_the_upstream() {
+    let _guard = with_insecure_loopback();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/ping"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("pong"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let (_tmp, vault) = new_vault();
+    let auth_double = FakeAuth::new(); // Set needs no grant, and HttpRequest is auto-granted by the Set
+    let mut auth = session_auth(&vault, GrantMode::PerCredential, auth_double);
+    let confirmer = PanicConfirmer;
+    http_credential(&vault, &mut auth, &confirmer, *server.address()).await;
+
+    // Clients that serialize the omitted body as JSON null (the MCP server used to) must
+    // behave exactly like clients that leave it out.
+    let r = call(
+        &vault,
+        &mut auth,
+        &confirmer,
+        "httpRequest",
+        json!({"type": "api_key", "name": "svc", "method": "GET", "url": format!("http://{}/v1/ping", server.address()), "body": null}),
+    )
+    .await;
+    let v = result_of(r);
+    assert_eq!(v["status"], 200);
+    assert_eq!(v["body"], "pong");
+
+    // A real body on GET is still rejected -- before anything reaches the network.
+    let r = call(
+        &vault,
+        &mut auth,
+        &confirmer,
+        "httpRequest",
+        json!({"type": "api_key", "name": "svc", "method": "GET", "url": format!("http://{}/v1/ping", server.address()), "body": {"x": 1}}),
+    )
+    .await;
+    assert!(
+        error_of(&r).unwrap().contains("不能带请求体"),
+        "a real body on GET is still rejected: {:?}",
+        error_of(&r)
+    );
+}
+
+#[tokio::test]
+async fn a_per_use_approval_for_a_get_is_not_broken_by_toggling_null_and_absent_body() {
+    let _guard = with_insecure_loopback();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/ping"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("pong"))
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let (_tmp, vault) = new_vault();
+    let fake = FakeAuth::new();
+    let mut auth = session_auth(&vault, GrantMode::PerUse, fake.clone());
+    let confirmer = PanicConfirmer;
+    http_credential(&vault, &mut auth, &confirmer, *server.address()).await;
+
+    let url = format!("http://{}/v1/ping", server.address());
+    let with_null =
+        json!({"type": "api_key", "name": "svc", "method": "GET", "url": url, "body": null});
+    let without = json!({"type": "api_key", "name": "svc", "method": "GET", "url": url});
+
+    // Approve with `body: null`, execute with the key absent: the same request.
+    fake.push(true);
+    assert!(is_ok(
+        &call(
+            &vault,
+            &mut auth,
+            &confirmer,
+            "grant",
+            json!({"type": "api_key", "name": "svc", "operation": "httpRequest", "request": with_null}),
+        )
+        .await
+    ));
+    let r = call(
+        &vault,
+        &mut auth,
+        &confirmer,
+        "httpRequest",
+        without.clone(),
+    )
+    .await;
+    assert!(is_ok(&r), "{:?}", error_of(&r));
+
+    // And the other direction: approve with the key absent, execute with `body: null`.
+    fake.push(true);
+    assert!(is_ok(
+        &call(
+            &vault,
+            &mut auth,
+            &confirmer,
+            "grant",
+            json!({"type": "api_key", "name": "svc", "operation": "httpRequest", "request": without}),
+        )
+        .await
+    ));
+    let r = call(&vault, &mut auth, &confirmer, "httpRequest", with_null).await;
+    assert!(is_ok(&r), "{:?}", error_of(&r));
+}
+
+#[tokio::test]
 async fn gateway_open_fails_cleanly_when_no_gateway_is_attached_to_the_session() {
     let (_tmp, vault) = new_vault();
     let mut auth = session_auth(&vault, GrantMode::PerCredential, FakeAuth::new());
