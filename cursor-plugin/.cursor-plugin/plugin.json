@@ -1,7 +1,7 @@
 {
   "name": "keyvalet",
   "displayName": "KeyValet",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Use API keys, tokens and OAuth accounts without seeing them: secrets stay in the local vault, uses are Touch ID-approved and audited. Detects keys you share or are about to hard-code, and adds /keyvalet-add, /keyvalet-mode, /keyvalet-status, /keyvalet-lock and /keyvalet-audit. Requires the KeyValet install (curl -fsSL https://keyvalet.dev/install.sh | sh).",
   "author": {
     "name": "Simvito Limited"

@@ -40,9 +40,13 @@ builds `keyvalet-<tag>-macos-arm64.tar.gz` + `SHA256SUMS` into a draft release, 
 `.github/release-notes/<tag>.md` (`marketing/` is gitignored). A maintainer publishes the draft.
 
 The job runs in the protected `release` environment (a reviewer approves each run; its secrets
-hold the Developer ID p12, imported into a temporary keychain that the run deletes at the end). Every binary in a workflow
-package is signed with the Simvito Limited Developer ID (`PWCRJPY7YC`, hardened runtime,
-timestamped; not notarized). `REQUIRE_SIGNED=1` makes signing mandatory;
-`SIGN_IDENTITY=<sha1> scripts/package-release.sh <tag>` signs a local package.
+hold the Developer ID p12, imported into a temporary keychain that the run deletes at the end,
+plus the App Store Connect API key `ASC_KEY_P8_BASE64` / `ASC_KEY_ID` / `ASC_ISSUER_ID` used for
+notarization). Every binary in a workflow package is signed with the Simvito Limited Developer ID
+(`PWCRJPY7YC`, hardened runtime, timestamped) and the signed binaries are submitted to Apple with
+`notarytool`; the job fails before creating the draft if notarization is rejected or Gatekeeper
+does not accept them (added after v0.2.0; the v0.2.0 binaries were notarized after publication).
+`REQUIRE_SIGNED=1` makes signing mandatory; `SIGN_IDENTITY=<sha1> scripts/package-release.sh <tag>`
+signs a local package.
 Dry run without a tag: **Actions → release → Run workflow** (`workflow_dispatch`) builds and
 signs the package and uploads it as an artifact — no release is created.
