@@ -241,7 +241,9 @@ where
         deny_label,
     };
     let auth = Arc::new(AsyncMutex::new(SessionAuth::new(gate)));
-    {
+    // The session's gateway. We keep our own clone so teardown doesn't have to wait on the
+    // auth lock (a dispatch may be holding it, e.g. inside a Touch ID prompt).
+    let gateway = {
         let vault_for_audit = vault.clone();
         let ctx_for_audit = ctx.clone();
         let gateway_audit: kv_proxy::gateway::GatewayAudit =
@@ -252,9 +254,14 @@ where
                 }
                 let _ = vault_for_audit.audit(e);
             });
-        let gateway = kv_proxy::gateway::Gateway::new(vault.clone(), gateway_audit, gateway_uid);
-        auth.lock().await.gateway = Some(Arc::new(gateway));
-    }
+        let gateway = Arc::new(kv_proxy::gateway::Gateway::new(
+            vault.clone(),
+            gateway_audit,
+            gateway_uid,
+        ));
+        auth.lock().await.gateway = Some(gateway.clone());
+        gateway
+    };
 
     let stdout = Arc::new(AsyncMutex::new(writer));
 
@@ -269,6 +276,9 @@ where
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 64 * 1024];
     let in_flight = Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT));
+    // Dispatch tasks spawned for this session: aborted + drained when the session ends so no
+    // request keeps running (or keeps the vault) after the client is gone.
+    let mut tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
     let handshake_deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
 
     let end = 'outer: loop {
@@ -356,7 +366,8 @@ where
             let auth = auth.clone();
             let stdout = stdout.clone();
             let confirmer = confirmer.clone();
-            tokio::spawn(async move {
+            while tasks.try_join_next().is_some() {}
+            tasks.spawn(async move {
                 let _permit = permit;
                 let id = req.id;
                 let client_ctx = ctx.lock().await.clone();
@@ -376,6 +387,14 @@ where
             });
         }
     };
+
+    // Teardown order: stop the gateway first (listener + connection tasks -- no auth lock, so
+    // a dispatch stuck inside a prompt can't keep it alive), then cancel leftover dispatches,
+    // then the session-end audit. The SessionAuth's own clone of the gateway is dropped with it;
+    // Drop -> shutdown is idempotent.
+    gateway.shutdown();
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
 
     if *state.lock().await == State::Ready {
         let c = ctx.lock().await;
@@ -633,5 +652,203 @@ mod session_tests {
             .unwrap()
             .unwrap();
         assert!(matches!(outcome, Reject::Refused));
+    }
+
+    /// Regression for the daemon-mode leak: a gateway must not outlive its session. Open one
+    /// inside a session, close the client, and assert the port refuses connections and the
+    /// vault has no strong references left beyond the caller's.
+    #[tokio::test]
+    async fn session_end_shuts_down_the_gateway_and_drops_the_vault() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = enclave_vault(&tmp);
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let (sr, sw) = tokio::io::split(server);
+        let my_uid = unsafe { libc::getuid() };
+        let session = tokio::spawn(serve(
+            sr,
+            sw,
+            vault.clone(),
+            Some(my_uid),
+            AlwaysApprove,
+            AlwaysConfirm,
+            Arc::new(Fixed),
+        ));
+
+        let (mut cr, mut cw) = tokio::io::split(client);
+        cw.write_all(auth_line().as_bytes()).await.unwrap();
+        let mut buf = tokio::io::BufReader::new(&mut cr);
+        let mut first = String::new();
+        buf.read_line(&mut first).await.unwrap();
+        assert!(first.contains("\"ready\":true"), "{first}");
+
+        // Give the credential an inline http config, then open the gateway.
+        let set = json!({"id": 1, "op": "set", "params": {
+            "purpose": "run the test", "type": "api_key", "name": "svc", "value": "sk-abc",
+            "http": {"inject": {"headers": {"Authorization": "Bearer {{value}}"}}, "allowed_hosts": ["api.example.com"]}
+        }});
+        cw.write_all(serde_json::to_string(&set).unwrap().as_bytes())
+            .await
+            .unwrap();
+        cw.write_all(b"\n").await.unwrap();
+        let mut line = String::new();
+        buf.read_line(&mut line).await.unwrap();
+        assert!(line.contains("\"ok\":true"), "{line}");
+
+        let open = json!({"id": 2, "op": "gatewayOpen", "params": {
+            "purpose": "run the test", "type": "api_key", "name": "svc"
+        }});
+        cw.write_all(serde_json::to_string(&open).unwrap().as_bytes())
+            .await
+            .unwrap();
+        cw.write_all(b"\n").await.unwrap();
+        let mut line = String::new();
+        buf.read_line(&mut line).await.unwrap();
+        assert!(line.contains("\"ok\":true"), "{line}");
+        let result = serde_json::from_str::<Value>(&line).unwrap()["result"].clone();
+        let port = result["port"]
+            .as_u64()
+            .or_else(|| {
+                result["base"]
+                    .as_str()
+                    .and_then(|b| b.rsplit(':').next()?.parse::<u64>().ok())
+            })
+            .unwrap() as u16;
+
+        // The gateway accepts connections while the session is live.
+        assert!(std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok());
+
+        drop(cw);
+        drop(buf);
+        drop(cr);
+        tokio::time::timeout(std::time::Duration::from_secs(5), session)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            Arc::strong_count(&vault),
+            1,
+            "nothing from the session may retain the vault key"
+        );
+        assert!(
+            std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_err(),
+            "the gateway listener must be gone with the session"
+        );
+    }
+
+    /// Approves the first two authentications (handshake unlock, gateway grant), then blocks on
+    /// the third -- the per-credential grant prompt for `get` -- while holding the auth lock.
+    struct ApproveThenBlock {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    impl Authenticator for ApproveThenBlock {
+        async fn authenticate(&self, _r: &str, _d: &str) -> AuthOutcome {
+            if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2 {
+                AuthOutcome::Approved
+            } else {
+                tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+                AuthOutcome::Approved
+            }
+        }
+    }
+    impl Clone for ApproveThenBlock {
+        fn clone(&self) -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(
+                    self.calls.load(std::sync::atomic::Ordering::SeqCst),
+                ),
+            }
+        }
+    }
+
+    /// Teardown must not wait on the auth lock: with a dispatch task parked inside a Touch ID
+    /// prompt (holding it), EOF must still shut the gateway and return promptly.
+    #[tokio::test]
+    async fn session_end_is_not_delayed_by_a_prompt_blocked_dispatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = enclave_vault(&tmp);
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let (sr, sw) = tokio::io::split(server);
+        let my_uid = unsafe { libc::getuid() };
+        let session = tokio::spawn(serve(
+            sr,
+            sw,
+            vault.clone(),
+            Some(my_uid),
+            ApproveThenBlock {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            },
+            AlwaysConfirm,
+            Arc::new(Fixed),
+        ));
+
+        let (mut cr, mut cw) = tokio::io::split(client);
+        cw.write_all(auth_line().as_bytes()).await.unwrap();
+        let mut buf = tokio::io::BufReader::new(&mut cr);
+        let mut first = String::new();
+        buf.read_line(&mut first).await.unwrap();
+        assert!(first.contains("\"ready\":true"), "{first}");
+
+        let set = json!({"id": 1, "op": "set", "params": {
+            "purpose": "run the test", "type": "api_key", "name": "svc", "value": "sk-abc",
+            "http": {"inject": {"headers": {"Authorization": "Bearer {{value}}"}}, "allowed_hosts": ["api.example.com"]}
+        }});
+        cw.write_all(serde_json::to_string(&set).unwrap().as_bytes())
+            .await
+            .unwrap();
+        cw.write_all(b"\n").await.unwrap();
+        let mut line = String::new();
+        buf.read_line(&mut line).await.unwrap();
+        assert!(line.contains("\"ok\":true"), "{line}");
+
+        let open = json!({"id": 2, "op": "gatewayOpen", "params": {
+            "purpose": "run the test", "type": "api_key", "name": "svc"
+        }});
+        cw.write_all(serde_json::to_string(&open).unwrap().as_bytes())
+            .await
+            .unwrap();
+        cw.write_all(b"\n").await.unwrap();
+        let mut line = String::new();
+        buf.read_line(&mut line).await.unwrap();
+        assert!(line.contains("\"ok\":true"), "{line}");
+        let result = serde_json::from_str::<Value>(&line).unwrap()["result"].clone();
+        let port = result["port"]
+            .as_u64()
+            .or_else(|| {
+                result["base"]
+                    .as_str()
+                    .and_then(|b| b.rsplit(':').next()?.parse::<u64>().ok())
+            })
+            .unwrap() as u16;
+        assert!(std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok());
+
+        // This dispatch parks inside the grant prompt, holding the session auth lock.
+        let get = json!({"id": 3, "op": "get", "params": {
+            "purpose": "run the test", "type": "api_key", "name": "svc"
+        }});
+        cw.write_all(serde_json::to_string(&get).unwrap().as_bytes())
+            .await
+            .unwrap();
+        cw.write_all(b"\n").await.unwrap();
+        // Give the dispatch a moment to reach the blocked authenticate.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let started = std::time::Instant::now();
+        drop(cw);
+        drop(buf);
+        drop(cr);
+        tokio::time::timeout(std::time::Duration::from_secs(5), session)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "teardown must not wait on a prompt-blocked dispatch"
+        );
+        assert!(
+            std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_err(),
+            "the gateway listener must be gone with the session"
+        );
+        assert_eq!(Arc::strong_count(&vault), 1);
     }
 }

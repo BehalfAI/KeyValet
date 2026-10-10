@@ -84,6 +84,9 @@ pub struct Gateway {
     audit: GatewayAudit,
     allowed_uid: Option<u32>,
     started: tokio::sync::OnceCell<()>,
+    /// The accept-loop task, once started. Aborting it drops its `JoinSet` of connection tasks,
+    /// which drops them too -- nothing keeps running (or holds the vault's key) after shutdown.
+    listener: Arc<std::sync::Mutex<Option<tokio::task::AbortHandle>>>,
 }
 
 pub struct OpenResult {
@@ -105,6 +108,7 @@ impl Gateway {
             audit,
             allowed_uid,
             started: tokio::sync::OnceCell::new(),
+            listener: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -151,8 +155,18 @@ impl Gateway {
         })
     }
 
-    pub fn close(&self) {
+    /// Session end: revoke every token (in-flight requests stop at the next epoch check) and
+    /// abort the listener -- which takes all connection tasks with it, so nothing outlives the
+    /// session holding a strong reference to the vault.
+    pub fn shutdown(&self) {
         self.inner.revoke();
+        if let Some(handle) = self.listener.lock().unwrap().take() {
+            handle.abort();
+        }
+    }
+
+    pub fn close(&self) {
+        self.shutdown();
     }
 
     async fn ensure_started(&self) -> std::io::Result<()> {
@@ -160,16 +174,24 @@ impl Gateway {
         let vault = self.vault.clone();
         let audit = self.audit.clone();
         let allowed_uid = self.allowed_uid;
+        let listener_slot = self.listener.clone();
         self.started
             .get_or_try_init(|| async move {
                 let listener = TcpListener::bind("127.0.0.1:0").await?;
                 let port = listener.local_addr()?.port();
                 *inner.port.lock().unwrap() = port;
-                tokio::spawn(serve(listener, inner, vault, audit, allowed_uid));
+                let task = tokio::spawn(serve(listener, inner, vault, audit, allowed_uid));
+                *listener_slot.lock().unwrap() = Some(task.abort_handle());
                 Ok::<(), std::io::Error>(())
             })
             .await
             .copied()
+    }
+}
+
+impl Drop for Gateway {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -214,6 +236,9 @@ async fn serve(
     audit: GatewayAudit,
     allowed_uid: Option<u32>,
 ) {
+    // Owns every connection task: when this task is aborted (session end), the JoinSet drops and
+    // aborts all of them, so no detached connection keeps the vault key alive.
+    let mut conns: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
     loop {
         let Ok((stream, peer_addr)) = listener.accept().await else {
             continue;
@@ -221,7 +246,8 @@ async fn serve(
         let inner = inner.clone();
         let vault = vault.clone();
         let audit = audit.clone();
-        tokio::spawn(async move {
+        while conns.try_join_next().is_some() {}
+        conns.spawn(async move {
             if let Some(want_uid) = allowed_uid {
                 match peer_uid(peer_addr.port()).await {
                     Some(uid) if uid == want_uid => {}

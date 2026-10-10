@@ -227,7 +227,19 @@ pub async fn run(uid: u32) {
                     }
                     Ok(u) if u == uid => {
                         let Ok(permit) = permits.clone().try_acquire_owned() else {
+                            // Tell the client why instead of a silent close.
+                            let msg = kv_ipc::ReadyMessage::NotReady {
+                                ready: kv_ipc::False,
+                                protocol: kv_ipc::PROTOCOL_VERSION,
+                                error: kv_i18n::t(
+                                    "已打开的 KeyValet 会话过多（32 个），请关闭一些 AI 会话",
+                                    "Too many KeyValet sessions are open (32); close some AI sessions",
+                                ),
+                            };
+                            let mut line = serde_json::to_vec(&msg).unwrap();
+                            line.push(b'\n');
                             let mut stream = stream;
+                            let _ = stream.write_all(&line).await;
                             let _ = stream.shutdown().await;
                             continue;
                         };

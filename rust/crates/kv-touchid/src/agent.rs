@@ -378,7 +378,9 @@ pub fn run() -> i32 {
             }
             Err(_) => std::thread::sleep(backoff),
         }
-        backoff = (backoff * 2).min(Duration::from_secs(30));
+        // 5 s cap: the daemon kickstarts us on demand when a session needs prompts, so a
+        // longer backoff would make the first session after a daemon restart time out.
+        backoff = (backoff * 2).min(Duration::from_secs(5));
     }
 }
 
