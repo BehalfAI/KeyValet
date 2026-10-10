@@ -162,6 +162,8 @@
 | 6.5 | `市场` 事故复盘第三篇（GhostSplice）；5 分钟演示视频；争取第一个播客 | 内容 | — |
 | 6.6 | `市场` r/selfhosted 与 Linux 社区发 Linux 支持；v0.4 发布 | Release | — |
 
+**2026-10-10 Linux 方案决定（排在 v0.1 发布与 5.1 策略引擎之后）：** helper 按规划做常驻服务（系统用户 `keyvalet`、systemd、Unix socket + `SO_PEERCRED` 识别调用者），不沿用 macOS 的「每会话 sudo 启动 root helper」。审批优先用 polkit：每次都要求重新验证（`auth_self`），由用户会话里的 polkit 代理要求输入登录密码或指纹，AI 不知道密码就无法批准；无 GUI 时用 polkit 的终端代理，没有 polkit 时才退回 6.2 的确认码方式（只允许 T0/T1）。Linux 验证在内网 Ubuntu 机器 `ndu` 上通过 ssh 进行。
+
 ### 第 4 月
 
 | # | 任务 | 产出 | 完成标准 |
