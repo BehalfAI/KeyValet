@@ -38,3 +38,11 @@ daemon trusts the agent only after checking its audit-token code signature (`AGE
 Push a `vX.Y.Z` tag matching `rust/crates/kv-cli/Cargo.toml`; `.github/workflows/release.yml`
 builds `keyvalet-<tag>-macos-arm64.tar.gz` + `SHA256SUMS` into a draft release, with notes from
 `.github/release-notes/<tag>.md` (`marketing/` is gitignored). A maintainer publishes the draft.
+
+The job runs in the protected `release` environment (a reviewer approves each run; its secrets
+hold the Developer ID p12, imported into a temporary keychain that the run deletes at the end). Every binary in a workflow
+package is signed with the Simvito Limited Developer ID (`PWCRJPY7YC`, hardened runtime,
+timestamped; not notarized). `REQUIRE_SIGNED=1` makes signing mandatory;
+`SIGN_IDENTITY=<sha1> scripts/package-release.sh <tag>` signs a local package.
+Dry run without a tag: **Actions → release → Run workflow** (`workflow_dispatch`) builds and
+signs the package and uploads it as an artifact — no release is created.

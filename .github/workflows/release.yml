@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -11,6 +12,9 @@ permissions:
 jobs:
   release:
     runs-on: macos-latest
+    # Protected environment: a reviewer must approve each run. Secrets there hold the
+    # Developer ID p12; nothing below prints a secret value and there is no `set -x` anywhere.
+    environment: release
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -19,10 +23,61 @@ jobs:
           workspaces: rust
       - run: cargo test --workspace --locked
         working-directory: rust
-      - run: scripts/package-release.sh "$GITHUB_REF_NAME"
+      - name: Resolve tag
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="v$(/usr/bin/sed -n 's/^version *= *"\([^"]*\)".*/\1/p' rust/crates/kv-cli/Cargo.toml | head -1)"
+          else
+            TAG="$GITHUB_REF_NAME"
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+      - name: Import signing identity
+        env:
+          DEVELOPER_ID_P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          set -eu
+          KC="$RUNNER_TEMP/kv-sign.keychain-db"
+          KC_PASS=$(/usr/bin/openssl rand -hex 24)
+          echo "KC=$KC" >> "$GITHUB_ENV"
+          /usr/bin/security create-keychain -p "$KC_PASS" "$KC"
+          /usr/bin/security set-keychain-settings -lut 21600 "$KC"
+          /usr/bin/security unlock-keychain -p "$KC_PASS" "$KC"
+          P12="$RUNNER_TEMP/devid.p12"
+          printf '%s' "$DEVELOPER_ID_P12_BASE64" | /usr/bin/base64 -D > "$P12"
+          /usr/bin/security import "$P12" -k "$KC" -f pkcs12 -P "$DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign >/dev/null
+          rm -f "$P12"
+          # Apple requires the Developer ID intermediate in the same keychain; verify the
+          # exact G2 CA fingerprint before trusting it.
+          /usr/bin/curl -fsSL -o "$RUNNER_TEMP/DeveloperIDG2CA.cer" https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          FP=$(/usr/bin/openssl x509 -in "$RUNNER_TEMP/DeveloperIDG2CA.cer" -inform DER -noout -fingerprint -sha256 | /usr/bin/cut -d= -f2)
+          [ "$FP" = "F1:6C:D3:C5:4C:7F:83:CE:A4:BF:1A:3E:6A:08:19:C8:AA:A8:E4:A1:52:8F:D1:44:71:5F:35:06:43:D2:DF:3A" ] || {
+            echo "DeveloperIDG2CA fingerprint mismatch: $FP" >&2; exit 1;
+          }
+          /usr/bin/security add-certificates -k "$KC" "$RUNNER_TEMP/DeveloperIDG2CA.cer"
+          /usr/bin/security set-key-partition-list -S apple-tool:,apple: -s -k "$KC_PASS" "$KC" >/dev/null
+          /usr/bin/security list-keychain -d user -s "$KC" $(/usr/bin/security list-keychain -d user | /usr/bin/sed -n 's/^ *"\(.*\)"/\1/p')
+          SIGN_IDENTITY=$(/usr/bin/security find-identity -v -p codesigning "$KC" | /usr/bin/sed -n 's/^ *[0-9]*) \([0-9A-F]*\) "Developer ID Application: Simvito Limited (PWCRJPY7YC)"/\1/p' | /usr/bin/head -1)
+          [ -n "$SIGN_IDENTITY" ] || { echo "Developer ID identity for PWCRJPY7YC not found in the imported p12" >&2; exit 1; }
+          echo "SIGN_IDENTITY=$SIGN_IDENTITY" >> "$GITHUB_ENV"
+      - run: REQUIRE_SIGNED=1 scripts/package-release.sh "$TAG"
       - name: Check release notes exist
-        run: test -f ".github/release-notes/$GITHUB_REF_NAME.md"
+        if: github.event_name == 'push'
+        run: test -f ".github/release-notes/$TAG.md"
       - name: Create draft release
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" "dist/keyvalet-$GITHUB_REF_NAME-macos-arm64.tar.gz" dist/SHA256SUMS --draft --verify-tag --title "KeyValet $GITHUB_REF_NAME" --notes-file ".github/release-notes/$GITHUB_REF_NAME.md"
+        run: gh release create "$TAG" "dist/keyvalet-$TAG-macos-arm64.tar.gz" dist/SHA256SUMS --draft --verify-tag --title "KeyValet $TAG" --notes-file ".github/release-notes/$TAG.md"
+      - name: Upload dry-run package
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: keyvalet-${{ env.TAG }}-macos-arm64
+          path: |
+            dist/keyvalet-${{ env.TAG }}-macos-arm64.tar.gz
+            dist/SHA256SUMS
+          retention-days: 7
+      - name: Delete the signing keychain
+        if: always()
+        run: /usr/bin/security delete-keychain "$KC" 2>/dev/null || true

@@ -3,6 +3,10 @@
 #   dist/keyvalet-<tag>-macos-arm64.tar.gz + dist/SHA256SUMS
 # Run from anywhere: ./scripts/package-release.sh v0.1.0
 # The tag must equal the crate version in rust/crates/kv-cli/Cargo.toml.
+#
+# Signing: set SIGN_IDENTITY to a codesigning identity SHA-1 to sign every binary
+# (hardened runtime, timestamped, dev.keyvalet.* identifiers); TeamIdentifier must verify as
+# PWCRJPY7YC or the build fails. REQUIRE_SIGNED=1 makes SIGN_IDENTITY mandatory.
 set -eu
 
 SRC_DIR=$(cd "$(dirname "$0")/.." && pwd)
@@ -29,6 +33,24 @@ for b in kv-helper kv-touchid kv-mcp kv-cli kv-hook; do
   [ "$minos" = "14.0" ] || { echo "$b targets minos $minos, expected 14.0" >&2; exit 1; }
   cp "$BIN_DIR/$b" "$STAGE/bin/"
 done
+
+if [ "${REQUIRE_SIGNED:-0}" = 1 ] && [ -z "${SIGN_IDENTITY:-}" ]; then
+  echo "REQUIRE_SIGNED=1 but no SIGN_IDENTITY given" >&2
+  exit 1
+fi
+if [ -n "${SIGN_IDENTITY:-}" ]; then
+  # Same team check as install.sh: a package is only shipped if every binary verifies strict
+  # AND carries our team identifier.
+  team_of() { /usr/bin/codesign -dv --verbose=4 "$1" 2>&1 | /usr/bin/sed -n 's/^TeamIdentifier=\(.*\)/\1/p'; }
+  for b in kv-helper kv-touchid kv-mcp kv-cli kv-hook; do
+    case "$b" in kv-*) ident=${b#kv-};; esac
+    /usr/bin/codesign --force --options runtime --timestamp \
+      --identifier "dev.keyvalet.$ident" -s "$SIGN_IDENTITY" "$STAGE/bin/$b" >/dev/null
+    /usr/bin/codesign --verify --strict "$STAGE/bin/$b" || { echo "$b failed codesign --verify --strict" >&2; exit 1; }
+    [ "$(team_of "$STAGE/bin/$b")" = "PWCRJPY7YC" ] || { echo "$b is not signed for team PWCRJPY7YC" >&2; exit 1; }
+  done
+  echo "Signed all binaries with $SIGN_IDENTITY (team PWCRJPY7YC)"
+fi
 
 # Only the committed catalog; templates/n8n-catalog.json is a gitignored local, personal-use import.
 cp "$SRC_DIR/templates/catalog.json" "$STAGE/templates/"
