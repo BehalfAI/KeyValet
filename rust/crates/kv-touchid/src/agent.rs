@@ -61,6 +61,9 @@ impl Runner for ProcessRunner {
         input: Option<&[u8]>,
         timeout: Duration,
     ) -> io::Result<RunOut> {
+        // The trust check lives in the real runner, so request-handling tests with a fake runner
+        // don't depend on an installed KeyValet (CI runners have none).
+        checked(program)?;
         let mut child = Command::new(program)
             .args(args)
             .env_clear()
@@ -89,6 +92,7 @@ impl Runner for ProcessRunner {
         timeout: Duration,
         buf: &mut [u8],
     ) -> io::Result<(Option<i32>, usize, bool)> {
+        checked(program)?;
         let mut child = Command::new(program)
             .args(args)
             .env_clear()
@@ -188,9 +192,6 @@ pub fn handle_request(
         Some("authenticate") => {
             let reason = s(v, "reason");
             let cancel = s(v, "cancel");
-            if checked(TOUCHID_BIN).is_err() {
-                return (wire::reply(id, &[("outcome", json!("denied"))]), None);
-            }
             let outcome = match runner.run(TOUCHID_BIN, &[&reason, &cancel], None, AUTH_TIMEOUT) {
                 Ok(out) => match out.code {
                     Some(0) => "approved",
@@ -206,9 +207,6 @@ pub fn handle_request(
             let ok_label = s(v, "ok_label");
             let title = kv_i18n::t("KeyValet · 安全确认", "KeyValet · Security Confirmation");
             let deny = kv_i18n::t("拒绝", "Deny");
-            if checked(OSASCRIPT_BIN).is_err() {
-                return (wire::reply(id, &[("confirmed", json!(false))]), None);
-            }
             let args = [
                 "-e",
                 USER_CONFIRM_SCRIPT,
@@ -239,18 +237,6 @@ pub fn handle_request(
             }
             let reason = s(v, "reason");
             let cancel = s(v, "cancel");
-            if checked(TOUCHID_BIN).is_err() {
-                return (
-                    wire::reply(
-                        id,
-                        &[
-                            ("ok", json!(false)),
-                            ("error", json!("kv-touchid is untrusted")),
-                        ],
-                    ),
-                    None,
-                );
-            }
             let metadata = v.get("metadata").cloned().unwrap_or(Value::Null);
             let input = if metadata.is_null() {
                 None
