@@ -377,12 +377,17 @@ fn grant_request_description(
             other => other.to_string(),
         });
         let target = format!("{}{}", url.host_str().unwrap_or_default(), url.path());
+        let body = crate::summarize::body_line(
+            url.host_str().unwrap_or_default(),
+            &headers,
+            body.as_deref(),
+        );
         return Ok(crate::prompt::http_request(
             &method,
             &target,
             url.query(),
             &headers,
-            body.as_deref(),
+            body,
         ));
     }
     if op == Op::HttpTest {
@@ -870,7 +875,7 @@ fn check_secrets(
 /// the proxy configuration (the secrets of a new credential were just entered by the user, so the
 /// domains need no further confirmation -- this is the implicit-consent path; see
 /// `kv_proxy::manage::configure_http` for the explicit, confirmation-gated path used afterwards).
-fn set_static(vault: &Vault, p: &JsonMap) -> kv_vault::Result<Value> {
+pub fn set_static(vault: &Vault, p: &JsonMap) -> kv_vault::Result<Value> {
     let ty = get_str(p, "type").unwrap_or_default();
     let name = get_str(p, "name").unwrap_or_default();
     let secrets = check_secrets(p)?;

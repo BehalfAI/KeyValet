@@ -2,11 +2,12 @@
 //! add an operation only for per-use approval or when it changes the credential's exposure.
 //! Purpose and source context belong in the audit log.
 
+use crate::summarize::BodyLine;
 use crate::GrantMode;
 
 /// Keep untrusted text on one line and remove invisible direction/format overrides. These
 /// affect display only; the original purpose and context remain available in the audit log.
-fn single_line(text: &str) -> String {
+pub(crate) fn single_line(text: &str) -> String {
     let mut out = String::new();
     let mut space = false;
     for c in text.chars() {
@@ -26,7 +27,7 @@ fn single_line(text: &str) -> String {
     out
 }
 
-fn shorten(text: &str, limit: usize) -> String {
+pub(crate) fn shorten(text: &str, limit: usize) -> String {
     let chars: Vec<_> = text.chars().collect();
     if chars.len() <= limit {
         return text.to_string();
@@ -80,7 +81,7 @@ pub fn http_request(
     target: &str,
     query: Option<&str>,
     headers: &[(String, String)],
-    body: Option<&str>,
+    body: BodyLine,
 ) -> String {
     let mut lines = vec![shorten(&single_line(&format!("{method} {target}")), 120)];
     if let Some(query) = query.filter(|q| !q.is_empty()) {
@@ -94,16 +95,22 @@ pub fn http_request(
             80,
         ));
     }
-    if let Some(body) = body.filter(|b| !b.is_empty()) {
-        let flat = single_line(body);
-        let preview = shorten(&flat, 60);
-        let size = if preview == flat {
-            String::new()
-        } else {
-            format!(" ({} B)", body.len())
-        };
-        let label = kv_i18n::t("请求体 ", "body ");
-        lines.push(format!("{label}{preview}{size}"));
+    let label = kv_i18n::t("请求体 ", "body ");
+    match body {
+        BodyLine::None => {}
+        BodyLine::Summary(s) => lines.push(shorten(&single_line(&format!("{label}{s}")), 80)),
+        BodyLine::SizeOnly(n) => lines.push(format!("{label}({n} B)")),
+        BodyLine::Preview(body) if !body.is_empty() => {
+            let flat = single_line(&body);
+            let preview = shorten(&flat, 60);
+            let size = if preview == flat {
+                String::new()
+            } else {
+                format!(" ({} B)", body.len())
+            };
+            lines.push(format!("{label}{preview}{size}"));
+        }
+        BodyLine::Preview(_) => {}
     }
     lines.join("\n")
 }
@@ -160,7 +167,7 @@ mod tests {
             "api.github.com/graphql",
             Some("a=1&b=2"),
             &[("X-HTTP-Method-Override".into(), "DELETE\u{202e}".into())],
-            Some(&body),
+            BodyLine::Preview(body.clone()),
         );
         let lines: Vec<&str> = shown.lines().collect();
         assert_eq!(lines.len(), 4);
@@ -170,6 +177,28 @@ mod tests {
         assert!(lines[3].contains("deleteRepository"));
         assert!(lines[3].ends_with(&format!("({} B)", body.len())));
         assert!(!shown.contains('\u{202e}'));
+    }
+
+    #[test]
+    fn summary_and_size_only_bodies_render_as_one_labelled_line() {
+        let shown = http_request(
+            "POST",
+            "api.openai.com/v1/chat/completions",
+            None,
+            &[],
+            BodyLine::Summary("model=gpt-5 · stream=true".into()),
+        );
+        let line = shown.lines().nth(1).unwrap();
+        assert!(line.contains("model=gpt-5 · stream=true"));
+
+        let shown = http_request(
+            "POST",
+            "api.openai.com/v1/x",
+            None,
+            &[],
+            BodyLine::SizeOnly(13),
+        );
+        assert!(shown.lines().nth(1).unwrap().ends_with("(13 B)"));
     }
 
     #[test]

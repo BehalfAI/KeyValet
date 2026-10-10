@@ -14,6 +14,7 @@ kv-hook = { path = "../kv-hook" }
 kv-i18n = { path = "../kv-i18n" }
 kv-platform = { path = "../kv-platform" }
 kv-vault = { path = "../kv-vault" }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rpassword = "7"
 libc = "0.2"

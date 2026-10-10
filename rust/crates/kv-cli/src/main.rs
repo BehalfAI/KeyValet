@@ -39,7 +39,7 @@ fn usage() -> String {
         \u{20}\u{20}audit [行数]                       查看审计日志（默认 50 行）\n\
         \u{20}\u{20}grant-mode [per-use|per-credential|per-session|remember [小时]|forget]\n\
         \u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}查看/设置授权模式：每次 / 每个凭证 / 每个会话按 Touch ID，或按一次后记住一段时间\n\
-        \u{20}\u{20}scan [--report-only]               在常见配置文件（.env、~/.claude.json 等）里找可能的密钥，弹窗勾选后导入并从原文件移除（备份在 <file>.bak-keyvalet）；加 --report-only 只报告不改动\n\
+        \u{20}\u{20}scan [--report-only]               在常见配置文件（.env、~/.claude.json 等）里找可能的密钥，弹窗勾选后导入并从原文件移除（备份在 <file>.bak-keyvalet）；命中模板的凭证按模板配置为仅代理；加 --report-only 只报告不改动\n\
         \u{20}\u{20}\u{20}\u{20}\u{20}\u{20}--report-only                  只扫描和报告，不弹窗、不导入、不改动任何文件",
         "Usage: keyvalet <command>\n\n\
         \u{20}\u{20}setup-enclave                      Initialize or migrate to required macOS hardware protection\n\
@@ -64,7 +64,7 @@ fn usage() -> String {
         \u{20}\u{20}audit [lines]                      Show the audit log (default 50 lines)\n\
         \u{20}\u{20}grant-mode [per-use|per-credential|per-session|remember [hours]|forget]\n\
         \u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}Show/set grant mode: Touch ID per use / per credential / per session, or once and remember for a while\n\
-        \u{20}\u{20}scan [--report-only]               Look for possible secrets in common config files (.env, ~/.claude.json, ...); shows a checkbox dialog, imports what's picked, and removes it from the file (backup at <file>.bak-keyvalet); add --report-only to only report, never change anything\n\
+        \u{20}\u{20}scan [--report-only]               Look for possible secrets in common config files (.env, ~/.claude.json, ...); shows a checkbox dialog, imports what's picked (configured from the matching template as proxy-only when there is one), and removes it from the file (backup at <file>.bak-keyvalet); add --report-only to only report, never change anything\n\
         \u{20}\u{20}\u{20}\u{20}\u{20}\u{20}--report-only                  Only scan and report; no dialog, no import, no file changes",
     )
 }
@@ -146,6 +146,22 @@ fn parse_options(args: &[String]) -> Options {
         i += 1;
     }
     opts
+}
+
+/// What `keyvalet get` prints for a static credential. Template-imported credentials store their
+/// secret under `secrets` with an empty `value` (mirroring the MCP set path), so a single secret
+/// field prints as the value and several print as pretty JSON, same style as the protocol branch.
+fn static_secret_to_print(record: &kv_vault::CredentialRecord) -> String {
+    if !record.value.is_empty() {
+        return record.value.clone();
+    }
+    match &record.secrets {
+        Some(secrets) if secrets.len() == 1 => secrets.values().next().unwrap().clone(),
+        Some(secrets) if !secrets.is_empty() => {
+            serde_json::to_string_pretty(&json!({"fields": secrets})).unwrap()
+        }
+        _ => record.value.clone(),
+    }
 }
 
 fn audited<T>(
@@ -329,10 +345,11 @@ fn main() {
                 vault.get_record(ty, name)
             });
             if record.kind_or_static() == kv_vault::Kind::Static {
+                let out = static_secret_to_print(&record);
                 if std::io::stdout().is_terminal() {
-                    println!("{}", record.value);
+                    println!("{out}");
                 } else {
-                    print!("{}", record.value);
+                    print!("{out}");
                 }
             } else {
                 // Protocol credentials: print the full config and secrets (terminal-only, running
@@ -1332,12 +1349,102 @@ end run"#,
     matches!(run_osascript_as_user(&script, &[]), Some((0, out)) if out.trim() == yes_label)
 }
 
+/// The slice of `catalog.json` `keyvalet scan` needs to configure an imported credential for the
+/// proxy. Deliberately minimal and local to kv-cli: kv-mcp's full template loader pulls in
+/// rmcp/tokio, which a synchronous CLI doesn't want.
+#[derive(serde::Deserialize)]
+struct ScanTemplateField {
+    name: String,
+    #[serde(default)]
+    secret: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct ScanTemplate {
+    id: String,
+    name: String,
+    #[serde(default = "default_static_kind")]
+    kind: String,
+    fields: Vec<ScanTemplateField>,
+    inject: Option<Value>,
+    test: Option<Value>,
+    #[serde(default)]
+    hosts: Vec<String>,
+}
+
+fn default_static_kind() -> String {
+    "static".to_string()
+}
+
+/// Reads `<dir>/catalog.json` and returns the template whose id matches `id`
+/// (case-insensitively), or `None` when the file is missing, unparseable, or has no match.
+/// Production passes `kv_platform::paths::TEMPLATES_DIR`; tests point at the repo's own
+/// `templates/` via `env!("CARGO_MANIFEST_DIR")` so they don't depend on a KeyValet install.
+fn catalog_template(dir: &std::path::Path, id: &str) -> Option<ScanTemplate> {
+    #[derive(serde::Deserialize)]
+    struct Catalog {
+        templates: Vec<ScanTemplate>,
+    }
+    let text = std::fs::read_to_string(dir.join("catalog.json")).ok()?;
+    let catalog: Catalog = serde_json::from_str(&text).ok()?;
+    catalog
+        .templates
+        .into_iter()
+        .find(|t| t.id.eq_ignore_ascii_case(id.trim()))
+}
+
+/// The `set_static` parameters for importing `raw` under template `tpl`, mirroring what
+/// `kv-mcp`'s `set_from_template` sends to the root helper -- minus `value`, which template
+/// credentials never set. `proxy_only: true` is deliberate: the point of moving a key out of
+/// `.env` is that the AI can only use it through the proxy, while `keyvalet get` still works
+/// for the human. `None` when the template can't carry a single raw secret (non-static kind,
+/// zero or several secret fields, no injection rule, no allowed hosts).
+fn template_import_params(
+    tpl: &ScanTemplate,
+    ty: &str,
+    name: &str,
+    raw: &str,
+    description: &str,
+) -> Option<Map<String, Value>> {
+    let secret_fields: Vec<&ScanTemplateField> = tpl.fields.iter().filter(|f| f.secret).collect();
+    if tpl.kind != "static"
+        || secret_fields.len() != 1
+        || tpl.inject.is_none()
+        || tpl.hosts.is_empty()
+    {
+        return None;
+    }
+    let mut secrets = Map::new();
+    secrets.insert(secret_fields[0].name.clone(), json!(raw));
+    let mut p = Map::new();
+    p.insert("type".into(), json!(ty));
+    p.insert("name".into(), json!(name));
+    p.insert("secrets".into(), Value::Object(secrets));
+    p.insert(
+        "http".into(),
+        json!({
+            "inject": tpl.inject,
+            "allowed_hosts": tpl.hosts,
+            "proxy_only": true,
+            "test": tpl.test,
+        }),
+    );
+    p.insert("template".into(), json!(tpl.id));
+    p.insert("description".into(), json!(description));
+    p.insert("type_description".into(), json!(tpl.name));
+    Some(p)
+}
+
 /// `keyvalet scan` (action-plan 4.1). Scans the usual places, prints what it found, then -- the
 /// `tool`-less, `id`-having hits only, since those are the only ones `keyvalet set` can create
-/// correctly -- offers a native checkbox dialog to import some of them into the vault. Anything
-/// imported gets removed from its source file (backed up first) and replaced with an
-/// obviously-broken placeholder rather than a working substitute, since there's no runtime yet
-/// that resolves a reference back into a real value (see `placeholder_for`). Ends by asking,
+/// correctly -- offers a native checkbox dialog to import some of them into the vault. A hit
+/// whose type matches a `catalog.json` template is imported via `kv_core::set_static` with the
+/// template's injection rule and allowed hosts as proxy-only, so the credential is proxyable
+/// (and its value unreadable by agents) from the start; anything else falls back to a plain
+/// `vault.set`. Anything imported gets removed from its source file (backed up first) and
+/// replaced with an obviously-broken placeholder rather than a working substitute, since there's
+/// no runtime yet that resolves a reference back into a real value (see `placeholder_for`). Ends
+/// by asking,
 /// in one more native dialog, whether to delete the just-made backups now or keep them -- that's
 /// the "confirm, then delete the backup" step from the original plan: an explicit choice made
 /// right here, not an automatic deletion with no way to verify anything still works first.
@@ -1395,8 +1502,8 @@ fn scan(args: &[String], vault: &Vault, client: &Value) {
         .map(|(i, h)| dialog_label(i, h))
         .collect();
     let prompt = kv_i18n::t(
-        &format!("KeyValet 在这些地方发现了 {} 个可能的密钥。勾选要收进 KeyValet 的，不勾选就不会动那一条。", importable.len()),
-        &format!("KeyValet found {} possible secret(s) in these places. Check the ones to move into KeyValet; anything left unchecked is not touched.", importable.len()),
+        &format!("KeyValet 在这些地方发现了 {} 个可能的密钥。勾选要收进 KeyValet 的，不勾选就不会动那一条。导入后 AI 只能通过代理使用这些凭证，看不到明文；终端里 keyvalet get 仍可读取。", importable.len()),
+        &format!("KeyValet found {} possible secret(s) in these places. Check the ones to move into KeyValet; anything left unchecked is not touched. After import, AI agents can only use these through the proxy and never see the value; keyvalet get in a terminal can still read it.", importable.len()),
     );
     let Some(selected) = choose_from_list(&prompt, &items) else {
         println!(
@@ -1440,26 +1547,43 @@ fn scan(args: &[String], vault: &Vault, client: &Value) {
         target.insert("type".into(), json!(ty));
         target.insert("name".into(), json!(name));
         target.insert("op".into(), json!("scanImport"));
-        let result = vault.set(SetParams {
-            r#type: ty.clone(),
-            name: name.clone(),
-            value: Some(h.raw.clone()),
-            description: Some(kv_i18n::t(
-                &format!("keyvalet scan 从 {}:{} 导入", h.path.display(), h.line_no),
-                &format!(
-                    "Imported by keyvalet scan from {}:{}",
-                    h.path.display(),
-                    h.line_no
-                ),
-            )),
-            type_description: Some(kv_i18n::t(
-                "keyvalet scan 自动创建",
-                "Auto-created by keyvalet scan",
-            )),
-            ..Default::default()
-        });
+        let description = kv_i18n::t(
+            &format!("keyvalet scan 从 {}:{} 导入", h.path.display(), h.line_no),
+            &format!(
+                "Imported by keyvalet scan from {}:{}",
+                h.path.display(),
+                h.line_no
+            ),
+        );
+        let tpl = catalog_template(std::path::Path::new(kv_platform::paths::TEMPLATES_DIR), &ty);
+        let params = tpl
+            .as_ref()
+            .and_then(|t| template_import_params(t, &ty, &name, &h.raw, &description));
+        let used_template = tpl
+            .as_ref()
+            .filter(|_| params.is_some())
+            .map(|t| (t.id.clone(), t.hosts.clone()));
+        let result: kv_vault::Result<()> = match &params {
+            Some(p) => kv_core::set_static(vault, p).map(|_| ()),
+            None => vault
+                .set(SetParams {
+                    r#type: ty.clone(),
+                    name: name.clone(),
+                    value: Some(h.raw.clone()),
+                    description: Some(description),
+                    type_description: Some(kv_i18n::t(
+                        "keyvalet scan 自动创建",
+                        "Auto-created by keyvalet scan",
+                    )),
+                    ..Default::default()
+                })
+                .map(|_| ()),
+        };
         match result {
             Ok(_) => {
+                if let Some((id, _)) = &used_template {
+                    target.insert("template".into(), json!(id));
+                }
                 target.insert("ok".into(), json!(true));
                 target.insert("client".into(), client.clone());
                 let _ = vault.audit(target);
@@ -1478,6 +1602,21 @@ fn scan(args: &[String], vault: &Vault, client: &Value) {
                         )
                     )
                 );
+                if let Some((_, hosts)) = &used_template {
+                    println!(
+                        "{}",
+                        kv_i18n::t(
+                            &format!(
+                                "  可通过代理调用（仅代理，AI 看不到明文）：{}",
+                                hosts.join("、")
+                            ),
+                            &format!(
+                                "  proxyable (proxy-only, value hidden from AI): {}",
+                                hosts.join(", ")
+                            )
+                        )
+                    );
+                }
                 imported.push((h, name.clone()));
             }
             Err(e) => {
@@ -1617,7 +1756,8 @@ fn scan(args: &[String], vault: &Vault, client: &Value) {
 #[cfg(test)]
 mod scan_tests {
     use super::{
-        credential_name_from_path, render_report, rewrite_content, scan_hits, unique_name,
+        catalog_template, credential_name_from_path, render_report, rewrite_content, scan_hits,
+        static_secret_to_print, template_import_params, unique_name,
     };
     use std::io::Write;
 
@@ -1629,6 +1769,32 @@ mod scan_tests {
             .write_all(content.as_bytes())
             .unwrap();
         (dir, path)
+    }
+
+    /// A `Vault` over a tempdir with a file key -- the same fixture `unique_name`'s test uses.
+    /// The vault lives in a fresh subdirectory, not the tempdir root: `Vault::init` only chmods
+    /// a directory it creates, and an existing one keeps its (too-open) OS permissions.
+    fn test_vault() -> (tempfile::TempDir, kv_vault::Vault) {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = kv_vault::Vault::new(dir.path().join("vault"));
+        vault.prepare().unwrap();
+        if !vault.dir.join("master.key").exists() {
+            // Explicit legacy fixture: production code never creates this file.
+            std::fs::write(vault.dir.join("master.key"), [7u8; 32]).unwrap();
+            std::fs::set_permissions(
+                vault.dir.join("master.key"),
+                <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+            )
+            .unwrap();
+        }
+        vault.init_legacy().unwrap();
+        (dir, vault)
+    }
+
+    /// The repo's `templates/` directory -- not the installed copy under
+    /// `kv_platform::paths::TEMPLATES_DIR`, which doesn't exist on machines without KeyValet.
+    fn repo_templates_dir() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../templates")
     }
 
     #[test]
@@ -1765,6 +1931,98 @@ mod scan_tests {
             &[(1, "secret".to_string(), "PLACEHOLDER".to_string())],
         );
         assert_eq!(out, "KEY=PLACEHOLDER\nOTHER=unrelated-secret-token\n");
+    }
+
+    #[test]
+    fn catalog_template_finds_templates_case_insensitively() {
+        let dir = repo_templates_dir();
+        let tpl = catalog_template(&dir, "openai").expect("openai template");
+        assert_eq!(tpl.hosts, vec!["api.openai.com".to_string()]);
+        let secrets: Vec<&str> = tpl
+            .fields
+            .iter()
+            .filter(|f| f.secret)
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(secrets, ["apiKey"]);
+        assert!(tpl.inject.is_some());
+        assert!(tpl.test.is_some());
+        assert!(catalog_template(&dir, "OpenAI").is_some());
+        assert!(catalog_template(&dir, "nonexistent").is_none());
+
+        let missing = tempfile::tempdir().unwrap();
+        assert!(catalog_template(missing.path(), "openai").is_none());
+    }
+
+    #[test]
+    fn template_import_params_build_a_proxy_only_set_static_request() {
+        let tpl = catalog_template(&repo_templates_dir(), "openai").unwrap();
+        let p = template_import_params(&tpl, "openai", "env", "sk-raw", "desc").unwrap();
+        assert_eq!(p["secrets"], serde_json::json!({"apiKey": "sk-raw"}));
+        assert_eq!(
+            p["http"]["allowed_hosts"],
+            serde_json::json!(["api.openai.com"])
+        );
+        assert_eq!(p["http"]["proxy_only"], serde_json::json!(true));
+        assert_eq!(p["template"], serde_json::json!("openai"));
+        assert!(!p.contains_key("value"));
+    }
+
+    #[test]
+    fn template_import_params_rejects_templates_a_single_raw_value_cannot_fill() {
+        let dir = repo_templates_dir();
+        // datadog needs two secret fields (apiKey + appKey); jira has no allowed hosts.
+        let datadog = catalog_template(&dir, "datadog").unwrap();
+        assert!(template_import_params(&datadog, "datadog", "env", "x", "d").is_none());
+        let jira = catalog_template(&dir, "jira").unwrap();
+        assert!(template_import_params(&jira, "jira", "env", "x", "d").is_none());
+    }
+
+    #[test]
+    fn set_static_from_template_params_stores_a_proxy_only_credential() {
+        let (_dir, vault) = test_vault();
+        let tpl = catalog_template(&repo_templates_dir(), "openai").unwrap();
+        let p = template_import_params(&tpl, "openai", "env", "sk-raw", "desc").unwrap();
+        kv_core::set_static(&vault, &p).unwrap();
+        let (_, _, record) = vault.get_record("openai", "env").unwrap();
+        let http = record.http.as_ref().unwrap();
+        assert!(http.proxy_only);
+        assert_eq!(http.allowed_hosts, vec!["api.openai.com".to_string()]);
+        assert_eq!(record.template.as_deref(), Some("openai"));
+        assert_eq!(
+            record
+                .secrets
+                .as_ref()
+                .unwrap()
+                .get("apiKey")
+                .map(String::as_str),
+            Some("sk-raw")
+        );
+        // The agent-facing read path refuses proxy-only credentials outright.
+        assert!(vault.get("openai", "env").is_err());
+    }
+
+    #[test]
+    fn static_secret_to_print_prefers_value_then_falls_back_to_secrets() {
+        let mut record = kv_vault::CredentialRecord::default();
+        record.value = "plain".to_string();
+        assert_eq!(static_secret_to_print(&record), "plain");
+
+        let mut record = kv_vault::CredentialRecord::default();
+        record.secrets = Some([("apiKey".to_string(), "sk-raw".to_string())].into());
+        assert_eq!(static_secret_to_print(&record), "sk-raw");
+
+        let mut record = kv_vault::CredentialRecord::default();
+        record.secrets = Some(
+            [
+                ("apiKey".to_string(), "a".to_string()),
+                ("appKey".to_string(), "b".to_string()),
+            ]
+            .into(),
+        );
+        let out = static_secret_to_print(&record);
+        assert!(out.contains("apiKey") && out.contains("appKey"));
+        assert!(out.contains("\"fields\""));
     }
 
     #[test]

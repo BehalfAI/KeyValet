@@ -5,11 +5,12 @@ pub mod auth_gate;
 pub mod dispatch;
 pub mod prompt;
 pub mod settings;
+pub mod summarize;
 
 pub use auth_gate::{cooldown_remaining, touch_id_gate, GateResult};
 pub use dispatch::{
-    cred_key, dispatch, resolve_hint, AuthorizeGate, ClientContext, JsonMap, SessionAuth,
-    TouchIdSessionGate,
+    cred_key, dispatch, resolve_hint, set_static, AuthorizeGate, ClientContext, JsonMap,
+    SessionAuth, TouchIdSessionGate,
 };
 pub use kv_platform::{AuthOutcome, Authenticator, Confirmer};
 pub use settings::{
