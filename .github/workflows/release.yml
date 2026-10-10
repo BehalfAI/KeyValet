@@ -89,16 +89,18 @@ jobs:
             [ -n "$ID" ] && /usr/bin/xcrun notarytool log "$ID" --key "$KEY" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" || true
             exit 1
           fi
-          # Gatekeeper's online ticket lookup can lag the Accepted status briefly.
+          # Confirm Gatekeeper's online ticket lookup sees every binary as notarized. (`spctl -a -t
+          # exec` is no use here: it rejects any bare command-line tool as "not an app", notarized
+          # or not.) The lookup can lag the Accepted status briefly.
           for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
-            if /usr/sbin/spctl -a -t exec "$BIN/kv-helper" 2>/dev/null; then
-              /usr/sbin/spctl -a -vv -t exec "$BIN/kv-helper"
-              exit 0
-            fi
+            missing=""
+            for f in "$BIN"/*; do
+              /usr/bin/codesign --verify --check-notarization -R=notarized "$f" 2>/dev/null || missing="$missing ${f##*/}"
+            done
+            [ -z "$missing" ] && { echo "Gatekeeper sees all binaries as notarized"; exit 0; }
             sleep 10
           done
-          /usr/sbin/spctl -a -vv -t exec "$BIN/kv-helper" || true
-          echo "Gatekeeper does not accept the notarized binaries yet" >&2
+          echo "Notarization ticket not visible for:$missing" >&2
           exit 1
       - name: Check release notes exist
         if: github.event_name == 'push'
