@@ -54,7 +54,9 @@ jobs:
           [ "$FP" = "F1:6C:D3:C5:4C:7F:83:CE:A4:BF:1A:3E:6A:08:19:C8:AA:A8:E4:A1:52:8F:D1:44:71:5F:35:06:43:D2:DF:3A" ] || {
             echo "DeveloperIDG2CA fingerprint mismatch: $FP" >&2; exit 1;
           }
-          /usr/bin/security add-certificates -k "$KC" "$RUNNER_TEMP/DeveloperIDG2CA.cer"
+          # The runner may already resolve it into the new keychain ("already in ..." exits 1);
+          # a genuinely broken chain still fails below at codesign --verify --strict.
+          /usr/bin/security add-certificates -k "$KC" "$RUNNER_TEMP/DeveloperIDG2CA.cer" 2>/dev/null || true
           /usr/bin/security set-key-partition-list -S apple-tool:,apple: -s -k "$KC_PASS" "$KC" >/dev/null
           /usr/bin/security list-keychain -d user -s "$KC" $(/usr/bin/security list-keychain -d user | /usr/bin/sed -n 's/^ *"\(.*\)"/\1/p')
           SIGN_IDENTITY=$(/usr/bin/security find-identity -v -p codesigning "$KC" | /usr/bin/sed -n 's/^ *[0-9]*) \([0-9A-F]*\) "Developer ID Application: Simvito Limited (PWCRJPY7YC)"/\1/p' | /usr/bin/head -1)
