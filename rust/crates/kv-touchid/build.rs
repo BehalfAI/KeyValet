@@ -3,6 +3,7 @@ use std::{env, path::PathBuf, process::Command};
 fn main() {
     println!("cargo:rerun-if-changed=src/enclave.swift");
     println!("cargo:rerun-if-changed=Info.plist");
+    println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
         return;
     }
@@ -17,12 +18,20 @@ fn main() {
     let object = out.join("enclave.o");
     // CryptoKit's documented opaque Secure Enclave representation is a Swift-only API.
     // Keep that bridge small; the process, protocol, vault and policy remain Rust.
+    let arch = match env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("aarch64") => "arm64",
+        Ok("x86_64") => "x86_64",
+        other => panic!("unsupported target arch for the Swift bridge: {other:?}"),
+    };
+    let deployment_target = env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "14.0".into());
     assert!(Command::new("xcrun")
         .args([
             "swiftc",
             "-parse-as-library",
             "-O",
             "-emit-object",
+            "-target",
+            &format!("{arch}-apple-macos{deployment_target}"),
             "src/enclave.swift",
             "-o"
         ])

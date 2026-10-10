@@ -55,7 +55,7 @@ KeyValet 是一个运行在 macOS 本机的「AI agent 凭证代理」。Claude 
 ## 安装
 
 
-需要 Rust 工具链（`cargo`，来自 [rustup.rs](https://rustup.rs)）构建二进制，以及 Swift 编译器（`xcode-select --install`）编译 Secure Enclave helper。
+Apple Silicon Mac 上安装器使用发行版的预编译 arm64 二进制，不需要 Rust 工具链；Intel Mac 或指向没有发行产物的 ref 时改为源码构建，需要 Rust 工具链（`cargo`，来自 [rustup.rs](https://rustup.rs)）构建二进制，以及 Swift 编译器（`xcode-select --install`）编译 Secure Enclave helper。
 
 安装会写入 `/etc/sudoers.d/keyvalet`，只允许你免密运行凭证库 helper。写入前后都会用 `visudo` 校验，卸载时会删除。
 

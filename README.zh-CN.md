@@ -12,7 +12,7 @@ KeyValet 让 Claude Code、Cursor、Devin 等 AI agent 使用你的 API key 和 
 curl -fsSL https://keyvalet.dev/install.sh | sh
 ```
 
-需要 macOS、Rust 工具链（`cargo`，来自 [rustup.rs](https://rustup.rs)）和 Xcode 命令行工具。安装时要输一次密码。会自动配置好 Claude Code；检测到 Cursor 时安装器也会装好插件（`~/.cursor/plugins/local/keyvalet`，重启 Cursor 生效）；Devin CLI 用户执行 `devin plugins install KeyValet/KeyValet#devin-plugin` 安装插件；其他 MCP 客户端见[使用指南](site/guide.zh-CN.md#安装)。
+需要 macOS 14 或更高版本的 Apple Silicon Mac（安装器使用发行版的预编译 arm64 二进制；Intel Mac 改为源码构建，需要 Rust 工具链（`cargo`，来自 [rustup.rs](https://rustup.rs)）和 Xcode 命令行工具）。安装时要输一次密码。会自动配置好 Claude Code；检测到 Cursor 时安装器也会装好插件（`~/.cursor/plugins/local/keyvalet`，重启 Cursor 生效）；Devin CLI 用户执行 `devin plugins install KeyValet/KeyValet#devin-plugin` 安装插件；其他 MCP 客户端见[使用指南](site/guide.zh-CN.md#安装)。
 
 ## 怎么用
 

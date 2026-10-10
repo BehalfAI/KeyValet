@@ -3,12 +3,16 @@
 #
 #   curl -fsSL https://keyvalet.dev/install.sh | sh
 #
-# Downloads KeyValet from GitHub into a temporary directory, runs its installer
-# (which asks for your password once), registers it with Claude Code if present,
-# and cleans up. Re-run to upgrade.
+# On Apple Silicon (or a Rosetta shell) it downloads the release's prebuilt
+# package (arm64 binaries) and verifies it against the SHA256SUMS
+# published with the same release; on Intel, or when no release exists, it
+# downloads the source and builds it locally. Requires macOS 14 or later.
+# Runs its installer (which asks for your password once), registers it with
+# Claude Code if present, and cleans up. Re-run to upgrade.
 #
 #   Uninstall:          curl -fsSL https://keyvalet.dev/install.sh | sh -s -- --uninstall
 #   Pin a version:      KEYVALET_VERSION=v0.1.0 sh install.sh      (default: latest release, else main)
+#   Local package:      KEYVALET_ARCHIVE=/path/to/keyvalet-vX.Y.Z-macos-arm64.tar.gz sh install.sh
 #   Skip registration:  KEYVALET_NO_REGISTER=1 sh install.sh
 set -eu
 
@@ -23,28 +27,78 @@ fail() { printf '\033[31mError:\033[0m %s\n' "$1" >&2; exit 1; }
 [ "$(uname -s)" = Darwin ] || fail "KeyValet currently supports macOS only."
 [ "$(id -u)" != 0 ] || fail "Run as your normal user (not root); you'll be asked for your password when needed."
 
-if [ "$ACTION" = install ]; then
-  command -v cargo >/dev/null 2>&1 || fail "The Rust toolchain (cargo) is required. Install it from https://rustup.rs"
-fi
+OS_MAJOR=$(sw_vers -productVersion | cut -d. -f1)
+[ "$OS_MAJOR" -ge 14 ] 2>/dev/null || fail "KeyValet requires macOS 14 or later."
 
 # Version: explicit > latest release > main
 REF="${KEYVALET_VERSION:-}"
 if [ -z "$REF" ]; then
   REF=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1 || true)
 fi
-if [ -n "$REF" ]; then
-  URL="https://github.com/$REPO/archive/refs/tags/$REF.tar.gz"
-else
-  REF=main
-  URL="https://github.com/$REPO/archive/refs/heads/main.tar.gz"
+[ -n "$REF" ] || REF=main
+
+# Install mode: prebuilt release binaries on Apple Silicon (a Rosetta-translated
+# shell still runs the arm64 install fine), source build on Intel or for main.
+MODE=source
+if [ "$ACTION" = install ]; then
+  ARCH=$(uname -m)
+  TRANSLATED=$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)
+  if [ "$ARCH" = arm64 ] || [ "$TRANSLATED" = 1 ]; then
+    if [ "$REF" != main ] || [ -n "${KEYVALET_ARCHIVE:-}" ]; then
+      MODE=prebuilt
+    fi
+  else
+    say "Intel Mac: building from source (Secure Enclave on T2 Macs is untested)."
+  fi
 fi
+
+require_source_toolchain() {
+  command -v cargo >/dev/null 2>&1 || fail "The Rust toolchain (cargo) is required. Install it from https://rustup.rs"
+  xcrun --find swiftc >/dev/null 2>&1 || fail "Xcode Command Line Tools (swiftc) are required. Install them with: xcode-select --install"
+}
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-say "Downloading KeyValet ($REF)"
-curl -fsSL "$URL" | tar -xz -C "$TMP" --strip-components 1 || fail "Download failed: $URL"
 
-[ "${KEYVALET_DRY_RUN:-}" = 1 ] && { say "Dry run: downloaded to $TMP, stopping here."; ls "$TMP"; exit 0; }
+if [ "$MODE" = prebuilt ]; then
+  ASSET="keyvalet-$REF-macos-arm64.tar.gz"
+  mkdir -p "$TMP/pkg"
+  if [ -n "${KEYVALET_ARCHIVE:-}" ]; then
+    [ -f "$KEYVALET_ARCHIVE" ] || fail "KEYVALET_ARCHIVE not found: $KEYVALET_ARCHIVE"
+    cp "$KEYVALET_ARCHIVE" "$TMP/pkg/$ASSET"
+    say "Using local package $KEYVALET_ARCHIVE (checksum NOT verified)"
+  else
+    say "Downloading KeyValet release $REF (Apple Silicon)"
+    ASSET_URL="https://github.com/$REPO/releases/download/$REF/$ASSET"
+    SUMS_URL="https://github.com/$REPO/releases/download/$REF/SHA256SUMS"
+    if ! curl -fsSL "$ASSET_URL" -o "$TMP/pkg/$ASSET"; then
+      say "No prebuilt package at $ASSET_URL (release without assets?); falling back to a source build"
+      MODE=source
+    else
+      curl -fsSL "$SUMS_URL" -o "$TMP/SHA256SUMS" || fail "Could not download SHA256SUMS for release $REF"
+      grep " $ASSET\$" "$TMP/SHA256SUMS" > "$TMP/check" || fail "SHA256SUMS has no entry for $ASSET"
+      (cd "$TMP/pkg" && shasum -a 256 -c "$TMP/check" >/dev/null) || fail "Checksum mismatch for $ASSET -- aborting (no fallback)"
+      say "Checksum verified against SHA256SUMS from release $REF"
+    fi
+  fi
+  if [ "$MODE" = prebuilt ]; then
+    tar -xzf "$TMP/pkg/$ASSET" -C "$TMP" --strip-components 1 || fail "Could not extract $ASSET"
+  fi
+fi
+
+if [ "$MODE" = source ]; then
+  [ "$ACTION" = install ] && require_source_toolchain
+  if [ "$REF" = main ]; then
+    URL="https://github.com/$REPO/archive/refs/heads/main.tar.gz"
+  else
+    URL="https://github.com/$REPO/archive/refs/tags/$REF.tar.gz"
+  fi
+  say "Downloading KeyValet source ($REF)"
+  curl -fsSL "$URL" -o "$TMP/source.tar.gz" || fail "Download failed: $URL"
+  tar -xzf "$TMP/source.tar.gz" -C "$TMP" --strip-components 1 || fail "Could not extract the source archive"
+fi
+
+[ "${KEYVALET_DRY_RUN:-}" = 1 ] && { say "Dry run ($MODE mode): downloaded to $TMP, stopping here."; ls "$TMP"; exit 0; }
 
 # Give the installer a real terminal for the sudo password when we have one (curl | sh pipes stdin);
 # without a terminal it falls back to a native macOS password dialog.

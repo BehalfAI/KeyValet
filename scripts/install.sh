@@ -34,16 +34,29 @@ if [ "$(id -u)" = 0 ]; then
   exit 1
 fi
 
-CARGO_BIN=$(command -v cargo || true)
-[ -n "$CARGO_BIN" ] || { say "找不到 cargo，请先安装 Rust 工具链（https://rustup.rs）" "cargo not found; install the Rust toolchain first (https://rustup.rs)" >&2; exit 1; }
+if [ -x "$SRC_DIR/bin/kv-helper" ] && [ ! -d "$SRC_DIR/rust" ]; then
+  # Release package: prebuilt Apple Silicon binaries, no source tree. Only /usr/bin/codesign
+  # is needed below (the kv-touchid ad-hoc hardened-runtime signature); no Xcode CLT/cargo.
+  say "==> 使用发行包内的预编译二进制（Apple Silicon）" "==> Using the release package's prebuilt binaries (Apple Silicon)"
+  BIN_DIR="$SRC_DIR/bin"
+  for b in kv-helper kv-touchid kv-mcp kv-cli kv-hook; do
+    [ -x "$BIN_DIR/$b" ] || { say "发行包不完整：缺少 $b" "Incomplete release package: missing $b" >&2; exit 1; }
+    [ "$(/usr/bin/lipo -archs "$BIN_DIR/$b" 2>/dev/null)" = arm64 ] || { say "$b 不是 arm64 二进制，此发行包只支持 Apple Silicon；请改用源码安装" "$b is not an arm64 binary; this release package supports Apple Silicon only -- install from source instead" >&2; exit 1; }
+  done
+  # hw.optional.arm64, not uname -m: a Rosetta-translated shell reports x86_64 on Apple Silicon.
+  [ "$(/usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ] || { say "此发行包只支持 Apple Silicon；Intel Mac 请改用源码安装" "This release package supports Apple Silicon only; on Intel Macs please install from source" >&2; exit 1; }
+else
+  CARGO_BIN=$(command -v cargo || true)
+  [ -n "$CARGO_BIN" ] || { say "找不到 cargo，请先安装 Rust 工具链（https://rustup.rs）" "cargo not found; install the Rust toolchain first (https://rustup.rs)" >&2; exit 1; }
 
-say "==> 构建（cargo build --release）" "==> Building (cargo build --release)"
-cd "$SRC_DIR/rust"
-cargo build --release --locked
-BIN_DIR="$SRC_DIR/rust/target/release"
-for b in kv-helper kv-touchid kv-mcp kv-cli kv-hook; do
-  [ -x "$BIN_DIR/$b" ] || { say "构建产物缺失：$b" "Build artifact missing: $b" >&2; exit 1; }
-done
+  say "==> 构建（cargo build --release）" "==> Building (cargo build --release)"
+  cd "$SRC_DIR/rust"
+  cargo build --release --locked
+  BIN_DIR="$SRC_DIR/rust/target/release"
+  for b in kv-helper kv-touchid kv-mcp kv-cli kv-hook; do
+    [ -x "$BIN_DIR/$b" ] || { say "构建产物缺失：$b" "Build artifact missing: $b" >&2; exit 1; }
+  done
+fi
 
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT

@@ -54,8 +54,8 @@ KeyValet's answer: **secrets stay on your machine, owned by root. Agents ask; yo
 ## Requirements
 
 - macOS (Touch ID recommended; without it the system prompt asks for your login password — handled by macOS, never seen by KeyValet)
-- A Rust toolchain (`cargo` from [rustup.rs](https://rustup.rs)) to build the binaries
-- Xcode Command Line Tools (`xcode-select --install`) for the Swift Secure Enclave helper
+- macOS 14 or later on an Apple Silicon Mac (prebuilt binaries are installed from the release archive; no toolchain needed)
+- Intel Macs, or `KEYVALET_VERSION` pointed at a ref with no release assets, build from source: a Rust toolchain (`cargo` from [rustup.rs](https://rustup.rs)) and Xcode Command Line Tools (`xcode-select --install`) for the Swift Secure Enclave helper are required then
 
 ## Install
 

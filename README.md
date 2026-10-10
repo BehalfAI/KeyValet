@@ -12,7 +12,7 @@ KeyValet lets Claude Code, Cursor, Devin and other AI agents use your API keys a
 curl -fsSL https://keyvalet.dev/install.sh | sh
 ```
 
-macOS, a Rust toolchain (`cargo` from [rustup.rs](https://rustup.rs)) and Xcode Command Line Tools. You'll be asked for your password once. Claude Code is configured automatically; the installer also installs the Cursor plugin (`~/.cursor/plugins/local/keyvalet`, restart Cursor) when Cursor is present; for Devin CLI, install the plugin with `devin plugins install KeyValet/KeyValet#devin-plugin`; for other MCP clients see the [guide](site/guide.md#install).
+An Apple Silicon Mac on macOS 14 or later (the installer uses the release's prebuilt arm64 binaries; Intel Macs build from source instead, which needs a Rust toolchain (`cargo` from [rustup.rs](https://rustup.rs)) and Xcode Command Line Tools). You'll be asked for your password once. Claude Code is configured automatically; the installer also installs the Cursor plugin (`~/.cursor/plugins/local/keyvalet`, restart Cursor) when Cursor is present; for Devin CLI, install the plugin with `devin plugins install KeyValet/KeyValet#devin-plugin`; for other MCP clients see the [guide](site/guide.md#install).
 
 ## Use it
 
