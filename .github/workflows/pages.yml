@@ -3,7 +3,7 @@ name: pages
 on:
   push:
     branches: [main]
-    paths: [site/**]
+    paths: [site/**, .github/workflows/pages.yml]
   workflow_dispatch:
 
 concurrency:
@@ -15,8 +15,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: cloudflare/wrangler-action@v3
+      - uses: actions/setup-node@v4
         with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy site --project-name=keyvalet --branch=main
+          node-version: 22
+      # Plain npx instead of cloudflare/wrangler-action@v3: that action defaults to wrangler 3.90.0
+      # and its failures surfaced only as "npx failed with exit code 1", with no wrangler output.
+      - name: Deploy site/ to Cloudflare Pages
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          [ -n "$CLOUDFLARE_API_TOKEN" ] || { echo "::error::The CLOUDFLARE_API_TOKEN secret is empty or missing"; exit 1; }
+          [ -n "$CLOUDFLARE_ACCOUNT_ID" ] || { echo "::error::The CLOUDFLARE_ACCOUNT_ID secret is empty or missing"; exit 1; }
+          set -o pipefail
+          # On failure, also surface wrangler's last lines as an annotation (readable without
+          # admin access to the job log; GitHub masks secret values in both).
+          if ! npx --yes wrangler@4.147.0 pages deploy site --project-name=keyvalet --branch=main 2>&1 | tee wrangler.log; then
+            echo "::error title=wrangler pages deploy failed::$(tail -n 15 wrangler.log | sed 's/\x1b\[[0-9;]*m//g; s/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
+            exit 1
+          fi
