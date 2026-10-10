@@ -147,9 +147,23 @@
 
 ---
 
-## 3. 阶段 1（第 2–4 月）：策略与 Linux
+## 3. 阶段 1（第 2–6 月）：三平台本地版 + 策略
 
-目标：1 万安装；有 ≥3 条凭据的周活占比 ≥ 20%；每周活每天审批 ≤ 3 次且有拒绝率数据；Linux 可用。
+> **2026-10-10 重排决定**：阶段 1 改为「macOS、Linux、Windows 三个平台的本地版都做完」，Windows 从「按需求排期」提前到阶段 1 并**立即开工**（排在 Linux 之前；设计见架构 §8.1.1，Win11 24H2+、必须有 Hello、不做软件回退）。阶段 1 结束后**不直接进 relay / Team**，而是先做一波推广——重点是在各插件平台注册分发（Claude Code 插件市场、Codex plugins、cursor.directory、MCP 目录）加一轮 Show HN / Reddit——然后看数据再决定阶段 2 做不做、什么时候做。原阶段 2 的「第 6 月零付费 → 降级」检查点随之作废，改为阶段 1 末按数据决策。理由：Team 的买家是混合 OS 的团队，Windows 是 Team 的前置条件而不是 Free 的锦上添花；vault v2 的设备密钥抽象要在三个平台的密钥形状（SE P-256 / TPM P-256 / Hello RSA-2048）都摸清之后再定。代价：首笔收入后移约 3 个月，靠自由职业收入垫；Windows 签名证书（Azure Artifact Signing 有注册地限制，否则买 OV 证书 + 云 HSM）要现在就开始办。
+
+目标：1 万安装；有 ≥3 条凭据的周活占比 ≥ 20%；每周活每天审批 ≤ 3 次且有拒绝率数据；**三个平台各有真实用户**。
+
+### Windows（2026-10-10 起，与第 2 月并行）
+
+| # | 任务 | 产出 | 完成标准 |
+| --- | --- | --- | --- |
+| W1 | `代码` 工作区在 Windows 上能编译、clippy、跑单测：unix 专有代码收进 `kv-platform` 的 seam 后用 `cfg` 隔离；Windows 路径常量、ACL 版 `trust`、`set_private_permissions` / `mem::lock`、UI 语言；kv-helper 的命名管道监听（`\\.\pipe\keyvalet-helper` / `-agent`）与 kv-mcp 的管道连接；CI 加 `windows-latest` job | 代码 + CI | macOS 四件套仍绿；`cargo check/clippy --target x86_64-pc-windows-msvc` 在 Mac 上干净；Windows CI 绿；所有 Windows 上未实现的路径都 fail-closed 并有明确提示 |
+| W2 | `代码` `KeyValetHelper` 服务注册 / 启停；vault 目录 DACL（SYSTEM + Administrators）；管道 DACL（安装用户 SID + SYSTEM）；按 `GetNamedPipeClientProcessId` → 进程令牌识别调用方 SID；agent 身份校验（同用户 + 安装路径 + Authenticode 发布者，`--allow-unsigned-agent` 仅供开发） | 服务 + 代码 | 另一个本机用户连不上管道；未签名 agent 默认被拒并审计 |
+| W3 | `代码` `kv-agent.exe`：Hello `MasterKeyProvider`（`ProviderId::WindowsHello`，签固定挑战 + HKDF，设备绑定沿用）；`tpm_backed` 状态；TaskDialog 确认框；密码输入对话框；`protection` / `setup-hello` / 恢复口令流程 | agent + CLI | 真机：创建 → 解锁 → 恢复口令 → 轮换；无 Hello 的机器明确拒绝 |
+| W4 | `代码` `install.ps1`（自提权、下载 zip 校验 SHA256SUMS、装服务和登录任务、写 Claude Code / Codex / Cursor 的 Windows 路径配置）；release 工作流出 x64 + arm64 zip；WSL 桥 `kv-bridge.exe`（需要 Linux 版 kv-mcp，随 Linux 一起）；hooks 在 Windows 路径下验证 | 安装器 + release | 全新 Win11 上 `irm … \| iex` 到首次代理调用 < 5 分钟 |
+| W5 | `代码` 真机矩阵：Hello + TPM、Hello 无 TPM、arm64、WSL；签名（证书到位后）；`docs/runtimes.md` 与官网更新 | 记录 | 矩阵全过；SmartScreen 不拦 |
+
+Hello 和 agent 在托管 CI 上跑不了（没有交互会话），这部分测试标 `#[ignore]`，在真实 Win11 机器或 VM 上跑——**需要一台 Win11 测试机（物理机或 Parallels 带 vTPM 的 VM）**。
 
 ### 第 2 月
 
@@ -185,11 +199,24 @@
 | 7.5 | `市场` 季度研究「agent 配置里的密钥」第一期；vs Infisical 对比页；模板页上线 | 内容 | — |
 | 7.6 | `运营` 阶段 1 门槛复盘；第 9 个月融资复盘的指标口径定下来 | 复盘页 | — |
 
-阶段 1 门槛：安装 ≥ 1 万；≥3 凭据周活占比 ≥ 20%；审批次数与拒绝率有 4 周数据；Linux 上有真实用户。
+阶段 1 门槛：安装 ≥ 1 万；≥3 凭据周活占比 ≥ 20%；审批次数与拒绝率有 4 周数据；macOS / Linux / Windows 各有真实用户。
+
+### 阶段 1 末：推广与分发（约第 6–7 月，2026-10-10 新增）
+
+三平台齐了之后，先推广再决定下一步。按 `marketing/launch-plan.md` 和 `directories.md` 执行：
+
+| # | 任务 | 完成标准 |
+| --- | --- | --- |
+| P.1 | `市场` 插件平台注册分发：Claude Code 官方插件市场、Codex plugins、cursor.directory → Cursor Marketplace、MCP 官方 Registry、PulseMCP、Glama、Smithery、mcp.so、awesome-mcp-servers、awesome-claude-code；winget 和 Homebrew tap | 至少 5 处收录、2 处插件市场上架 |
+| P.2 | `市场` 第二轮 Show HN（「现在支持 macOS / Linux / Windows」）+ X 长帖 + r/ClaudeAI、r/mcp、r/selfhosted、r/cursor、Windows / Linux 社区 | 帖子发出，前两小时守评论 |
+| P.3 | `市场` 事故复盘系列保持每月一篇；vs Infisical、vs .env 对比页上站 | 内容 |
+| P.4 | `运营` 四周后看数据：安装、≥3 凭据周活、各平台占比、拒绝率、issue 里有没有人问「团队共享」「CI」。**再决定阶段 2 做不做、什么时候做** | 一页决定 |
 
 ---
 
-## 4. 阶段 2（第 5–8 月）：relay 与 Team v1 收费
+> 以下阶段 2–4 的内容保留原规划，但自 2026-10-10 起**都以阶段 1 末的数据决策为前提**，月份只是相对顺序，不再是承诺时间。
+
+## 4. 阶段 2（原第 5–8 月）：relay 与 Team v1 收费
 
 目标：第 6 个月 3 家付费团队；D30 留存 ≥ 25%；`proxy_only` 占比 ≥ 60%；10 家设计合作伙伴在用。
 
@@ -290,8 +317,8 @@
 | 检查点 | 达标 | 不达标 |
 | --- | --- | --- |
 | 阶段 0 末（第 1 月）：安装 ≥ 500 | 进阶段 1 | 问题在定位还是分发？HN 无反应则重写首屏与 Show HN 文案，两周后再发一次；安装有但不用则先修 J1 |
-| 阶段 1 末（第 4 月）：安装 ≥ 1 万、≥3 凭据周活占比 ≥ 20% | 进阶段 2 | 安装不够：加大内容与目录提交，延长阶段 1 一个月；凭据数不够：`scan` 和模板是瓶颈，优先补 |
-| 第 6 月：付费团队 ≥ 3 | 继续 | 0 家：访谈 10 个 Lead 找原因，调整 Team v1 范围，再给两个月；两个月后仍为 0 → **降级为 side project**（§9 D） |
+| 阶段 1 末（约第 6 月，10-10 重排后）：安装 ≥ 1 万、≥3 凭据周活占比 ≥ 20%、三平台各有真实用户 | 做一波推广与插件平台分发（P.1–P.3），四周后按 P.4 的数据决定是否进阶段 2 | 安装不够：加大内容与目录提交，延长一个月；凭据数不够：`scan` 和模板是瓶颈，优先补；某个平台没人用：查安装失败率再决定是否继续投入 |
+| ~~第 6 月：付费团队 ≥ 3~~ → 改为阶段 2 开工后第 2 个月 | 继续 | 0 家：访谈 10 个 Lead 找原因，调整 Team v1 范围，再给两个月；两个月后仍为 0 → **降级为 side project**（§9 D） |
 | 阶段 2 末（第 8 月）：付费团队 ≥ 8、D30 ≥ 25% | 进阶段 3 | 付费 3–7 家：继续但推迟 iPhone App，先把 Team v1 做深；D30 低：审批疲劳或稳定性问题，先修 |
 | 第 9 月融资复盘：周活 ≥ 8,000、合作伙伴 ≥ 10、付费团队 ≥ 5 | 接触投资人，目标 200–400 万美元种子轮，同时继续自举 | 不融资，按基准线继续；缩减阶段 3 范围（先手机审批，后 SSO） |
 | 阶段 3 末（第 14 月）：付费团队 ≥ 20、周活 ≥ 8,000 | 进阶段 4 | 10–19 家：阶段 4 只做 BYO-KMS 的 CI 离线执行，不做 Enterprise；< 10 家：停止新功能，维护模式，评估出售 |

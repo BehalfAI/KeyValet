@@ -519,6 +519,32 @@ Same-day acceptance of the production install path on this machine passed: the i
 
 All signatures are ES256; all end-to-end encryption uses HPKE (RFC 9180) `DHKEM(P-256, HKDF-SHA256) + HKDF-SHA256 + AES-128-GCM`, consistent with the SE's ECDH capability.
 
+### 8.1.1 Windows local client (decided 2026-10-10, pulled into Phase 1)
+
+Decision: Windows ships in Phase 1 alongside Linux rather than "on demand" — Team buyers are mixed-OS teams, and vault v2's device-key abstraction should be designed after all three platforms' key shapes are known, not before. Scope for the first version: **Windows 11 24H2+ (build 26100+), x64 and arm64, Windows Hello required** (no software-only fallback, same stance as macOS); Windows 10 is not targeted (EOL, lacks the 26100 Hello APIs).
+
+**Process model** — the macOS v0.2.0 split, re-done with Windows primitives:
+
+| macOS | Windows | Notes |
+| --- | --- | --- |
+| `dev.keyvalet.helper` launchd daemon | `KeyValetHelper` Windows service, LocalSystem | Services run in session 0 and cannot show any UI, including Hello — the same constraint Apple imposes on daemons, so the agent split is mandatory |
+| `/var/db/keyvalet` (root 0700) | `C:\ProgramData\KeyValet`, DACL: SYSTEM + Administrators only | `verify_root_environment` becomes an ACL/owner check (`kv_platform::trust`) |
+| `/var/run/keyvalet/helper.sock` + peer uid | `\\.\pipe\keyvalet-helper`, pipe DACL = installing user's SID + SYSTEM; client SID via `GetNamedPipeClientProcessId` → process token | One connection = one session, unchanged |
+| `dev.keyvalet.agent` LaunchAgent, verified by audit token + code requirement | `kv-agent.exe` started per logon (Task Scheduler "at log on"), connects to `\\.\pipe\keyvalet-agent`; service verifies same-user SID + installed path + Authenticode publisher (`WinVerifyTrust`) | Unsigned dev builds need an explicit `--allow-unsigned-agent` install flag, surfaced in `protection` as `agent_trust: unsigned` |
+| `kv-touchid` (Swift/CryptoKit) | Rust + `windows` crate (WinRT `KeyCredentialManager`, TaskDialog, Win32 password dialog) | No Swift-style bridge needed |
+
+**Key protection** — two Windows primitives, each missing half of what SE gives:
+
+- Windows Hello `KeyCredentialManager`: user presence on every `RequestSignAsync` (PIN / face / fingerprint = the `userPresence` equivalent), but **RSA-2048 only**. Master-key derivation: sign a fixed per-vault challenge stored in `vault.enc` metadata, HKDF-SHA256 over the signature (PKCS#1 v1.5 is deterministic; this is KeePassXC's approach), then mix the root-only device-binding secret exactly as on macOS. `RequestDeriveSharedSecretAsync` (26100+) is the cleaner path if its semantics check out — the spike on real hardware decides; `KeyCredentialCacheConfiguration` (26100+) maps onto `remember`. `GetAttestationAsync` / TPM presence tell us whether the Hello key is TPM-backed; `protection` reports `provider: windows_hello`, `tpm_backed: true|false` honestly.
+- NCrypt Platform Crypto Provider (TPM 2.0): P-256 ECDH, so it fits the HPKE device identity of §8.2–8.3 — but no user presence. It is the **device identity key** for relay/pairing later, not the approval gate.
+- Consequence for §8.2: `DK_windows` is a TPM P-256 key when a TPM exists; the Hello RSA key never enters HPKE. Vault v2 must allow a device whose approval key and identity key are different objects.
+
+**Clients** — Claude Code, Codex (PowerShell + Windows sandbox, `%USERPROFILE%\.codex`) and Cursor run natively; hooks keep the same JSON with Windows paths. WSL2 has no AF_UNIX interop with Windows, so agents running inside WSL reach the Windows helper through `kv-bridge.exe` launched via WSL interop, stdio ↔ named pipe (the same shape as the helper's stdio fallback mode); this needs the Linux build of `kv-mcp`, so WSL support lands with the Linux port. Loopback TCP is rejected (reachable by other local users).
+
+**Distribution** — Authenticode signing is a hard requirement (SmartScreen / Defender for a service). Azure Artifact Signing ($9.99/month) is only available to organizations registered in US / CA / EU / UK / AU / NZ / JP / KR / SG / CH / NO / IL; otherwise an OV certificate ($200–500/year) with a cloud HSM signing service for CI. Installer: `irm https://keyvalet.dev/install.ps1 | iex` (self-elevating; downloads the release zip for the architecture, verifies `SHA256SUMS`, installs the service and the logon task, writes the runtime configs) plus a winget manifest.
+
+**Milestones**: W1 workspace builds / lints / unit-tests on Windows with the pipe transport and fail-closed stubs; W2 service registration, pipe DACLs, client SID identification; W3 `kv-agent` with the Hello `MasterKeyProvider` and dialogs; W4 `install.ps1`, release zips, WSL bridge; W5 test matrix on real hardware (Hello with/without TPM, arm64, WSL) and signing. Hello and the agent cannot be exercised on hosted CI (no interactive session); those tests are `#[ignore]` and run on a real Windows 11 machine or VM.
+
 ### 8.2 Key hierarchy
 
 ```
