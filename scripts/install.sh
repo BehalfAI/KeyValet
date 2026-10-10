@@ -260,27 +260,41 @@ if ! /usr/bin/sudo -n -- "$INSTALL_DIR/bin/kv-helper" </dev/null >/dev/null 2>&1
   exit 1
 fi
 
-# Codex adapter (best-effort, action-plan 2.4): Codex's hook config format is less battle-tested
-# than Claude Code's, so this only writes a fresh file; an existing one is left untouched and the
-# user is told how to merge it by hand. Never fails the install.
-if [ -d "$HOME/.codex" ] && [ ! -e "$HOME/.codex/hooks.json" ]; then
+# Codex adapter (action-plan 2.4): contract confirmed from the official docs
+# (developers.openai.com/codex/hooks, 2026-10-10) -- ~/.codex/hooks.json PreToolUse, deny via
+# hookSpecificOutput.permissionDecision or exit 2 (permissionDecision "ask" is parsed but
+# unsupported: the hook run is marked failed and the call proceeds, so codex-tool never emits
+# it). Codex skips a non-managed hook until the user reviews and trusts it via /hooks inside
+# Codex -- the say message tells the user that. Never fails the install. Three cases: no file
+# -> write ours; a file pointing at the old `kv-hook tool` command (only this installer ever
+# wrote that into a Codex hooks file) -> rewrite it, since that mode emits an "ask" Codex
+# treats as allow; any other existing file -> leave it and print a manual-merge hint.
+write_codex_hooks() {
   cat > "$HOME/.codex/hooks.json" <<EOF
 {
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash",
+        "matcher": "Bash|apply_patch|mcp__.*",
         "hooks": [
-          { "type": "command", "command": "$INSTALL_DIR/bin/kv-hook tool", "timeout": 10 }
+          { "type": "command", "command": "$INSTALL_DIR/bin/kv-hook codex-tool", "timeout": 10 }
         ]
       }
     ]
   }
 }
 EOF
-  say "已为 Codex 写入 ~/.codex/hooks.json（密钥检测 hook，未独立核实 Codex 的 hook 行为）" "Wrote ~/.codex/hooks.json for Codex (secret-detection hook; Codex's hook behavior hasn't been independently verified)"
-elif [ -d "$HOME/.codex" ]; then
-  say "检测到已有 ~/.codex/hooks.json，未覆盖；如需启用 KeyValet 的密钥检测，请手动在 PreToolUse 里加一条 command: \"$INSTALL_DIR/bin/kv-hook tool\"" "Found an existing ~/.codex/hooks.json, left untouched; to enable KeyValet's secret detection, manually add a PreToolUse command: \"$INSTALL_DIR/bin/kv-hook tool\""
+}
+if [ -d "$HOME/.codex" ]; then
+  if [ ! -e "$HOME/.codex/hooks.json" ]; then
+    write_codex_hooks
+    say "已为 Codex 写入 ~/.codex/hooks.json（密钥检测 hook）。Codex 会先要求你在 Codex 里运行 /hooks 审核并信任这个 hook，之后才会生效。" "Wrote ~/.codex/hooks.json for Codex (secret-detection hook). Codex will ask you to review and trust it with /hooks inside Codex before it takes effect."
+  elif grep -qF "$INSTALL_DIR/bin/kv-hook tool\"" "$HOME/.codex/hooks.json" 2>/dev/null; then
+    write_codex_hooks
+    say "已把 ~/.codex/hooks.json 里旧的 KeyValet hook 更新为 kv-hook codex-tool；Codex 会要求你在 /hooks 里重新信任它。" "Updated the old KeyValet hook in ~/.codex/hooks.json to kv-hook codex-tool; Codex will ask you to trust it again in /hooks."
+  else
+    say "检测到已有 ~/.codex/hooks.json，未覆盖；如需启用 KeyValet 的密钥检测，请手动在 PreToolUse 里加一条 command: \"$INSTALL_DIR/bin/kv-hook codex-tool\"" "Found an existing ~/.codex/hooks.json, left untouched; to enable KeyValet's secret detection, manually add a PreToolUse command: \"$INSTALL_DIR/bin/kv-hook codex-tool\""
+  fi
 fi
 
 # Cursor adapter (action-plan 4.2): native hooks.json schema (not the Claude Code one), gating

@@ -14,6 +14,11 @@
 //!
 //! `devin-tool` (Devin CLI) shares the `prompt`/`tool` fail-open convention: no output means
 //! proceed; a hit prints Devin's native `{"decision": "block", "reason"}` shape.
+//!
+//! `codex-tool` (Codex) is fail-open on the no-hit side too (no output, exit 0), but on a hit
+//! it uses both documented deny channels: the `hookSpecificOutput` JSON on stdout AND exit 2
+//! with the reason on stderr -- Codex's `permissionDecision` supports no `ask`, only `deny`
+//! (see the module doc comment in `lib.rs`).
 
 use std::io::Read;
 
@@ -60,6 +65,16 @@ fn main() {
         "cursor-session" => print!("{}", kv_hook::handle_cursor_session()),
         "grok-tool" => {
             if let Some(out) = kv_hook::handle_grok_tool(&input) {
+                print!("{out}");
+                std::process::exit(2);
+            }
+        }
+        "codex-tool" => {
+            if let Some(out) = kv_hook::handle_codex_tool(&input) {
+                if let Some(reason) = out["hookSpecificOutput"]["permissionDecisionReason"].as_str()
+                {
+                    eprintln!("{reason}");
+                }
                 print!("{out}");
                 std::process::exit(2);
             }

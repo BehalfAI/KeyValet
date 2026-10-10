@@ -2,7 +2,8 @@
 //! they end up in KeyValet instead of the chat, files or shell.
 //!
 //! Direct port of `claude-plugin/hooks/secrets.mjs`, which this binary replaces as the thing the
-//! Claude Code plugin (and, best-effort, Codex) actually invokes. The modes:
+//! Claude Code plugin actually invokes; Codex, Cursor, Grok and Devin get dedicated modes for
+//! their own hook contracts. The modes:
 //!
 //!   kv-hook prompt         UserPromptSubmit: the user pasted a key -> tell the agent to store it
 //!                          in KeyValet.
@@ -17,6 +18,7 @@
 //!                          the session's initial context).
 //!   kv-hook grok-tool      Grok Build `PreToolUse`.
 //!   kv-hook devin-tool     Devin CLI `PreToolUse`.
+//!   kv-hook codex-tool     Codex `PreToolUse` (`~/.codex/hooks.json`).
 //!
 //! Cursor and Grok each get their own mode(s), not a translation of `prompt`/`tool`'s output,
 //! because neither speaks Claude Code's `hookSpecificOutput` shape even though both can *load*
@@ -42,6 +44,14 @@
 //!   becomes a block, same trade-off as Cursor and Grok. `prompt` mode's output is already
 //!   Devin-compatible (`UserPromptSubmit` + `additionalContext`), so only the tool side gets a
 //!   dedicated mode.
+//! - Codex does understand `hookSpecificOutput.permissionDecision` (developers.openai.com/
+//!   codex/hooks, checked 2026-10) -- but only `"deny"`: `"ask"` is parsed yet unsupported (the
+//!   hook run is marked failed and the tool call proceeds), so `tool` mode's "ask" would be a
+//!   silent allow there too. Codex also names its edit tool `apply_patch` and carries the
+//!   patch text in `tool_input.command`, which `tool_text` has no case for. `codex-tool`
+//!   therefore emits only `deny` -- plus, belt and braces, `main.rs` exits 2 with the reason
+//!   on stderr, the other documented deny channel. Non-managed hooks are skipped until the
+//!   user trusts them via `/hooks` inside Codex; `install.sh` says so.
 //!
 //! Hooks use format detection only; raw credential values are never logged for matching.
 //!
@@ -441,7 +451,8 @@ fn mcp_tool_text(input: &Value) -> String {
 fn tool_where(tool_name: &str) -> &'static str {
     match tool_name {
         "Bash" | "Shell" => "this shell command",
-        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => "this file",
+        // `apply_patch` is Codex's file-edit tool (its patch text arrives in `command`).
+        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" | "apply_patch" => "this file",
         // An MCP tool call or an unrecognized name -- neither "file" nor "shell command"
         // describes it accurately.
         _ => "this tool call",
@@ -763,6 +774,63 @@ pub fn handle_devin_tool(input: &Value) -> Option<Value> {
         return None;
     }
     Some(serde_json::json!({"decision": "block", "reason": devin_tool_reason(name, &hits)}))
+}
+
+/// Codex `PreToolUse` (developers.openai.com/codex/hooks, checked 2026-10). Codex speaks a
+/// Claude-Code-shaped config (`~/.codex/hooks.json` or `[hooks]` in `config.toml`) and parses
+/// `hookSpecificOutput`, but its `permissionDecision` vocabulary is deny-only in practice:
+/// `"ask"` is accepted by the parser yet unsupported -- the hook run is marked failed and the
+/// tool call proceeds -- so this handler never emits it; a flag is always a hard `deny`. A
+/// non-managed hook doesn't run until the user reviews and trusts it via `/hooks` inside
+/// Codex (Codex prints a startup warning telling them to).
+///
+/// Input names tools as `Bash`, `apply_patch`, `mcp__<server>__<tool>` or another local
+/// function tool; `tool_input.command` carries the command for `Bash` *and* the whole patch
+/// text for `apply_patch`, while MCP/other tools send their arguments object. Both `tool_name`
+/// and `toolName` are accepted, matching the Grok handler. Calls on the `keyvalet` server are
+/// exempt (`credential_set`'s `value` legitimately carries a secret). A `tool_input` that
+/// arrives as a JSON-encoded string is parsed first, like `handle_cursor_mcp`. `None` means
+/// no output/proceed; `main.rs` also exits 2 with the reason on stderr on a `Some` -- both
+/// documented deny channels.
+pub fn handle_codex_tool(input: &Value) -> Option<Value> {
+    let name = input
+        .get("tool_name")
+        .or_else(|| input.get("toolName"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if is_keyvalet_ref(name) || is_keyvalet_ref(mcp_server_field(input)) {
+        return None;
+    }
+    let raw_input = input
+        .get("tool_input")
+        .or_else(|| input.get("toolInput"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let tool_input = match &raw_input {
+        Value::String(raw) => {
+            serde_json::from_str::<Value>(raw).unwrap_or_else(|_| raw_input.clone())
+        }
+        v => v.clone(),
+    };
+    let text = match name {
+        "Bash" | "apply_patch" => tool_input
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        _ => mcp_tool_text(&tool_input),
+    };
+    let hits = detect(&text, false);
+    if hits.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": deny_reason(name, &hits, "Codex"),
+        }
+    }))
 }
 
 #[cfg(test)]
@@ -1240,6 +1308,88 @@ mod tests {
             "tool_input": {"env": {"TOKEN": "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"}},
         });
         assert!(handle_devin_tool(&input).is_some());
+    }
+
+    #[test]
+    fn codex_tool_is_silent_for_an_ordinary_bash_command() {
+        let input = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "ls -la"}});
+        assert!(handle_codex_tool(&input).is_none());
+    }
+
+    #[test]
+    fn codex_tool_denies_a_bash_command_carrying_a_key() {
+        let key = format!("sk-proj-{}", "abcdefghijklmnopqrstuvwxyz0123456789");
+        let input = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": format!("curl -H 'Authorization: Bearer {key}' https://api.openai.com")},
+        });
+        let out = handle_codex_tool(&input).unwrap();
+        let hso = &out["hookSpecificOutput"];
+        assert_eq!(hso["hookEventName"], "PreToolUse");
+        assert_eq!(hso["permissionDecision"], "deny");
+        // Codex parses "ask" but doesn't support it (the run is marked failed and the call
+        // proceeds), so the output must never contain it anywhere.
+        assert!(!out.to_string().contains("\"ask\""));
+        assert!(hso["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .contains("shell command"));
+    }
+
+    #[test]
+    fn codex_tool_denies_an_apply_patch_adding_a_key() {
+        // Codex's file-edit tool is `apply_patch` and the whole patch text arrives in
+        // `tool_input.command` -- matcher aliases like Edit/Write still report this name.
+        let patch = format!(
+            "*** Begin Patch\n*** Update File: .env\n+OPENAI_API_KEY=sk-proj-{}\n*** End Patch",
+            "abcdefghijklmnopqrstuvwxyz0123456789"
+        );
+        let input = serde_json::json!({
+            "tool_name": "apply_patch",
+            "tool_input": {"command": patch},
+        });
+        let out = handle_codex_tool(&input).unwrap();
+        assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(out["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .contains("this file"));
+    }
+
+    #[test]
+    fn codex_tool_skips_keyvalets_own_mcp_tools() {
+        // credential_set's value legitimately carries a secret -- gating
+        // mcp__keyvalet__credential_set would break the sanctioned path.
+        let input = serde_json::json!({
+            "tool_name": "mcp__keyvalet__credential_set",
+            "tool_input": {"template": "openai", "value": format!("sk-proj-{}", "abcdefghijklmnopqrstuvwxyz0123456789")},
+        });
+        assert!(handle_codex_tool(&input).is_none());
+    }
+
+    #[test]
+    fn codex_tool_denies_a_secret_nested_in_another_servers_arguments() {
+        let input = serde_json::json!({
+            "tool_name": "mcp__github__create_issue",
+            "tool_input": {"body": {"text": format!("use sk-proj-{}", "abcdefghijklmnopqrstuvwxyz0123456789")}},
+        });
+        let out = handle_codex_tool(&input).unwrap();
+        assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(out["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .contains("this tool call"));
+    }
+
+    #[test]
+    fn codex_tool_scans_a_json_encoded_tool_input_string() {
+        let input = serde_json::json!({
+            "tool_name": "mcp__github__create_issue",
+            "tool_input": serde_json::to_string(&serde_json::json!({
+                "body": format!("key is sk-proj-{}", "abcdefghijklmnopqrstuvwxyz0123456789")
+            })).unwrap(),
+        });
+        assert!(handle_codex_tool(&input).is_some());
     }
 
     #[test]
