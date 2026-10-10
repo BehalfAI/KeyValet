@@ -640,19 +640,92 @@ fn read_recovery_secret(prompt: &str) -> zeroize::Zeroizing<String> {
     zeroize::Zeroizing::new(text.strip_suffix('\n').unwrap_or(text).to_owned())
 }
 
+/// What the launchd daemon reports about live sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DaemonState {
+    /// No socket, or the socket exists but nothing is listening: the daemon isn't running and
+    /// can't hold sessions.
+    NotRunning,
+    /// Connected and got a valid count.
+    Sessions(usize),
+    /// The socket answered but produced no valid reply before timing out: could be mid-restart
+    /// or mid-session -- treated as busy (fail closed).
+    Unknown,
+}
+
+fn is_busy(state: DaemonState) -> bool {
+    match state {
+        DaemonState::NotRunning => false,
+        DaemonState::Sessions(n) => n > 0,
+        DaemonState::Unknown => true,
+    }
+}
+
+fn daemon_session_state() -> DaemonState {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::fs::FileTypeExt;
+    let path = std::path::Path::new(kv_platform::paths::HELPER_SOCKET);
+    if !std::fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_socket())
+        .unwrap_or(false)
+    {
+        return DaemonState::NotRunning;
+    }
+    let mut stream = match std::os::unix::net::UnixStream::connect(path) {
+        // The socket file exists but nothing listens: stale file, daemon stopped.
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+            ) =>
+        {
+            return DaemonState::NotRunning
+        }
+        Err(_) => return DaemonState::Unknown,
+        Ok(s) => s,
+    };
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(1)));
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(1)));
+    if stream
+        .write_all(b"{\"op\":\"control\",\"command\":\"sessions\"}\n")
+        .is_err()
+    {
+        return DaemonState::Unknown;
+    }
+    let mut reply = String::new();
+    if BufReader::new(&stream).read_line(&mut reply).is_err() {
+        return DaemonState::Unknown;
+    }
+    match serde_json::from_str::<serde_json::Value>(&reply)
+        .ok()
+        .and_then(|v| v.get("sessions")?.as_u64())
+    {
+        Some(n) => DaemonState::Sessions(n as usize),
+        None => DaemonState::Unknown,
+    }
+}
+
+/// Legacy pre-daemon helpers: spawned as exactly `kv-helper` with no argv -- the daemon's
+/// `kv-helper --daemon --uid ...` argv does NOT match this pattern, deliberately.
+fn legacy_helper_running() -> bool {
+    matches!(
+        std::process::Command::new("/usr/bin/pgrep")
+            .args(["-f", "^/usr/local/lib/keyvalet/bin/kv-helper$"])
+            .output(),
+        Ok(output) if output.status.code() == Some(0)
+    )
+}
+
 fn require_no_helper_sessions() {
     // Older helper versions cannot detect a rotation. Never migrate while any helper is alive.
     // Helpers just asked to stop (e.g. by the installer) get a few seconds to exit.
     for attempt in 0..25 {
-        match std::process::Command::new("/usr/bin/pgrep")
-            .args(["-x", "kv-helper"])
-            .output()
-        {
-            Ok(output) if output.status.code() == Some(1) => return,
-            Ok(output) if output.status.code() == Some(0) && attempt < 24 => {
-                std::thread::sleep(std::time::Duration::from_millis(200));
-            }
-            _ => break,
+        // Fail closed: a live-but-unanswering daemon counts as busy; absent/stopped counts as 0.
+        if !is_busy(daemon_session_state()) && !legacy_helper_running() {
+            return;
+        }
+        if attempt < 24 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
         }
     }
     fatal(&kv_i18n::t(
@@ -1709,5 +1782,18 @@ mod scan_tests {
         assert_ne!(a, b);
         assert!(a.starts_with("[1]"));
         assert!(b.starts_with("[2]"));
+    }
+}
+
+#[cfg(test)]
+mod daemon_state_tests {
+    use super::*;
+
+    #[test]
+    fn busy_only_when_sessions_exist_or_the_daemon_wont_answer() {
+        assert!(!is_busy(DaemonState::NotRunning));
+        assert!(!is_busy(DaemonState::Sessions(0)));
+        assert!(is_busy(DaemonState::Sessions(1)));
+        assert!(is_busy(DaemonState::Unknown));
     }
 }

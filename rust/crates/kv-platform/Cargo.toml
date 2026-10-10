@@ -6,11 +6,15 @@ license.workspace = true
 
 [dependencies]
 kv-i18n = { path = "../kv-i18n" }
+kv-ipc = { path = "../kv-ipc" }
 kv-vault = { path = "../kv-vault" }
 serde_json = "1"
 zeroize = "1"
 libc = "0.2"
-tokio = { version = "1", features = ["process", "time"] }
+tokio = { version = "1", features = ["process", "time", "net", "io-util", "sync", "rt-multi-thread"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation-sys = "=0.8.7"
 
 [dev-dependencies]
 base64 = "0.22"

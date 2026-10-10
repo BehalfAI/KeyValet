@@ -1104,6 +1104,7 @@ dependencies = [
  "kv-vault",
  "libc",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
@@ -1130,6 +1131,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "zeroize",
 ]
 
 [[package]]
@@ -1172,7 +1174,9 @@ name = "kv-platform"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "core-foundation-sys",
  "kv-i18n",
+ "kv-ipc",
  "kv-vault",
  "libc",
  "serde_json",
@@ -1245,12 +1249,15 @@ dependencies = [
  "base64 0.22.1",
  "block2",
  "kv-i18n",
+ "kv-ipc",
+ "kv-platform",
  "kv-vault",
  "libc",
  "objc2",
  "objc2-foundation",
  "objc2-local-authentication",
  "serde_json",
+ "zeroize",
 ]
 
 [[package]]

@@ -14,6 +14,14 @@ use std::time::Duration;
 const AUTH_TIMEOUT: Duration = Duration::from_millis(120_000);
 const CONFIRM_TIMEOUT: Duration = Duration::from_millis(130_000);
 
+/// The confirmation-dialog AppleScript, shared with the per-user agent (`kv-touchid --agent`),
+/// which raises the same dialog without privilege dropping.
+pub const USER_CONFIRM_SCRIPT: &str = r#"on run argv
+  set r to display dialog (item 1 of argv) with title (item 2 of argv) buttons {(item 4 of argv), (item 3 of argv)} default button (item 4 of argv) cancel button (item 4 of argv) with icon caution giving up after 120
+  if gave up of r then error number -128
+  return button returned of r
+end run"#;
+
 /// Builds a `program` invocation with privileges dropped to the invoking user. Never
 /// `CommandExt::uid/gid`: on macOS that sequence resets the effective gid to 0 (wheel) --
 /// see `user::drop_to`.
@@ -90,6 +98,7 @@ async fn run_with_timeout(
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct TouchIdAuthenticator;
 
 impl Authenticator for TouchIdAuthenticator {
@@ -123,6 +132,7 @@ impl Authenticator for TouchIdAuthenticator {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct RootUserDialogConfirmer;
 
 impl Confirmer for RootUserDialogConfirmer {
@@ -130,11 +140,7 @@ impl Confirmer for RootUserDialogConfirmer {
         let Some((uid, gid)) = user::invoking_user() else {
             return false;
         };
-        let script = r#"on run argv
-  set r to display dialog (item 1 of argv) with title (item 2 of argv) buttons {(item 4 of argv), (item 3 of argv)} default button (item 4 of argv) cancel button (item 4 of argv) with icon caution giving up after 120
-  if gave up of r then error number -128
-  return button returned of r
-end run"#;
+        let script = USER_CONFIRM_SCRIPT;
         let title = kv_i18n::t("KeyValet · 安全确认", "KeyValet · Security Confirmation");
         let deny = kv_i18n::t("拒绝", "Deny");
         let args = ["-e", script, "--", message, &title, ok_label, &deny];

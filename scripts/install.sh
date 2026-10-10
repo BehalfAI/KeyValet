@@ -2,7 +2,11 @@
 # Installs KeyValet. Runs as a regular user; steps that need privileges go through sudo (prompts for a password).
 #
 # Layout after install (all root:wheel, not writable by a regular user / AI agent):
-#   /usr/local/lib/keyvalet/bin/kv-helper   root helper (Touch ID gated), launched via sudo -n
+#   /usr/local/lib/keyvalet/bin/kv-helper   root helper (Touch ID gated): launchd daemon at
+#                                           /var/run/keyvalet/helper.sock when signed for our
+#                                           team (PWCRJPY7YC), else the sudo -n fallback
+#   /usr/local/lib/keyvalet/bin/kv-touchid  Touch ID authentication helper (also the per-user
+#                                           LaunchAgent dev.keyvalet.agent in daemon mode)
 #   /usr/local/lib/keyvalet/bin/kv-touchid  Touch ID authentication helper (hardened runtime signature)
 #   /usr/local/lib/keyvalet/bin/kv-mcp      MCP server (runs unprivileged, one process per AI session)
 #   /usr/local/lib/keyvalet/bin/kv-cli      terminal management CLI (runs as root via sudo)
@@ -10,6 +14,8 @@
 #   /usr/local/lib/keyvalet/templates/      bundled credential template catalog
 #   /usr/local/bin/keyvalet                 wrapper script that execs kv-cli via sudo
 #   /var/db/keyvalet/                       the encrypted credential vault (0700)
+#   /var/run/keyvalet/                      daemon + agent Unix sockets (daemon mode)
+#   /Library/LaunchDaemons/dev.keyvalet.helper.plist / /Library/LaunchAgents/dev.keyvalet.agent.plist
 #   /etc/sudoers.d/keyvalet                 lets only the current user run the helper passwordlessly (it still requires Touch ID once started)
 #
 # Upgrading from the pre-rename credential-mcp: automatically migrates /var/db/credential-mcp to /var/db/keyvalet and removes the old install.
@@ -38,6 +44,7 @@ if [ -x "$SRC_DIR/bin/kv-helper" ] && [ ! -d "$SRC_DIR/rust" ]; then
   # Release package: prebuilt Apple Silicon binaries, no source tree. Only /usr/bin/codesign
   # is needed below (the kv-touchid ad-hoc hardened-runtime signature); no Xcode CLT/cargo.
   say "==> 使用发行包内的预编译二进制（Apple Silicon）" "==> Using the release package's prebuilt binaries (Apple Silicon)"
+  PREBUILT=1
   BIN_DIR="$SRC_DIR/bin"
   for b in kv-helper kv-touchid kv-mcp kv-cli kv-hook; do
     [ -x "$BIN_DIR/$b" ] || { say "发行包不完整：缺少 $b" "Incomplete release package: missing $b" >&2; exit 1; }
@@ -49,6 +56,7 @@ else
   CARGO_BIN=$(command -v cargo || true)
   [ -n "$CARGO_BIN" ] || { say "找不到 cargo，请先安装 Rust 工具链（https://rustup.rs）" "cargo not found; install the Rust toolchain first (https://rustup.rs)" >&2; exit 1; }
 
+  PREBUILT=0
   say "==> 构建（cargo build --release）" "==> Building (cargo build --release)"
   cd "$SRC_DIR/rust"
   cargo build --release --locked
@@ -63,13 +71,86 @@ trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/bin" "$STAGE/templates"
 cp "$BIN_DIR/kv-helper" "$BIN_DIR/kv-touchid" "$BIN_DIR/kv-mcp" "$BIN_DIR/kv-cli" "$BIN_DIR/kv-hook" "$STAGE/bin/"
 cp -R "$SRC_DIR/templates/." "$STAGE/templates/" 2>/dev/null || true
-# Hardened runtime: processes owned by the same user (including an AI agent) cannot debug or inject into this binary
-codesign -s - -o runtime -f "$STAGE/bin/kv-touchid" >/dev/null
+TEAM_ID=PWCRJPY7YC
+team_of() { /usr/bin/codesign -dv --verbose=4 "$1" 2>&1 | /usr/bin/sed -n 's/^TeamIdentifier=\(.*\)/\1/p'; }
+
+# A codesigning identity owned by our team: prefer "Developer ID Application", accept
+# "Apple Development" (the developer's machine). Prints the SHA-1 to sign with, nothing if none.
+pick_signing_identity() {
+  want=$1
+  /usr/bin/security find-identity -v -p codesigning 2>/dev/null \
+    | /usr/bin/sed -n "s/^ *[0-9]*) \([0-9A-Fa-f]\{40\}\) \"\($want: [^\"]*\)\"/\1|\2/p" \
+    | while IFS='|' read -r hash name; do
+        ou=$(/usr/bin/security find-certificate -c "$name" -a -p 2>/dev/null \
+          | /usr/bin/openssl x509 -noout -subject -nameopt sep_multiline 2>/dev/null \
+          | /usr/bin/sed -n 's/^ *OU=\(.*\)/\1/p' | /usr/bin/head -1)
+        if [ "$ou" = "$TEAM_ID" ]; then echo "$hash"; break; fi
+      done
+}
+IDENTITY_SHA=$( { pick_signing_identity "Developer ID Application"; pick_signing_identity "Apple Development"; } | /usr/bin/head -1 )
+
+# Hardened runtime everywhere: a real team signature when we have one (required for the launchd
+# daemon mode below -- the daemon verifies the agent's Apple-anchored identity before trusting
+# its prompts). Without an identity, fall back to the ad-hoc kv-touchid signature as before.
+if [ "$PREBUILT" = 1 ] && [ "$(team_of "$BIN_DIR/kv-helper")" = "$TEAM_ID" ] && [ "$(team_of "$BIN_DIR/kv-touchid")" = "$TEAM_ID" ]; then
+  say "发行包自带 $TEAM_ID 签名，保持原样" "The release package already carries the $TEAM_ID signature; keeping it"
+elif [ -n "$IDENTITY_SHA" ]; then
+  say "==> 使用 $TEAM_ID 身份为二进制签名" "==> Signing binaries with the $TEAM_ID identity"
+  for b in helper touchid mcp cli hook; do
+    /usr/bin/codesign --force --options runtime --identifier "dev.keyvalet.$b" -s "$IDENTITY_SHA" "$STAGE/bin/kv-$b" >/dev/null \
+      || { say "签名失败：kv-$b" "Signing failed: kv-$b" >&2; exit 1; }
+  done
+else
+  codesign -s - -o runtime -f "$STAGE/bin/kv-touchid" >/dev/null
+fi
+
+# Daemon mode requires verifiable code identity on BOTH the daemon (it must not be spoofable)
+# and the agent (the daemon verifies it before trusting its prompt answers).
+DAEMON_MODE=0
+if /usr/bin/codesign --verify --strict "$STAGE/bin/kv-helper" 2>/dev/null \
+   && /usr/bin/codesign --verify --strict "$STAGE/bin/kv-touchid" 2>/dev/null \
+   && [ "$(team_of "$STAGE/bin/kv-helper")" = "$TEAM_ID" ] \
+   && [ "$(team_of "$STAGE/bin/kv-touchid")" = "$TEAM_ID" ]; then
+  DAEMON_MODE=1
+  say "==> 启用 launchd 守护进程模式（dev.keyvalet.helper + dev.keyvalet.agent）" "==> Enabling launchd daemon mode (dev.keyvalet.helper + dev.keyvalet.agent)"
+else
+  say "未检测到可用的 $TEAM_ID 签名身份，按 sudo 模式安装（功能相同，每个会话经 sudo 起 helper）" "No usable $TEAM_ID signing identity found; installing in sudo mode (same features -- each session spawns the helper via sudo)"
+fi
 
 USER_NAME=$(id -un)
 case "$USER_NAME" in
   *[!A-Za-z0-9_.-]*|"") say "用户名 $USER_NAME 含有不支持的字符" "User name $USER_NAME contains unsupported characters" >&2; exit 1 ;;
 esac
+
+if [ "$DAEMON_MODE" = 1 ]; then
+  UID_NUM=$(id -u)
+  cat > "$STAGE/dev.keyvalet.helper.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.keyvalet.helper</string>
+  <key>ProgramArguments</key><array>
+    <string>$INSTALL_DIR/bin/kv-helper</string><string>--daemon</string><string>--uid</string><string>$UID_NUM</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict></plist>
+EOF
+  cat > "$STAGE/dev.keyvalet.agent.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.keyvalet.agent</string>
+  <key>ProgramArguments</key><array>
+    <string>$INSTALL_DIR/bin/kv-touchid</string><string>--agent</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>LimitLoadToSessionType</key><string>Aqua</string>
+  <key>ProcessType</key><string>Interactive</string>
+</dict></plist>
+EOF
+fi
 
 cat > "$STAGE/sudoers" <<SUDOERS
 # KeyValet: only $USER_NAME may run the vault helper without a password (arguments must match exactly).
@@ -115,8 +196,10 @@ EOF
   export SUDO_ASKPASS="$STAGE/install-askpass"
   SUDO="sudo -A"
 fi
+# This whole root script is ONE single-quoted string: never use a single quote (apostrophe)
+# anywhere inside it, not even in a comment -- it would end the string early.
 $SUDO /bin/sh -eu -c '
-  INSTALL_DIR="$1"; VAULT_DIR="$2"; CLI_LINK="$3"; STAGE="$4"; SUDOERS_FILE="$5"; KV_LANG="$6"
+  INSTALL_DIR="$1"; VAULT_DIR="$2"; CLI_LINK="$3"; STAGE="$4"; SUDOERS_FILE="$5"; KV_LANG="$6"; DAEMON_MODE="$7"
   say() { if [ "$KV_LANG" = zh ]; then printf "%s\n" "$1"; else printf "%s\n" "$2"; fi; }
   rm -rf "$INSTALL_DIR.new"
   mkdir -p "$INSTALL_DIR.new"
@@ -125,6 +208,10 @@ $SUDO /bin/sh -eu -c '
   chown -R root:wheel "$INSTALL_DIR.new"
   chmod -R u=rwX,go=rX "$INSTALL_DIR.new"
   chmod 0755 "$INSTALL_DIR.new"/bin/*
+  # Stop the daemon and the per-user agent before switching binaries; the agent lives in the
+  # GUI domain of the installing user.
+  /bin/launchctl bootout "system/dev.keyvalet.helper" 2>/dev/null || true
+  /bin/launchctl bootout "gui/$SUDO_UID/dev.keyvalet.agent" 2>/dev/null || true
   # Revoke sessions before switching the installed executables and rotating the vault key.
   /usr/bin/pkill -TERM -x kv-helper || [ "$?" -eq 1 ]
   /usr/bin/pkill -TERM -u "$SUDO_UID" -x kv-mcp || [ "$?" -eq 1 ]
@@ -154,7 +241,17 @@ $SUDO /bin/sh -eu -c '
   say "==> 初始化或迁移 Secure Enclave 凭证库" "==> Initializing or migrating the Secure Enclave vault"
   "$INSTALL_DIR/bin/kv-cli" --lang "$KV_LANG" setup-enclave
   rm -rf "$INSTALL_DIR.old"
-' sh "$INSTALL_DIR" "$VAULT_DIR" "$CLI_LINK" "$STAGE" "$SUDOERS_FILE" "$KV_LANG"
+
+  if [ "$DAEMON_MODE" = 1 ]; then
+    install -o root -g wheel -m 0644 "$STAGE/dev.keyvalet.helper.plist" /Library/LaunchDaemons/dev.keyvalet.helper.plist
+    install -o root -g wheel -m 0644 "$STAGE/dev.keyvalet.agent.plist" /Library/LaunchAgents/dev.keyvalet.agent.plist
+    /bin/launchctl bootstrap system /Library/LaunchDaemons/dev.keyvalet.helper.plist
+    /bin/launchctl bootstrap "gui/$SUDO_UID" /Library/LaunchAgents/dev.keyvalet.agent.plist
+    /bin/launchctl print system/dev.keyvalet.helper >/dev/null
+    /bin/launchctl print "gui/$SUDO_UID/dev.keyvalet.agent" >/dev/null
+    say "launchd 守护进程已启动：dev.keyvalet.helper + dev.keyvalet.agent" "launchd daemon started: dev.keyvalet.helper + dev.keyvalet.agent"
+  fi
+' sh "$INSTALL_DIR" "$VAULT_DIR" "$CLI_LINK" "$STAGE" "$SUDOERS_FILE" "$KV_LANG" "$DAEMON_MODE"
 sudo -k
 
 # Verify the passwordless rule took effect: the helper exits immediately on reading EOF (no Touch ID prompt)

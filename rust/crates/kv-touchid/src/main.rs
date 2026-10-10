@@ -9,6 +9,8 @@
 //! system verifies it, this program never sees it.
 
 #[cfg(target_os = "macos")]
+mod agent;
+#[cfg(target_os = "macos")]
 mod enclave;
 
 #[cfg(target_os = "macos")]
@@ -42,6 +44,9 @@ fn main() {
     let reason = args
         .next()
         .unwrap_or_else(|| kv_i18n::t("解锁凭证库", "unlock your credential vault"));
+    if reason == "--agent" {
+        std::process::exit(agent::run());
+    }
     if reason == "--enclave" {
         let operation = args.next().unwrap_or_default();
         let reason = args

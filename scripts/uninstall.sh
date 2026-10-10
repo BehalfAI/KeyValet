@@ -16,8 +16,13 @@ CLI_LINK=/usr/local/bin/keyvalet
 SUDOERS_FILE=/etc/sudoers.d/keyvalet
 
 sudo -k
+# Stop the launchd daemon and the per-user agent (a no-op when they were never installed).
+sudo /bin/launchctl bootout system/dev.keyvalet.helper 2>/dev/null || true
+sudo /bin/launchctl bootout "gui/$(id -u)/dev.keyvalet.agent" 2>/dev/null || true
+sudo rm -f /Library/LaunchDaemons/dev.keyvalet.helper.plist /Library/LaunchAgents/dev.keyvalet.agent.plist
+sudo rm -rf /var/run/keyvalet
 sudo rm -rf "$INSTALL_DIR" "$CLI_LINK" "$SUDOERS_FILE"
-say "已删除 $INSTALL_DIR、$CLI_LINK 和 sudoers 规则 $SUDOERS_FILE" "Removed $INSTALL_DIR, $CLI_LINK and the sudoers rule $SUDOERS_FILE"
+say "已删除 $INSTALL_DIR、$CLI_LINK、launchd 配置和 sudoers 规则 $SUDOERS_FILE" "Removed $INSTALL_DIR, $CLI_LINK, the launchd plists and the sudoers rule $SUDOERS_FILE"
 
 if [ "${1:-}" = "--purge" ]; then
   if [ "$KV_LANG" = zh ]; then

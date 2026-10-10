@@ -114,7 +114,10 @@ impl EnclaveMasterKeyProvider {
         Self::decode_output(&output, metadata)
     }
 
-    fn decode_output(output: &[u8], metadata: Option<&EnclaveMetadata>) -> Result<EnclaveKey> {
+    pub(crate) fn decode_output(
+        output: &[u8],
+        metadata: Option<&EnclaveMetadata>,
+    ) -> Result<EnclaveKey> {
         if output.len() <= 32 || output.len() > 8192 {
             return Err(VaultError::new(
                 "硬件密钥响应长度不对",

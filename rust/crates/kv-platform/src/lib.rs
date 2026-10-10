@@ -4,10 +4,14 @@
 //! root's authority.
 
 #[cfg(target_os = "macos")]
+pub mod agent;
+#[cfg(target_os = "macos")]
 pub mod enclave;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod paths;
+#[cfg(target_os = "macos")]
+pub mod peer;
 pub mod trust;
 #[cfg(unix)]
 pub mod user;

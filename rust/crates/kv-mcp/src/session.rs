@@ -12,14 +12,15 @@ use kv_ipc::{
     AuthMessage, CredentialHint, ReadyMessage, Request as WireRequest, Response,
     GRANT_REQUIRED_PREFIX, PROTOCOL_VERSION,
 };
-use kv_platform::paths::{HELPER_BIN, SUDOERS_FILE, SUDO_BIN, TOUCHID_BIN};
+use kv_platform::paths::{HELPER_BIN, HELPER_SOCKET, SUDOERS_FILE, SUDO_BIN, TOUCHID_BIN};
 use kv_platform::trust::untrusted_reason;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
+use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
 
@@ -55,13 +56,49 @@ pub struct CredentialTarget {
 
 type Pending = oneshot::Sender<Result<Value, String>>;
 
-struct ChildHandle {
-    stdin: ChildStdin,
-    child: Child,
+/// The session's byte stream to the helper: a sudo-spawned child's pipes (fallback mode), or a
+/// Unix-socket connection to the launchd daemon when HELPER_SOCKET exists.
+enum Transport {
+    Stdio {
+        stdin: ChildStdin,
+        child: Child,
+    },
+    Socket {
+        writer: tokio::net::unix::OwnedWriteHalf,
+    },
+}
+
+impl Transport {
+    async fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        match self {
+            Transport::Stdio { stdin, .. } => stdin.write_all(buf).await,
+            Transport::Socket { writer } => writer.write_all(buf).await,
+        }
+    }
+
+    async fn close(&mut self) {
+        match self {
+            Transport::Stdio { stdin, child } => {
+                let _ = stdin.shutdown().await;
+                let _ = child.start_kill();
+            }
+            Transport::Socket { writer } => {
+                let _ = writer.shutdown().await;
+            }
+        }
+    }
+}
+
+/// True when the launchd daemon is installed and should serve this session (the stdio fallback
+/// stays for hosts that predate it or could not be code-signed).
+fn daemon_socket_available() -> bool {
+    std::fs::symlink_metadata(HELPER_SOCKET)
+        .map(|m| m.file_type().is_socket())
+        .unwrap_or(false)
 }
 
 struct Inner {
-    child: Option<ChildHandle>,
+    child: Option<Transport>,
     ready: bool,
     generation: u64,
     pending: HashMap<u64, Pending>,
@@ -218,8 +255,7 @@ impl HelperSession {
         let mut inner = self.inner.lock().await;
         inner.revoke();
         if let Some(mut c) = inner.child.take() {
-            let _ = c.stdin.shutdown().await;
-            let _ = c.child.start_kill();
+            c.close().await;
         }
     }
 
@@ -303,7 +339,7 @@ impl HelperSession {
             let mut line = serde_json::to_vec(&req).unwrap();
             line.push(b'\n');
             let ch = inner.child.as_mut().unwrap();
-            if ch.stdin.write_all(&line).await.is_err() {
+            if ch.write_all(&line).await.is_err() {
                 return Err(SessionError(kv_i18n::t(
                     "无法写入 helper",
                     "Cannot write to the helper",
@@ -364,34 +400,47 @@ impl HelperSession {
             return Err(SessionError(problem));
         }
 
-        // -n: never prompt for a password; the sudoers rule only allows the helper to run
-        // passwordlessly, and authentication is done via Touch ID inside the helper.
-        let mut cmd = tokio::process::Command::new(SUDO_BIN);
-        cmd.args(["-n", "--", HELPER_BIN])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-            .env("HOME", std::env::var("HOME").unwrap_or_default())
-            .env("USER", std::env::var("USER").unwrap_or_default())
-            .env("LOGNAME", std::env::var("LOGNAME").unwrap_or_default())
-            .env("LANG", "en_US.UTF-8");
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => {
-                return Err(SessionError(kv_i18n::t(
-                    &format!("无法启动 sudo：{e}"),
-                    &format!("Cannot start sudo: {e}"),
-                )))
+        let use_daemon = daemon_socket_available();
+        let (mut stdin, read_half, stderr) = if use_daemon {
+            // A stale socket or a stopped daemon falls back to the sudo path (kept this
+            // version); a socket that answers but isn't root-owned is refused, not fallen back
+            // to -- it cannot be our daemon.
+            match tokio::net::UnixStream::connect(HELPER_SOCKET).await {
+                Ok(stream) => {
+                    #[cfg(target_os = "macos")]
+                    let trusted =
+                        kv_platform::peer::peer_uid(std::os::unix::io::AsRawFd::as_raw_fd(&stream))
+                            .map(|u| u == 0)
+                            .unwrap_or(false);
+                    #[cfg(not(target_os = "macos"))]
+                    let trusted = false;
+                    if !trusted {
+                        return Err(SessionError(kv_i18n::t(
+                            "凭证库服务套接字不属于 root，拒绝连接",
+                            "The vault daemon socket is not root-owned; refusing to connect",
+                        )));
+                    }
+                    let (read, writer) = stream.into_split();
+                    (
+                        Transport::Socket { writer },
+                        Box::new(read) as Box<dyn AsyncRead + Unpin + Send>,
+                        None,
+                    )
+                }
+                Err(_) => match spawn_sudo_helper() {
+                    Ok((t, r, e)) => (t, r, Some(e)),
+                    Err(e) => return Err(e),
+                },
+            }
+        } else {
+            match spawn_sudo_helper() {
+                Ok((t, r, e)) => (t, r, Some(e)),
+                Err(e) => return Err(e),
             }
         };
-        let mut stdin = child.stdin.take().unwrap();
-        let stdout = child.stdout.take().unwrap();
-        let mut stderr = child.stderr.take().unwrap();
 
         let stderr_tail = Arc::new(std::sync::Mutex::new(String::new()));
-        {
+        if let Some(mut stderr) = stderr {
             let tail = stderr_tail.clone();
             tokio::spawn(async move {
                 let mut buf = Vec::new();
@@ -430,20 +479,20 @@ impl HelperSession {
         let mut line = serde_json::to_vec(&auth).unwrap();
         line.push(b'\n');
         if stdin.write_all(&line).await.is_err() {
-            let _ = child.start_kill();
+            stdin.close().await;
             return Err(SessionError(kv_i18n::t(
                 "无法写入 helper",
                 "Cannot write to the helper",
             )));
         }
 
-        let mut reader = BufReader::new(stdout);
+        let mut reader = BufReader::new(read_half);
         let mut first_line = String::new();
         let read_result =
             tokio::time::timeout(UNLOCK_TIMEOUT, reader.read_line(&mut first_line)).await;
         match read_result {
             Err(_) => {
-                let _ = child.start_kill();
+                stdin.close().await;
                 return Err(self
                     .fail_unlock(kv_i18n::t(
                         "等待 Touch ID 认证超时",
@@ -452,15 +501,24 @@ impl HelperSession {
                     .await);
             }
             Ok(Err(_)) | Ok(Ok(0)) => {
+                stdin.close().await;
                 let tail = stderr_tail.lock().unwrap().clone();
-                return Err(self.fail_unlock(describe_sudo_failure(&tail)).await);
+                let msg = if use_daemon {
+                    kv_i18n::t(
+                        "凭证库服务在认证前断开了连接",
+                        "The vault daemon disconnected before authenticating",
+                    )
+                } else {
+                    describe_sudo_failure(&tail)
+                };
+                return Err(self.fail_unlock(msg).await);
             }
             Ok(Ok(_)) => {}
         }
         let msg: ReadyMessage = match serde_json::from_str(first_line.trim()) {
             Ok(m) => m,
             Err(_) => {
-                let _ = child.start_kill();
+                stdin.close().await;
                 return Err(self
                     .fail_unlock(kv_i18n::t(
                         "helper 输出了非法数据",
@@ -472,7 +530,7 @@ impl HelperSession {
         match msg {
             ReadyMessage::Ready { protocol, .. } if protocol == PROTOCOL_VERSION => {}
             ReadyMessage::Ready { .. } => {
-                let _ = child.start_kill();
+                stdin.close().await;
                 return Err(self
                     .fail_unlock(kv_i18n::t(
                         "helper 版本不匹配，请重新安装",
@@ -481,7 +539,7 @@ impl HelperSession {
                     .await);
             }
             ReadyMessage::NotReady { error, .. } => {
-                let _ = child.start_kill();
+                stdin.close().await;
                 return Err(self.fail_unlock(error).await);
             }
         }
@@ -489,7 +547,7 @@ impl HelperSession {
         let generation = {
             let mut inner = self.inner.lock().await;
             if inner.generation != expected_generation {
-                let _ = child.start_kill();
+                stdin.close().await;
                 return Err(SessionError(kv_i18n::t(
                     "会话在认证期间已锁定",
                     "The session was locked during authentication",
@@ -501,7 +559,7 @@ impl HelperSession {
             inner.unlocked_at = Some(SystemTime::now());
             inner.unlock_purpose = Some(purpose);
             inner.cooldown_until = None;
-            inner.child = Some(ChildHandle { stdin, child });
+            inner.child = Some(stdin);
             inner.generation
         };
 
@@ -549,13 +607,45 @@ impl HelperSession {
                 }
                 g.revoke();
                 if let Some(mut c) = g.child.take() {
-                    let _ = c.stdin.shutdown().await;
-                    let _ = c.child.start_kill();
+                    c.close().await;
                 }
             });
         }
         Ok(())
     }
+}
+
+/// Spawns the stdio-mode helper via passwordless sudo; returns the transport, its stdout (boxed
+/// for sharing with the socket path), and its stderr for failure diagnosis.
+fn spawn_sudo_helper() -> Result<
+    (
+        Transport,
+        Box<dyn AsyncRead + Unpin + Send>,
+        tokio::process::ChildStderr,
+    ),
+    SessionError,
+> {
+    let mut cmd = std::process::Command::new(SUDO_BIN);
+    cmd.args(["-n", "--", HELPER_BIN])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("HOME", std::env::var("HOME").unwrap_or_default())
+        .env("USER", std::env::var("USER").unwrap_or_default())
+        .env("LOGNAME", std::env::var("LOGNAME").unwrap_or_default())
+        .env("LANG", "en_US.UTF-8");
+    let mut child = tokio::process::Command::from(cmd).spawn().map_err(|e| {
+        SessionError(kv_i18n::t(
+            &format!("无法启动 sudo：{e}"),
+            &format!("Cannot start sudo: {e}"),
+        ))
+    })?;
+    let stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    Ok((Transport::Stdio { stdin, child }, Box::new(stdout), stderr))
 }
 
 fn describe_sudo_failure(stderr: &str) -> String {
@@ -581,12 +671,13 @@ fn describe_sudo_failure(stderr: &str) -> String {
 /// Verifies the installation: files meant to run as root must exist, be owned by root, and not be
 /// writable by others.
 fn install_problem() -> Option<String> {
-    for p in [
-        kv_platform::paths::INSTALL_DIR,
-        HELPER_BIN,
-        TOUCHID_BIN,
-        SUDOERS_FILE,
-    ] {
+    let mut paths = vec![kv_platform::paths::INSTALL_DIR, HELPER_BIN, TOUCHID_BIN];
+    // The daemon socket is an alternative to the sudoers rule this version (kept as fallback);
+    // a correctly daemon-mode install doesn't need the rule.
+    if !daemon_socket_available() {
+        paths.push(SUDOERS_FILE);
+    }
+    for p in paths {
         if let Some(reason) = untrusted_reason(Path::new(p)) {
             return Some(kv_i18n::t(
                 &format!("安装不安全：{reason}。请重新运行 ./scripts/install.sh"),

@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod agent;
 mod request;
 pub use request::{operation_digest, request_digest};
 
