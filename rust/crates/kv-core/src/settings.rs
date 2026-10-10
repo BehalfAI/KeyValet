@@ -166,6 +166,8 @@ pub fn write_settings(vault_dir: &Path, s: &Settings) -> std::io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
     }
+    #[cfg(windows)]
+    kv_platform::fs::set_private_permissions(&tmp)?;
     std::fs::rename(&tmp, file(vault_dir))
 }
 

@@ -1,3 +1,6 @@
+// Unix-only for now: these tests assert POSIX mode bits / unix-specific behaviors. The Windows
+// equivalents (DACLs) land with W2/W3; the crate itself builds cross-platform.
+#![cfg(unix)]
 //! Integration tests for configure_http, mirroring the intent of src/helper/http-manage.ts:
 //! expanding exposure needs confirmation (including the very first setup -- an empty "previously
 //! allowed hosts" set means everything is new -- `credential_set`'s template flow is the separate,

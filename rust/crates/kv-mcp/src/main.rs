@@ -1,7 +1,17 @@
 //! MCP server entry point. Direct port of src/server/index.ts.
 
+#[cfg(unix)]
+#[path = "dialog.rs"]
+mod dialog;
+#[cfg(windows)]
+#[path = "dialog_win.rs"]
 mod dialog;
 mod files;
+#[cfg(unix)]
+#[path = "gateway_env.rs"]
+mod gateway_env;
+#[cfg(windows)]
+#[path = "gateway_env_win.rs"]
 mod gateway_env;
 mod mail;
 mod oauth_flow;
@@ -69,6 +79,7 @@ impl ServerHandler for Server {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    #[cfg(unix)]
     unsafe {
         libc::umask(0o077);
         let limit = libc::rlimit {

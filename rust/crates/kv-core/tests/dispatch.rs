@@ -1,3 +1,6 @@
+// Unix-only for now: these tests assert POSIX mode bits / unix-specific behaviors. The Windows
+// equivalents (DACLs) land with W2/W3; the crate itself builds cross-platform.
+#![cfg(unix)]
 //! Integration tests mirroring src/test/grants.test.ts and the "dispatch" describe block of
 //! src/test/vault.test.ts -- the existing TS suites are the behavioral spec for this port.
 //! Run with KEYVALET_LANG=zh so assertions against Chinese prompt/error text are deterministic.

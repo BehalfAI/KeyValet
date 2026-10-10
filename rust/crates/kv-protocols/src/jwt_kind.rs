@@ -184,6 +184,7 @@ mod tests {
         if !vault.dir.join("master.key").exists() {
             // Explicit legacy fixture: production code never creates this file.
             std::fs::write(vault.dir.join("master.key"), [7u8; 32]).unwrap();
+            #[cfg(unix)]
             std::fs::set_permissions(
                 vault.dir.join("master.key"),
                 <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),

@@ -1,3 +1,6 @@
+// Unix-only for now: these tests assert POSIX mode bits / unix-specific behaviors. The Windows
+// equivalents (DACLs) land with W2/W3; the crate itself builds cross-platform.
+#![cfg(unix)]
 //! End-to-end OAuth2 flow tests against a real (mock) HTTP server via `wiremock` -- not just
 //! validation-logic unit tests, but the actual token-exchange/refresh/device-code network paths.
 

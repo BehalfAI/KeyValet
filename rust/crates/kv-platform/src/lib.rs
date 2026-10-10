@@ -7,10 +7,16 @@
 pub mod agent;
 #[cfg(target_os = "macos")]
 pub mod enclave;
+pub mod fs;
 #[cfg(target_os = "macos")]
 pub mod macos;
+pub mod mem;
 pub mod paths;
 #[cfg(target_os = "macos")]
+#[path = "peer.rs"]
+pub mod peer;
+#[cfg(windows)]
+#[path = "peer_windows.rs"]
 pub mod peer;
 pub mod trust;
 #[cfg(unix)]

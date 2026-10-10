@@ -191,8 +191,10 @@ fn audited<T>(
 }
 
 fn main() {
-    unsafe { libc::umask(0o077) };
+    #[cfg(unix)]
     unsafe {
+        libc::umask(0o077);
+        // No core dumps: a crash would dump every live secret to disk in one shot.
         let limit = libc::rlimit {
             rlim_cur: 0,
             rlim_max: 0,
@@ -552,6 +554,7 @@ fn main() {
     }
 }
 
+#[cfg(unix)]
 fn recovery_password(confirm: bool) -> zeroize::Zeroizing<String> {
     let prompt = kv_i18n::t(
         "输入独立的恢复长口令（12–1024 字节，建议六个以上随机单词）。请离线保管；换机恢复需要它，持有口令与 vault 密文可绕过硬件解密：",
@@ -604,61 +607,72 @@ fn read_recovery_secret(prompt: &str) -> zeroize::Zeroizing<String> {
             rpassword::prompt_password(prompt).unwrap_or_else(|_| failed()),
         );
     }
-    // Only fixed, localized prompts reach this dialog. Passwords return directly to the root
-    // CLI through a private pipe; never through an agent, argv, environment or temporary file.
-    let (uid, gid) = kv_platform::user::invoking_user().unwrap_or_else(|| failed());
-    use std::os::unix::process::CommandExt;
-    let script = r#"on run argv
+    #[cfg(not(unix))]
+    {
+        // The hidden-answer dialog goes through the per-user agent on Windows (W3); a piped
+        // passphrase is not accepted (it would sit in the caller's history/memory unzeroed).
+        let _ = prompt;
+        failed();
+    }
+    #[cfg(unix)]
+    {
+        // Only fixed, localized prompts reach this dialog. Passwords return directly to the root
+        // CLI through a private pipe; never through an agent, argv, environment or temporary file.
+        let (uid, gid) = kv_platform::user::invoking_user().unwrap_or_else(|| failed());
+        use std::os::unix::process::CommandExt;
+        let script = r#"on run argv
       set r to display dialog (item 1 of argv) with title "KeyValet · Recovery" default answer "" with hidden answer buttons {item 2 of argv, item 3 of argv} default button 2 cancel button 1 with icon caution giving up after 180
       if gave up of r then error number -128
       return text returned of r
     end run"#;
-    let mut command = std::process::Command::new(kv_platform::paths::OSASCRIPT_BIN);
-    command
-        .args([
-            "-e",
-            script,
-            "--",
-            prompt,
-            &kv_i18n::t("取消", "Cancel"),
-            &kv_i18n::t("确认", "Confirm"),
-        ])
-        .current_dir("/")
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
-    // Not `uid`/`gid`: on macOS that sequence leaves the child with effective gid 0 (wheel).
-    unsafe {
-        command.pre_exec(kv_platform::user::drop_to(uid, gid));
-    }
-    let mut child = command.spawn().unwrap_or_else(|_| failed());
-    // A fixed zeroizing buffer, not `output()`: a growing Vec leaves unzeroed passphrase copies.
-    let mut buf = zeroize::Zeroizing::new([0u8; 1027]);
-    let mut len = 0;
-    {
-        use std::io::Read;
-        let mut stdout = child.stdout.take().unwrap();
-        while len < buf.len() {
-            match stdout.read(&mut buf[len..]) {
-                Ok(0) => break,
-                Ok(n) => len += n,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(_) => break,
+        let mut command = std::process::Command::new(kv_platform::paths::OSASCRIPT_BIN);
+        command
+            .args([
+                "-e",
+                script,
+                "--",
+                prompt,
+                &kv_i18n::t("取消", "Cancel"),
+                &kv_i18n::t("确认", "Confirm"),
+            ])
+            .current_dir("/")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        // Not `uid`/`gid`: on macOS that sequence leaves the child with effective gid 0 (wheel).
+        unsafe {
+            command.pre_exec(kv_platform::user::drop_to(uid, gid));
+        }
+        let mut child = command.spawn().unwrap_or_else(|_| failed());
+        // A fixed zeroizing buffer, not `output()`: a growing Vec leaves unzeroed passphrase copies.
+        let mut buf = zeroize::Zeroizing::new([0u8; 1027]);
+        let mut len = 0;
+        {
+            use std::io::Read;
+            let mut stdout = child.stdout.take().unwrap();
+            while len < buf.len() {
+                match stdout.read(&mut buf[len..]) {
+                    Ok(0) => break,
+                    Ok(n) => len += n,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
             }
         }
+        let status = child.wait().unwrap_or_else(|_| failed());
+        if !status.success() || len > 1026 {
+            failed();
+        }
+        let text = std::str::from_utf8(&buf[..len]).unwrap_or_else(|_| failed());
+        zeroize::Zeroizing::new(text.strip_suffix('\n').unwrap_or(text).to_owned())
     }
-    let status = child.wait().unwrap_or_else(|_| failed());
-    if !status.success() || len > 1026 {
-        failed();
-    }
-    let text = std::str::from_utf8(&buf[..len]).unwrap_or_else(|_| failed());
-    zeroize::Zeroizing::new(text.strip_suffix('\n').unwrap_or(text).to_owned())
 }
 
 /// What the launchd daemon reports about live sessions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(unix)]
 enum DaemonState {
     /// No socket, or the socket exists but nothing is listening: the daemon isn't running and
     /// can't hold sessions.
@@ -670,6 +684,7 @@ enum DaemonState {
     Unknown,
 }
 
+#[cfg(unix)]
 fn is_busy(state: DaemonState) -> bool {
     match state {
         DaemonState::NotRunning => false,
@@ -678,6 +693,7 @@ fn is_busy(state: DaemonState) -> bool {
     }
 }
 
+#[cfg(unix)]
 fn daemon_session_state() -> DaemonState {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::fs::FileTypeExt;
@@ -724,6 +740,7 @@ fn daemon_session_state() -> DaemonState {
 
 /// Legacy pre-daemon helpers: spawned as exactly `kv-helper` with no argv -- the daemon's
 /// `kv-helper --daemon --uid ...` argv does NOT match this pattern, deliberately.
+#[cfg(unix)]
 fn legacy_helper_running() -> bool {
     matches!(
         std::process::Command::new("/usr/bin/pgrep")
@@ -733,6 +750,7 @@ fn legacy_helper_running() -> bool {
     )
 }
 
+#[cfg(unix)]
 fn require_no_helper_sessions() {
     // Older helper versions cannot detect a rotation. Never migrate while any helper is alive.
     // Helpers just asked to stop (e.g. by the installer) get a few seconds to exit.
@@ -753,6 +771,7 @@ fn require_no_helper_sessions() {
 
 /// Prints a warning when the device binding key's Time Machine exclusion can't be confirmed
 /// (`tmutil isexcluded` failed, reported `[Included]`, or the file is missing).
+#[cfg(unix)]
 fn warn_if_binding_exclusion_unconfirmed(vault: &Vault) {
     if matches!(vault.binding_backup_exclusion(), Ok(Some(false))) {
         println!(
@@ -1026,6 +1045,7 @@ fn enclave_command(cmd: &str, args: &[String], vault: &Vault, client: &Value) ->
 /// directory); `/Users/<name>` is the fallback if that lookup fails, which is right for the
 /// overwhelming majority of real Macs. Falls back to `$HOME` itself when there's no `SUDO_USER`
 /// at all (e.g. invoking `kv-cli` directly as root for testing).
+#[cfg(unix)]
 fn real_home() -> std::path::PathBuf {
     if let Some(user) = std::env::var("SUDO_USER").ok().filter(|u| !u.is_empty()) {
         if let Ok(out) = std::process::Command::new("dscl")
@@ -1046,6 +1066,14 @@ fn real_home() -> std::path::PathBuf {
     std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("/"))
+}
+
+#[cfg(windows)]
+fn real_home() -> std::path::PathBuf {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\"))
 }
 
 /// The fixed list of places secrets commonly end up (action-plan 4.1), filtered down to the ones
@@ -1251,6 +1279,7 @@ fn rewrite_content(content: &str, replacements: &[(usize, String, String)]) -> S
     out
 }
 
+#[cfg(unix)]
 fn escape_applescript_string(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -1262,6 +1291,7 @@ fn escape_applescript_string(s: &str) -> String {
 /// is a plain synchronous binary, so pulling in tokio for one dialog call wasn't worth it.
 /// `None` means the dialog couldn't even be attempted (no `SUDO_UID`/`SUDO_GID` -- e.g. kv-cli
 /// invoked as literal root, not via `sudo` -- or `osascript` itself failed to run).
+#[cfg(unix)]
 fn run_osascript_as_user(script: &str, args: &[&str]) -> Option<(i32, String)> {
     let (uid, gid) = kv_platform::user::invoking_user()?;
     use std::os::unix::process::CommandExt;
@@ -1289,6 +1319,7 @@ fn run_osascript_as_user(script: &str, args: &[&str]) -> Option<(i32, String)> {
 /// don't need to tell them apart. Items are passed as actual argv list elements, not interpolated
 /// into the script text, so arbitrary file paths/previews in them can't affect the AppleScript
 /// itself.
+#[cfg(unix)]
 fn choose_from_list(prompt: &str, items: &[String]) -> Option<Vec<String>> {
     if items.is_empty() {
         return Some(Vec::new());
@@ -1327,6 +1358,7 @@ end run"#,
 /// Shows a native two-button confirmation in the invoking user's GUI session. `false` on Cancel,
 /// on a timeout, or if the dialog couldn't be shown at all -- "did nothing" is always the safe
 /// default for this tool.
+#[cfg(unix)]
 fn confirm_yes_no(message: &str, yes_label: &str, no_label: &str) -> bool {
     let script = format!(
         r#"on run argv
@@ -1347,6 +1379,18 @@ end run"#,
         escape_applescript_string(no_label),
     );
     matches!(run_osascript_as_user(&script, &[]), Some((0, out)) if out.trim() == yes_label)
+}
+
+/// Checkbox dialogs belong to the per-user agent (W3); until then the import path is skipped
+/// with an explicit message rather than silently pretending.
+#[cfg(windows)]
+fn choose_from_list(_prompt: &str, _items: &[String]) -> Option<Vec<String>> {
+    None
+}
+
+#[cfg(windows)]
+fn confirm_yes_no(_message: &str, _yes_label: &str, _no_label: &str) -> bool {
+    false
 }
 
 /// The slice of `catalog.json` `keyvalet scan` needs to configure an imported credential for the
@@ -1496,6 +1540,16 @@ fn scan(args: &[String], vault: &Vault, client: &Value) {
         return;
     }
 
+    if cfg!(windows) {
+        println!(
+            "{}",
+            kv_i18n::t(
+                "检测到可导入的密钥，但图形导入对话框要到 W3（每用户 agent）才可用；现在请用上面的建议命令手动处理。",
+                "Importable secrets were found, but the selection dialog needs the per-user agent (W3); for now handle them by hand with the suggested commands above."
+            )
+        );
+        return;
+    }
     let items: Vec<String> = importable
         .iter()
         .enumerate()
@@ -1781,6 +1835,7 @@ mod scan_tests {
         if !vault.dir.join("master.key").exists() {
             // Explicit legacy fixture: production code never creates this file.
             std::fs::write(vault.dir.join("master.key"), [7u8; 32]).unwrap();
+            #[cfg(unix)]
             std::fs::set_permissions(
                 vault.dir.join("master.key"),
                 <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
@@ -1875,6 +1930,7 @@ mod scan_tests {
         if !vault.dir.join("master.key").exists() {
             // Explicit legacy fixture: production code never creates this file.
             std::fs::write(vault.dir.join("master.key"), [7u8; 32]).unwrap();
+            #[cfg(unix)]
             std::fs::set_permissions(
                 vault.dir.join("master.key"),
                 <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
@@ -2043,7 +2099,7 @@ mod scan_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod daemon_state_tests {
     use super::*;
 

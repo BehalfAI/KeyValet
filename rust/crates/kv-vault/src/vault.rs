@@ -14,6 +14,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write as _;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,6 +23,232 @@ use zeroize::Zeroizing;
 
 const LOCK_TIMEOUT: Duration = Duration::from_millis(10_000);
 const LOCK_STALE: Duration = Duration::from_millis(30_000);
+
+/// Owner-only permissions on a secret-bearing path. kv-platform has the cross-crate seam
+/// (`kv_platform::fs`); this crate can't depend on it (kv-platform depends on kv-vault for the
+/// audit log), so the same logic lives here, per-OS.
+#[cfg(unix)]
+fn set_private(p: &Path, mode: u32) -> std::io::Result<()> {
+    std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode))
+}
+
+#[cfg(windows)]
+fn set_private(p: &Path, _mode: u32) -> std::io::Result<()> {
+    os::set_private_dacl(p)
+}
+
+/// `OpenOptionsExt::mode` doesn't exist on Windows; create, then tighten the DACL.
+/// The pre-fixup window is small and only exists for new files.
+fn open_private_new(path: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+    }
+    #[cfg(windows)]
+    {
+        let f = OpenOptions::new().write(true).create_new(true).open(path)?;
+        set_private(path, 0o600)?;
+        Ok(f)
+    }
+}
+
+fn open_private_append(path: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        OpenOptions::new()
+            .append(true)
+            .create(true)
+            .mode(0o600)
+            .open(path)
+    }
+    #[cfg(windows)]
+    {
+        let existed = path.exists();
+        let f = OpenOptions::new().append(true).create(true).open(path)?;
+        if !existed {
+            set_private(path, 0o600)?;
+        }
+        Ok(f)
+    }
+}
+
+/// Best-effort page lock so a vault key can't be swapped to disk.
+#[cfg(unix)]
+fn lock_pages(ptr: *const u8, len: usize) {
+    unsafe {
+        libc::mlock(ptr as *const libc::c_void, len);
+    }
+}
+
+#[cfg(windows)]
+fn lock_pages(ptr: *const u8, len: usize) {
+    os::virtual_lock(ptr, len);
+}
+
+#[cfg(windows)]
+mod os {
+    use std::io;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::Foundation::{LocalFree, ERROR_SUCCESS, HLOCAL};
+    use windows::Win32::Security::Authorization::{
+        GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W,
+        GRANT_ACCESS, SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
+    };
+    use windows::Win32::Security::{
+        GetTokenInformation, TokenUser, ACL, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSID, TOKEN_QUERY, TOKEN_USER,
+    };
+    use windows::Win32::System::Memory::VirtualLock;
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    struct Guard(*mut core::ffi::c_void);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe {
+                    let _ = LocalFree(Some(HLOCAL(self.0 as _)));
+                };
+            }
+        }
+    }
+
+    /// The current process token's user SID, owned as a heap buffer.
+    fn current_user_sid() -> io::Result<Vec<u8>> {
+        unsafe {
+            let mut token = Default::default();
+            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
+                .map_err(|e| io::Error::from_raw_os_error(e.code().0))?;
+            let mut len = 0u32;
+            let _ = GetTokenInformation(token, TokenUser, None, 0, &mut len);
+            if len == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut buf = vec![0u8; len as usize];
+            GetTokenInformation(
+                token,
+                TokenUser,
+                Some(buf.as_mut_ptr() as *mut _),
+                len,
+                &mut len,
+            )
+            .map_err(|e| io::Error::from_raw_os_error(e.code().0))?;
+            let sid = (*(buf.as_ptr() as *const TOKEN_USER)).User.Sid;
+            let sid_len = windows::Win32::Security::GetLengthSid(sid) as usize;
+            let mut out = vec![0u8; sid_len];
+            std::ptr::copy_nonoverlapping(sid.0 as *const u8, out.as_mut_ptr(), sid_len);
+            Ok(out)
+        }
+    }
+
+    /// The owner SID stored on `path`'s security descriptor.
+    fn owner_sid(path: &Path) -> io::Result<Vec<u8>> {
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        unsafe {
+            let mut owner = PSID::default();
+            let mut sd = windows::Win32::Security::PSECURITY_DESCRIPTOR::default();
+            let status = GetNamedSecurityInfoW(
+                PCWSTR(wide.as_ptr()),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                Some(&mut owner),
+                None,
+                None,
+                None,
+                &mut sd,
+            );
+            if status != ERROR_SUCCESS {
+                return Err(io::Error::from_raw_os_error(status.0 as i32));
+            }
+            let _sd = Guard(sd.0);
+            let len = windows::Win32::Security::GetLengthSid(owner) as usize;
+            let mut out = vec![0u8; len];
+            std::ptr::copy_nonoverlapping(owner.0 as *const u8, out.as_mut_ptr(), len);
+            Ok(out)
+        }
+    }
+
+    /// The Windows equivalent of `st.uid() == getuid()`: the file's owner SID equals the process
+    /// token's user SID.
+    pub fn owned_by_current_user(path: &Path) -> io::Result<bool> {
+        use windows::Win32::Security::EqualSid;
+        let me = current_user_sid()?;
+        let theirs = owner_sid(path)?;
+        Ok(unsafe { EqualSid(PSID(me.as_ptr() as _), PSID(theirs.as_ptr() as _)).is_ok() })
+    }
+
+    /// Owner-only DACL, protected from inheritance (see `kv_platform::fs::set_private_permissions`).
+    pub fn set_private_dacl(path: &Path) -> io::Result<()> {
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        unsafe {
+            let mut owner = PSID::default();
+            let mut sd = windows::Win32::Security::PSECURITY_DESCRIPTOR::default();
+            let status = GetNamedSecurityInfoW(
+                PCWSTR(wide.as_ptr()),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                Some(&mut owner),
+                None,
+                None,
+                None,
+                &mut sd,
+            );
+            if status != ERROR_SUCCESS {
+                return Err(io::Error::from_raw_os_error(status.0 as i32));
+            }
+            let _sd = Guard(sd.0);
+            let entry = EXPLICIT_ACCESS_W {
+                grfAccessPermissions: 0x001F_01FF, // FILE_ALL_ACCESS
+                grfAccessMode: GRANT_ACCESS,
+                grfInheritance: windows::Win32::Security::ACE_FLAGS(0),
+                Trustee: TRUSTEE_W {
+                    TrusteeForm: TRUSTEE_IS_SID,
+                    TrusteeType: TRUSTEE_IS_USER,
+                    ptstrName: PWSTR(owner.0 as _),
+                    ..Default::default()
+                },
+            };
+            let mut acl: *mut ACL = std::ptr::null_mut();
+            let status = SetEntriesInAclW(Some(&[entry]), None, &mut acl);
+            if status != ERROR_SUCCESS {
+                return Err(io::Error::from_raw_os_error(status.0 as i32));
+            }
+            let _acl = Guard(acl as _);
+            let status = SetNamedSecurityInfoW(
+                PWSTR(wide.as_ptr() as _),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(acl),
+                None,
+            );
+            if status != ERROR_SUCCESS {
+                return Err(io::Error::from_raw_os_error(status.0 as i32));
+            }
+            Ok(())
+        }
+    }
+
+    pub fn virtual_lock(ptr: *const u8, len: usize) {
+        unsafe {
+            let _ = VirtualLock(ptr as _, len);
+        }
+    }
+}
 
 pub struct Vault {
     pub dir: PathBuf,
@@ -85,7 +312,7 @@ impl Vault {
     pub fn prepare(&self) -> Result<()> {
         if !self.dir.exists() {
             std::fs::create_dir(&self.dir)?;
-            std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700))?;
+            set_private(&self.dir, 0o700)?;
         }
         self.assert_private(&self.dir, true)?;
         if self.data_path.symlink_metadata().is_ok() {
@@ -297,11 +524,7 @@ impl Vault {
         OsRng.fill_bytes(secret.as_mut());
         let binding = DeviceBinding::for_secret(&secret);
         let path = self.binding_path_for(&binding)?;
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)?;
+        let mut f = open_private_new(&path)?;
         let result = (|| -> Result<()> {
             exclude_from_backups(&path);
             f.write_all(secret.as_ref())?;
@@ -457,9 +680,7 @@ impl Vault {
         // (e.g. a locked-memory rlimit) isn't fatal -- this is defense in depth on top of the
         // zeroize-on-drop handling, not the only thing standing between the key and disk.
         if let Some(k) = guard.as_ref() {
-            unsafe {
-                libc::mlock(k.as_ptr() as *const libc::c_void, KEY_BYTES);
-            }
+            lock_pages(k.as_ptr(), KEY_BYTES);
         }
     }
 
@@ -483,15 +704,33 @@ impl Vault {
                 &format!("{} has the wrong file type", p.display()),
             ));
         }
-        if st.uid() != unsafe { libc::getuid() } {
-            return Err(VaultError::new(
-                &format!("{} 的属主不是当前用户（应为 root）", p.display()),
-                &format!(
-                    "{} is not owned by the current user (should be root)",
-                    p.display()
-                ),
-            ));
+        #[cfg(unix)]
+        {
+            if st.uid() != unsafe { libc::getuid() } {
+                return Err(VaultError::new(
+                    &format!("{} 的属主不是当前用户（应为 root）", p.display()),
+                    &format!(
+                        "{} is not owned by the current user (should be root)",
+                        p.display()
+                    ),
+                ));
+            }
         }
+        #[cfg(windows)]
+        {
+            // W1 checks the owner SID; the DACL-tightening side lives in set_private (W2 can
+            // extend this to reject inherited grants to unprivileged groups outright).
+            if !os::owned_by_current_user(p)? {
+                return Err(VaultError::new(
+                    &format!("{} 的属主不是当前用户（应为管理员/SYSTEM）", p.display()),
+                    &format!(
+                        "{} is not owned by the current user (should be Administrators/SYSTEM)",
+                        p.display()
+                    ),
+                ));
+            }
+        }
+        #[cfg(unix)]
         if st.mode() & 0o077 != 0 {
             return Err(VaultError::new(
                 &format!("{} 权限过宽（{:o}），必须只有属主可访问", p.display(), st.mode() & 0o777),
@@ -624,11 +863,7 @@ impl Vault {
         tmp_name.push(format!(".tmp-{}-{}", std::process::id(), random_hex(4)));
         let tmp = PathBuf::from(tmp_name);
         let result = (|| -> Result<()> {
-            let mut f = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&tmp)?;
+            let mut f = open_private_new(&tmp)?;
             f.write_all(bytes)?;
             f.sync_all()?;
             std::fs::rename(&tmp, &self.data_path)?;
@@ -877,11 +1112,7 @@ impl Vault {
         );
         let mut line = serde_json::to_string(&serde_json::Value::Object(entry))?;
         line.push('\n');
-        let mut f = OpenOptions::new()
-            .append(true)
-            .create(true)
-            .mode(0o600)
-            .open(&self.audit_path)?;
+        let mut f = open_private_append(&self.audit_path)?;
         f.write_all(line.as_bytes())?;
         drop(f);
         // Rotate once past 10MB (keeping the previous one), so it never grows unbounded.
@@ -1399,7 +1630,8 @@ pub struct SetProtocolParams {
     pub overwrite: bool,
 }
 
-#[cfg(test)]
+// POSIX mode-bit assertions; the Windows DACL equivalents land with W2.
+#[cfg(all(test, unix))]
 mod device_binding_tests {
     use super::*;
     use crate::EnclaveMetadata;

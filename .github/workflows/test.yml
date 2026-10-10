@@ -35,3 +35,20 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo build --workspace --locked
       - run: cargo test --workspace --locked
+
+  rust-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo build --workspace --locked
+      - run: cargo test --workspace --locked

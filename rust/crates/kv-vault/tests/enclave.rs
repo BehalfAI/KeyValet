@@ -1,3 +1,6 @@
+// Unix-only for now: these tests assert POSIX mode bits / unix-specific behaviors. The Windows
+// equivalents (DACLs) land with W2/W3; the crate itself builds cross-platform.
+#![cfg(unix)]
 //! Synthetic providers exercise rotation and recovery without hardware or a real vault.
 use base64::{engine::general_purpose::STANDARD, Engine};
 use kv_vault::{

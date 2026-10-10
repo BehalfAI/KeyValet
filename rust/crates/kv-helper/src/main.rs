@@ -16,20 +16,36 @@
 //! the TS port note); MAX_IN_FLIGHT only bounds read-ahead. `kv_i18n::set_lang` remains
 //! process-global in daemon mode -- last handshake wins (known limitation).
 
+// Session-serving imports: everything the daemon/stdio paths need lives behind cfg(macos)
+// until the Windows session path lands (W2/W3).
+#[cfg(target_os = "macos")]
 use kv_core::dispatch::{ClientContext, SessionAuth, TouchIdSessionGate};
+#[cfg(target_os = "macos")]
 use kv_core::settings::{parse_mode, read_settings, remember_active, remember_until, stricter};
+#[cfg(target_os = "macos")]
 use kv_ipc::{clean_purpose, AuthMessage, ReadyMessage, Request, MAX_LINE_BYTES, PROTOCOL_VERSION};
+#[cfg(target_os = "macos")]
 use kv_platform::macos::{RootUserDialogConfirmer, TouchIdAuthenticator};
+#[cfg(target_os = "macos")]
 use kv_platform::paths::{HELPER_BIN, VAULT_DIR};
+#[cfg(target_os = "macos")]
 use kv_platform::trust::verify_root_environment;
+#[cfg(target_os = "macos")]
 use kv_vault::Vault;
+#[cfg(target_os = "macos")]
 use serde_json::{json, Map, Value};
+#[cfg(target_os = "macos")]
 use std::sync::Arc;
+#[cfg(target_os = "macos")]
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+#[cfg(target_os = "macos")]
 use tokio::sync::Mutex as AsyncMutex;
 
+#[cfg(target_os = "macos")] // session serving lands on Windows with W2/W3
 const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(target_os = "macos")] // session serving lands on Windows with W2/W3
 const MAX_IN_FLIGHT: usize = 8;
+#[cfg(target_os = "macos")] // session serving lands on Windows with W2/W3
 const MAX_CLIENTS: usize = 32;
 
 fn fatal(msg: &str) -> ! {
@@ -37,11 +53,13 @@ fn fatal(msg: &str) -> ! {
     std::process::exit(1);
 }
 
+#[cfg(target_os = "macos")] // session serving lands on Windows with W2/W3
 struct HardwareUnlock<'a> {
     vault: &'a Vault,
     provider: &'a (dyn kv_vault::MasterKeyProvider + Send + Sync),
 }
 
+#[cfg(target_os = "macos")]
 impl kv_platform::Authenticator for HardwareUnlock<'_> {
     async fn authenticate(&self, reason: &str, _deny_label: &str) -> kv_platform::AuthOutcome {
         match self.vault.init_with_provider(self.provider, reason) {
@@ -51,6 +69,7 @@ impl kv_platform::Authenticator for HardwareUnlock<'_> {
     }
 }
 
+#[cfg(target_os = "macos")] // session serving lands on Windows with W2/W3
 fn clip(s: &str, n: usize) -> String {
     s.chars()
         .filter(|c| !matches!(c, '\u{0000}'..='\u{001f}' | '\u{007f}'))
@@ -58,6 +77,7 @@ fn clip(s: &str, n: usize) -> String {
         .collect()
 }
 
+#[cfg(target_os = "macos")] // session serving lands on Windows with W2/W3
 async fn send<W: AsyncWrite + Unpin>(out: &AsyncMutex<W>, value: &Value) {
     let mut line = serde_json::to_vec(value).unwrap();
     line.push(b'\n');
@@ -67,11 +87,13 @@ async fn send<W: AsyncWrite + Unpin>(out: &AsyncMutex<W>, value: &Value) {
 /// Why a connection ended before it was ready. In stdio mode these map to the legacy exit codes
 /// (protocol errors exit 1, a rejected handshake exits 0); in daemon mode every one just closes
 /// that connection.
+#[cfg(target_os = "macos")] // session serving lands on Windows with W2/W3
 enum Reject {
     ProtocolError(String),
     Refused,
 }
 
+#[cfg(target_os = "macos")] // session serving lands on Windows with W2/W3
 async fn reject_with<W: AsyncWrite + Unpin>(
     out: &AsyncMutex<W>,
     vault: &Vault,
@@ -100,6 +122,7 @@ async fn reject_with<W: AsyncWrite + Unpin>(
 
 /// Handles the handshake: every session authenticates the hardware key before reading the vault,
 /// then reports readiness. Errors are answered with `NotReady` and end only this connection.
+#[cfg(target_os = "macos")] // session serving lands on Windows with W2/W3
 async fn authenticate<G, W>(
     vault: &Vault,
     line: &str,
@@ -217,6 +240,7 @@ where
 /// One session over any byte stream: handshake (30 s deadline), then the request loop, then the
 /// session-end audit entry. All session state is per-call, so the daemon can run many of these
 /// concurrently with nothing shared but the AgentHub and the socket limit.
+#[cfg(target_os = "macos")] // session serving lands on Windows with W2/W3
 async fn serve<R, W, A, C, M>(
     mut reader: R,
     writer: W,
@@ -389,12 +413,16 @@ where
 }
 
 fn main() {
-    unsafe { libc::umask(0o077) };
+    #[cfg(unix)]
+    unsafe {
+        libc::umask(0o077)
+    };
     // A core dump on crash would write this process's whole memory -- including the master key
     // and every decrypted secret currently in play -- to a file on disk in one shot. Zeroing
     // secrets on drop (CredentialRecord's Drop impl) doesn't help against that: a crash dumps
     // whatever was live at that instant, zeroed-and-already-freed memory or not. Disabling the
     // dump entirely removes that path rather than trying to guess which crash is "safe."
+    #[cfg(unix)]
     unsafe {
         let limit = libc::rlimit {
             rlim_cur: 0,
@@ -403,6 +431,7 @@ fn main() {
         libc::setrlimit(libc::RLIMIT_CORE, &limit);
     }
     let args: Vec<String> = std::env::args().collect();
+    #[cfg(target_os = "macos")]
     if args.get(1).map(String::as_str) == Some("--daemon") {
         let uid: u32 = args
             .get(3)
@@ -414,9 +443,29 @@ fn main() {
         daemon::run(uid);
         return;
     }
+    #[cfg(windows)]
+    {
+        if args.get(1).map(String::as_str) == Some("--service") {
+            daemon_win::run();
+            return;
+        }
+        // Plain kv-helper.exe is never user-invoked on Windows: the LocalSystem service owns the
+        // pipes and the stdio/sudo fallback does not exist there.
+        fatal(&kv_i18n::t(
+            "kv-helper 由 KeyValetHelper 服务运行；请用服务管理器启动",
+            "kv-helper runs as the KeyValetHelper service; start it via the service manager",
+        ));
+    }
+    #[cfg(target_os = "macos")]
     stdio_main();
+    #[cfg(not(any(target_os = "macos", windows)))]
+    fatal(&kv_i18n::t(
+        "此平台暂不支持",
+        "this platform is not supported yet",
+    ));
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::main]
 async fn stdio_main() {
     let self_path = std::env::current_exe().unwrap_or_default();
@@ -470,8 +519,11 @@ async fn stdio_main() {
 
 #[cfg(target_os = "macos")]
 mod daemon;
+#[cfg(windows)]
+mod daemon_win;
 
 #[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod session_tests {
     use super::*;
     use kv_platform::{AuthOutcome, Authenticator, Confirmer};

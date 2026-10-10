@@ -5,13 +5,14 @@
 //!   1. `set_lang()` -- the root helper receives the language from the MCP server in the handshake;
 //!      the CLI receives it via --lang from its wrapper script
 //!   2. `KEYVALET_LANG=en|zh`
-//!   3. macOS UI language (AppleLanguages)
+//!   3. OS UI language (macOS AppleLanguages; Windows GetUserDefaultUILanguage)
 //!   4. `LC_ALL` / `LC_MESSAGES` / `LANG`
 //!   5. English
 //!
 //! Direct Rust port of src/shared/i18n.ts -- kept behaviorally identical so the Rust and TS
 //! helpers resolve the same language from the same environment (differential testing relies on this).
 
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::sync::Mutex;
 
@@ -47,12 +48,10 @@ fn from_string(v: Option<&str>) -> Option<Lang> {
     }
 }
 
-/// Reads the user's macOS UI language preference. Returns None off Darwin, as root (root reads
-/// root's own preference, not the invoking user's), or if the lookup fails for any reason.
-fn mac_language() -> Option<Lang> {
-    if cfg!(not(target_os = "macos")) {
-        return None;
-    }
+/// Reads the user's macOS UI language preference. Returns None as root (root reads root's own
+/// preference, not the invoking user's), or if the lookup fails for any reason.
+#[cfg(target_os = "macos")]
+fn os_language() -> Option<Lang> {
     if unsafe { libc::getuid() } == 0 {
         return None;
     }
@@ -72,9 +71,28 @@ fn mac_language() -> Option<Lang> {
     Some(from_string(Some(first)).unwrap_or(Lang::En))
 }
 
+/// Reads the Windows UI language via `GetUserDefaultUILanguage` (returns e.g. "zh-CN", "en-US").
+#[cfg(windows)]
+fn os_language() -> Option<Lang> {
+    use windows::Win32::Globalization::{GetUserDefaultUILanguage, LCIDToLocaleName};
+    let langid = unsafe { GetUserDefaultUILanguage() } as u32;
+    let mut buf = [0u16; 85];
+    let n = unsafe { LCIDToLocaleName(langid, Some(&mut buf), 0) };
+    if n <= 1 {
+        return None;
+    }
+    let s = String::from_utf16_lossy(&buf[..(n - 1) as usize]);
+    Some(from_string(Some(&s)).unwrap_or(Lang::En))
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn os_language() -> Option<Lang> {
+    None
+}
+
 pub fn detect_lang() -> Lang {
     from_string(std::env::var("KEYVALET_LANG").ok().as_deref())
-        .or_else(mac_language)
+        .or_else(os_language)
         .or_else(|| from_string(std::env::var("LC_ALL").ok().as_deref()))
         .or_else(|| from_string(std::env::var("LC_MESSAGES").ok().as_deref()))
         .or_else(|| from_string(std::env::var("LANG").ok().as_deref()))

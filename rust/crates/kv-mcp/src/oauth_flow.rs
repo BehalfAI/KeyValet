@@ -19,22 +19,36 @@ const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5 * 
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 
 pub async fn open_in_browser(url: &str) -> std::io::Result<()> {
-    tokio::process::Command::new("/usr/bin/open")
-        .arg(url)
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .status()
-        .await
-        .map(|_| ())
+    #[cfg(unix)]
+    let mut cmd = {
+        let mut c = tokio::process::Command::new("/usr/bin/open");
+        c.arg(url).env_clear().env("PATH", "/usr/bin:/bin");
+        c
+    };
+    #[cfg(windows)]
+    let mut cmd = {
+        // rundll32 resolves via the process's own System32; no PATH involved.
+        let mut c = tokio::process::Command::new(r"C:\Windows\System32\rundll32.exe");
+        c.args(["url.dll,FileProtocolHandler", url]).env_clear();
+        c
+    };
+    cmd.status().await.map(|_| ())
 }
 
 pub fn copy_to_clipboard(text: &str) {
-    if let Ok(mut child) = tokio::process::Command::new("/usr/bin/pbcopy")
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-    {
+    #[cfg(unix)]
+    let mut cmd = {
+        let mut c = tokio::process::Command::new("/usr/bin/pbcopy");
+        c.env_clear().env("PATH", "/usr/bin:/bin");
+        c
+    };
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = tokio::process::Command::new(r"C:\Windows\System32\clip.exe");
+        c.env_clear();
+        c
+    };
+    if let Ok(mut child) = cmd.stdin(std::process::Stdio::piped()).spawn() {
         if let Some(mut stdin) = child.stdin.take() {
             let text = text.to_string();
             tokio::spawn(async move {

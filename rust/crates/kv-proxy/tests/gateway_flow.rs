@@ -1,3 +1,6 @@
+// Unix-only for now: these tests assert POSIX mode bits / unix-specific behaviors. The Windows
+// equivalents (DACLs) land with W2/W3; the crate itself builds cross-platform.
+#![cfg(unix)]
 //! End-to-end tests against a real listening gateway server: a client that only speaks HTTP (no
 //! MCP, no vault access) sends the gateway token as its API key and gets the upstream's response,
 //! with the real credential injected and the response redacted -- mirroring how an SDK or script

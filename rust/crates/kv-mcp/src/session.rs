@@ -12,15 +12,20 @@ use kv_ipc::{
     AuthMessage, CredentialHint, ReadyMessage, Request as WireRequest, Response,
     GRANT_REQUIRED_PREFIX, PROTOCOL_VERSION,
 };
+#[cfg(windows)]
+use kv_platform::paths::{HELPER_BIN, HELPER_PIPE};
+#[cfg(unix)]
 use kv_platform::paths::{HELPER_BIN, HELPER_SOCKET, SUDOERS_FILE, SUDO_BIN, TOUCHID_BIN};
 use kv_platform::trust::untrusted_reason;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+#[cfg(unix)]
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
 
@@ -59,18 +64,17 @@ type Pending = oneshot::Sender<Result<Value, String>>;
 /// The session's byte stream to the helper: a sudo-spawned child's pipes (fallback mode), or a
 /// Unix-socket connection to the launchd daemon when HELPER_SOCKET exists.
 enum Transport {
-    Stdio {
-        stdin: ChildStdin,
-        child: Child,
-    },
+    #[cfg(unix)]
+    Stdio { stdin: ChildStdin, child: Child },
     Socket {
-        writer: tokio::net::unix::OwnedWriteHalf,
+        writer: Box<dyn AsyncWrite + Unpin + Send>,
     },
 }
 
 impl Transport {
     async fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
         match self {
+            #[cfg(unix)]
             Transport::Stdio { stdin, .. } => stdin.write_all(buf).await,
             Transport::Socket { writer } => writer.write_all(buf).await,
         }
@@ -78,6 +82,7 @@ impl Transport {
 
     async fn close(&mut self) {
         match self {
+            #[cfg(unix)]
             Transport::Stdio { stdin, child } => {
                 let _ = stdin.shutdown().await;
                 let _ = child.start_kill();
@@ -91,10 +96,26 @@ impl Transport {
 
 /// True when the launchd daemon is installed and should serve this session (the stdio fallback
 /// stays for hosts that predate it or could not be code-signed).
+#[cfg(unix)]
 fn daemon_socket_available() -> bool {
     std::fs::symlink_metadata(HELPER_SOCKET)
         .map(|m| m.file_type().is_socket())
         .unwrap_or(false)
+}
+
+/// On Windows the pipe has no filesystem entry to stat; a successful open means the service is
+/// up. PermissionDenied means it exists but we may not talk to it -- still "available" (the
+/// real refusal must come from the service, not a client-side guess).
+#[cfg(windows)]
+fn daemon_socket_available() -> bool {
+    match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(HELPER_PIPE)
+    {
+        Ok(_) => true,
+        Err(e) => e.kind() == std::io::ErrorKind::PermissionDenied,
+    }
 }
 
 struct Inner {
@@ -401,6 +422,39 @@ impl HelperSession {
         }
 
         let use_daemon = daemon_socket_available();
+        #[cfg(windows)]
+        let (mut stdin, read_half, stderr) = {
+            // The helper service must answer the pipe itself; there is no stdio fallback on
+            // Windows (that path only exists for unsigned sudo-mode installs).
+            if !use_daemon {
+                return Err(SessionError(kv_i18n::t(
+                    "KeyValetHelper 服务没有运行，请先启动它",
+                    "The KeyValetHelper service is not running; start it first",
+                )));
+            }
+            match tokio::net::windows::named_pipe::ClientOptions::new().open(HELPER_PIPE) {
+                Ok(stream) => {
+                    // Server-side peer/DACL checks are the trust boundary here (W2); the client
+                    // side can't identify a pipe server cheaply, so identification is enforced
+                    // by the service refusing unknown clients.
+                    let (read, writer) = tokio::io::split(stream);
+                    (
+                        Transport::Socket {
+                            writer: Box::new(writer),
+                        },
+                        Box::new(read) as Box<dyn AsyncRead + Unpin + Send>,
+                        None::<tokio::process::ChildStderr>,
+                    )
+                }
+                Err(_) => {
+                    return Err(SessionError(kv_i18n::t(
+                        "无法连接 KeyValetHelper 服务",
+                        "Cannot connect to the KeyValetHelper service",
+                    )))
+                }
+            }
+        };
+        #[cfg(unix)]
         let (mut stdin, read_half, stderr) = if use_daemon {
             // A stale socket or a stopped daemon falls back to the sudo path (kept this
             // version); a socket that answers but isn't root-owned is refused, not fallen back
@@ -422,7 +476,9 @@ impl HelperSession {
                     }
                     let (read, writer) = stream.into_split();
                     (
-                        Transport::Socket { writer },
+                        Transport::Socket {
+                            writer: Box::new(writer),
+                        },
                         Box::new(read) as Box<dyn AsyncRead + Unpin + Send>,
                         None,
                     )
@@ -472,7 +528,16 @@ impl HelperSession {
             cwd: std::env::current_dir()
                 .map(|p| p.display().to_string())
                 .unwrap_or_default(),
-            ppid: std::os::unix::process::parent_id(),
+            ppid: {
+                #[cfg(unix)]
+                {
+                    std::os::unix::process::parent_id()
+                }
+                #[cfg(windows)]
+                {
+                    0
+                }
+            },
             session: self.session_id.clone(),
             client: "keyvalet".to_string(),
         };
@@ -617,6 +682,7 @@ impl HelperSession {
 
 /// Spawns the stdio-mode helper via passwordless sudo; returns the transport, its stdout (boxed
 /// for sharing with the socket path), and its stderr for failure diagnosis.
+#[cfg(unix)]
 fn spawn_sudo_helper() -> Result<
     (
         Transport,
@@ -670,6 +736,7 @@ fn describe_sudo_failure(stderr: &str) -> String {
 
 /// Verifies the installation: files meant to run as root must exist, be owned by root, and not be
 /// writable by others.
+#[cfg(unix)]
 fn install_problem() -> Option<String> {
     let mut paths = vec![kv_platform::paths::INSTALL_DIR, HELPER_BIN, TOUCHID_BIN];
     // The daemon socket is an alternative to the sudoers rule this version (kept as fallback);
@@ -682,6 +749,21 @@ fn install_problem() -> Option<String> {
             return Some(kv_i18n::t(
                 &format!("安装不安全：{reason}。请重新运行 ./scripts/install.sh"),
                 &format!("Insecure installation: {reason}. Please re-run ./scripts/install.sh"),
+            ));
+        }
+    }
+    None
+}
+
+/// Windows analogue: the install tree must be DACL-trusted; there is no sudoers rule, and the
+/// agent binary is the W3 deliverable, so only the install dir and helper exe are checked here.
+#[cfg(windows)]
+fn install_problem() -> Option<String> {
+    for p in [kv_platform::paths::INSTALL_DIR, HELPER_BIN] {
+        if let Some(reason) = untrusted_reason(Path::new(p)) {
+            return Some(kv_i18n::t(
+                &format!("安装不安全：{reason}"),
+                &format!("Insecure installation: {reason}"),
             ));
         }
     }

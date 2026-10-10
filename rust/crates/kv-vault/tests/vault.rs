@@ -1,3 +1,6 @@
+// Unix-only for now: these tests assert POSIX mode bits / unix-specific behaviors. The Windows
+// equivalents (DACLs) land with W2/W3; the crate itself builds cross-platform.
+#![cfg(unix)]
 //! Integration tests mirroring the "Vault" describe block from the original TypeScript
 //! implementation's test suite (now removed, having been superseded by this Rust rewrite -- that
 //! suite was the behavioral spec this port was built against; see the rewrite plan's "Test

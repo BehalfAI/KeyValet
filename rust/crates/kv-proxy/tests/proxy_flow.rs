@@ -1,3 +1,6 @@
+// Unix-only for now: these tests assert POSIX mode bits / unix-specific behaviors. The Windows
+// equivalents (DACLs) land with W2/W3; the crate itself builds cross-platform.
+#![cfg(unix)]
 //! End-to-end proxy_request tests against a real (mock) HTTP server: credential injection, and
 //! secret redaction in the response (including a secret that bounces back to us, and one split
 //! across an SSE stream's chunk boundaries).

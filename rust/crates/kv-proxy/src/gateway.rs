@@ -179,6 +179,7 @@ fn getrandom(buf: &mut [u8]) {
 
 /// By-root query of the uid owning the local end of a TCP connection at `remote_port` (via `lsof`),
 /// excluding the gateway's own process.
+#[cfg(unix)]
 pub async fn peer_uid(remote_port: u16) -> Option<u32> {
     let out = tokio::process::Command::new("/usr/sbin/lsof")
         .args([
@@ -204,6 +205,14 @@ pub async fn peer_uid(remote_port: u16) -> Option<u32> {
             }
         }
     }
+    None
+}
+
+/// W1 stub: identifying which process owns a loopback connection needs `GetExtendedTcpTable` +
+/// token lookup; that lands with the Windows gateway work. `None` is the fail-closed answer --
+/// `serve` drops the connection whenever it can't confirm the peer is the session user.
+#[cfg(windows)]
+pub async fn peer_uid(_remote_port: u16) -> Option<u32> {
     None
 }
 
@@ -656,6 +665,7 @@ mod tests {
         if !vault.dir.join("master.key").exists() {
             // Explicit legacy fixture: production code never creates this file.
             std::fs::write(vault.dir.join("master.key"), [7u8; 32]).unwrap();
+            #[cfg(unix)]
             std::fs::set_permissions(
                 vault.dir.join("master.key"),
                 <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),

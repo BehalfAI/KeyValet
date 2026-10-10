@@ -1,3 +1,6 @@
+// Unix-only for now: these tests assert POSIX mode bits / unix-specific behaviors. The Windows
+// equivalents (DACLs) land with W2/W3; the crate itself builds cross-platform.
+#![cfg(unix)]
 //! End-to-end token-fetch tests against a real (mock) HTTP server for GitHub App and Google
 //! service account credentials.
 

@@ -6,3 +6,6 @@ license.workspace = true
 
 [dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Globalization", "Win32_Foundation"] }

@@ -1,3 +1,6 @@
+// Unix-only for now: these tests assert POSIX mode bits / unix-specific behaviors. The Windows
+// equivalents (DACLs) land with W2/W3; the crate itself builds cross-platform.
+#![cfg(unix)]
 //! Cross-implementation compatibility: the Rust rewrite plan requires reading the existing
 //! vault.enc/master.key produced by the TS implementation without migration, and vice versa during
 //! the transition. This drives the REAL compiled `src/helper/vault.ts` (via node), not a simulation,
