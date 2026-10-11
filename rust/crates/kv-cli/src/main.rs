@@ -2074,12 +2074,7 @@ mod scan_tests {
         if !vault.dir.join("master.key").exists() {
             // Explicit legacy fixture: production code never creates this file.
             std::fs::write(vault.dir.join("master.key"), [7u8; 32]).unwrap();
-            #[cfg(unix)]
-            std::fs::set_permissions(
-                vault.dir.join("master.key"),
-                <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
-            )
-            .unwrap();
+            kv_platform::fs::set_private_permissions(&vault.dir.join("master.key")).unwrap();
         }
         vault.init_legacy().unwrap();
         (dir, vault)
@@ -2160,23 +2155,7 @@ mod scan_tests {
 
     #[test]
     fn unique_name_avoids_both_vault_collisions_and_same_run_collisions() {
-        let dir = tempfile::tempdir().unwrap();
-        // A fresh subdirectory, not the tempdir root itself: `Vault::init` only chmods a
-        // directory it creates -- an already-existing one (the tempdir root) keeps whatever
-        // permissions the OS gave it and fails the "not group/world readable" check.
-        let vault = kv_vault::Vault::new(dir.path().join("vault"));
-        vault.prepare().unwrap();
-        if !vault.dir.join("master.key").exists() {
-            // Explicit legacy fixture: production code never creates this file.
-            std::fs::write(vault.dir.join("master.key"), [7u8; 32]).unwrap();
-            #[cfg(unix)]
-            std::fs::set_permissions(
-                vault.dir.join("master.key"),
-                <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
-            )
-            .unwrap();
-        }
-        vault.init_legacy().unwrap();
+        let (_dir, vault) = test_vault();
         vault
             .set(kv_vault::SetParams {
                 r#type: "openai".into(),

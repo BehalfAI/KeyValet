@@ -9,6 +9,61 @@ use zeroize::Zeroizing;
 
 const RECOVERY: &str = "separate offline Windows test recovery phrase";
 
+fn copy_private_fixture(source: &std::path::Path, destination: &std::path::Path) {
+    std::fs::copy(source, destination).unwrap();
+    // Windows copies file attributes, but a newly created file keeps its default DACL.
+    // Copy the fixture's private DACL too, so the test reaches key recovery validation.
+    #[cfg(windows)]
+    unsafe {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::{PCWSTR, PWSTR};
+        use windows::Win32::Foundation::{LocalFree, ERROR_SUCCESS, HLOCAL};
+        use windows::Win32::Security::Authorization::{
+            GetNamedSecurityInfoW, SetNamedSecurityInfoW, SE_FILE_OBJECT,
+        };
+        use windows::Win32::Security::{
+            ACL, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+            PSECURITY_DESCRIPTOR,
+        };
+
+        let source: Vec<u16> = source.as_os_str().encode_wide().chain([0]).collect();
+        let destination: Vec<u16> = destination.as_os_str().encode_wide().chain([0]).collect();
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        let status = GetNamedSecurityInfoW(
+            PCWSTR(source.as_ptr()),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            Some(&mut dacl),
+            None,
+            &mut descriptor,
+        );
+        struct Descriptor(*mut core::ffi::c_void);
+        impl Drop for Descriptor {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = LocalFree(Some(HLOCAL(self.0 as _)));
+                }
+            }
+        }
+        let _descriptor = Descriptor(descriptor.0);
+        assert_eq!(status, ERROR_SUCCESS);
+        assert!(!dacl.is_null());
+        let status = SetNamedSecurityInfoW(
+            PWSTR(destination.as_ptr() as _),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            Some(dacl),
+            None,
+        );
+        assert_eq!(status, ERROR_SUCCESS);
+    }
+}
+
 struct Hello(u8);
 impl Hello {
     fn metadata(&self) -> EnclaveMetadata {
@@ -302,7 +357,7 @@ fn damaged_or_missing_binding_is_rejected_before_any_hello_prompt() {
     let before = std::fs::read(vault.dir.join("vault.enc")).unwrap();
     let binding = binding_files(&vault).pop().unwrap();
     let original = Zeroizing::new(std::fs::read(&binding).unwrap());
-    let permissions = std::fs::metadata(&binding).unwrap().permissions();
+    let missing_backup = binding.with_extension("fixture-backup");
     for damage in [
         None,
         Some(vec![]),
@@ -312,7 +367,7 @@ fn damaged_or_missing_binding_is_rejected_before_any_hello_prompt() {
     ] {
         match damage {
             Some(bytes) => std::fs::write(&binding, bytes).unwrap(),
-            None => std::fs::remove_file(&binding).unwrap(),
+            None => std::fs::rename(&binding, &missing_backup).unwrap(),
         }
         let provider = ProbeHello::new(Failure::Unlock);
         let reopened = Vault::new(&vault.dir);
@@ -321,10 +376,12 @@ fn damaged_or_missing_binding_is_rejected_before_any_hello_prompt() {
         assert!(reopened.get("api_key", "example").is_err());
         assert_eq!(std::fs::read(vault.dir.join("vault.enc")).unwrap(), before);
         assert!(!vault.dir.join("master.key").exists());
-        std::fs::write(&binding, &*original).unwrap();
-        // Recreating after the missing-file case must restore the fixture's private mode;
-        // otherwise later cases test permission rejection instead of corrupted key content.
-        std::fs::set_permissions(&binding, permissions.clone()).unwrap();
+        if missing_backup.exists() {
+            // Renaming back preserves both Unix mode bits and the Windows private DACL.
+            std::fs::rename(&missing_backup, &binding).unwrap();
+        } else {
+            std::fs::write(&binding, &*original).unwrap();
+        }
     }
     Vault::new(&vault.dir)
         .init_with_provider(&Hello(1), "test")
@@ -336,7 +393,10 @@ fn copied_hello_vault_requires_binding_but_supports_read_only_recovery_and_rebin
     let (temp, original) = hello_fixture();
     let copied = Vault::new(temp.path().join("copy"));
     copied.prepare().unwrap();
-    std::fs::copy(original.dir.join("vault.enc"), copied.dir.join("vault.enc")).unwrap();
+    copy_private_fixture(
+        &original.dir.join("vault.enc"),
+        &copied.dir.join("vault.enc"),
+    );
     let before = std::fs::read(copied.dir.join("vault.enc")).unwrap();
     let provider = ProbeHello::new(Failure::Unlock);
     assert!(copied.init_with_provider(&provider, "test").is_err());
