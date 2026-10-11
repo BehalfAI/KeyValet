@@ -292,6 +292,7 @@ impl AgentHub {
         {
             let _ = tokio::process::Command::new("/bin/launchctl")
                 .arg("kickstart")
+                .arg("-k")
                 .arg(format!("gui/{key}/{AGENT_LABEL}"))
                 .env_clear()
                 .stdin(std::process::Stdio::null())
@@ -408,6 +409,10 @@ impl AgentMasterKeyProvider {
         );
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async move {
+                // The agent serves prompts serially; take the daemon's per-user prompt lock too,
+                // so a derive doesn't silently queue behind another prompt on the 130 s clock.
+                let prompt = hub.prompt_lock(&key);
+                let _prompt = prompt.lock().await;
                 let (header, payload) = hub
                     .request(&key, msg, REQUEST_TIMEOUT)
                     .await
