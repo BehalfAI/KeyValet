@@ -1329,11 +1329,7 @@ mod session_tests {
             if let Some((file, contents)) = &fixture {
                 let path = vault.dir.join(file);
                 std::fs::write(&path, contents).unwrap();
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
-                }
+                kv_platform::fs::set_private_permissions(&path).unwrap();
             }
             let (rejected, output) = public_probe(vault.clone(), request.as_bytes(), 3).await;
             assert!(matches!(rejected, Reject::Refused));

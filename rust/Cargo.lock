@@ -1230,6 +1230,7 @@ dependencies = [
  "futures-util",
  "hmac",
  "kv-i18n",
+ "kv-platform",
  "kv-vault",
  "p256",
  "p384",
