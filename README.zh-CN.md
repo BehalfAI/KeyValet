@@ -2,7 +2,7 @@
 
 **给 AI agent 一把代客钥匙，而不是你的万能钥匙。**
 
-KeyValet 让 Claude Code、Cursor、Devin 等 AI agent 使用你的 API key 和 OAuth 账号，却看不到它们。每个凭证由你用 Touch ID 批准，由 KeyValet 代为调用，每次使用都有记录。
+KeyValet 让 Claude Code、Cursor、Devin 等 AI agent 通过授权代理使用你的 API key 和 OAuth 账号。macOS 用 Touch ID、Windows 用 Windows Hello、Linux 用 polkit 批准访问，由 KeyValet 代为调用，每次使用都有记录。
 
 [官网](https://keyvalet.dev/) · [使用指南](https://keyvalet.dev/zh-CN/guide/) · [安全模型](SECURITY.md) · [English](README.md)
 
@@ -21,7 +21,10 @@ Windows 11 已补上 Hello、后台服务、UI agent 和本地安装打包，当
 Linux 本地版已实现：systemd 独立服务用户、polkit 认证、TPM 2.0 密钥保护；无 TPM 时须显式
 开启软件保护，硬件访问失败不会自动降级。从当前源码运行 `sh scripts/install.sh` 安装，
 无 TPM 的机器加 `--software`。安装、SSH 审批和恢复步骤见 [Linux 支持记录](docs/linux.md)。
-Linux 正式发行包和访问 Windows vault 的 WSL 桥仍待发布或实现。
+v0.3.0 发布流程会同时构建 Linux x64、ARM64 包和已公证的 macOS 包，并附校验和；上面的
+在线安装命令会下载对应的 Linux 包。Linux 需要 systemd、polkit、sudo；TPM 模式还需要
+`tpm2-tools`。无 TPM 且明确选择软件保护时，在线安装命令改为 `sh -s -- --software`。
+访问 Windows vault 的 WSL 桥仍待实现。
 
 macOS 和 Linux 源码安装器支持 `CARGO_TARGET_DIR`，相对路径以仓库的 `rust/` 为基准；未设置时
 使用 `rust/target`。安装器明确指定这个目录，覆盖 Cargo 配置中的 `build.target-dir`，确保安装
@@ -52,7 +55,7 @@ OAuth、refresh token、私钥都留在 KeyValet 里，agent 只拿到短期 tok
 
 ## 为什么用它
 
-- **用而不见**：key 在 root 进程里注入，agent 拿到的是结果，不是秘密；
+- **用而不见**：代理请求在特权 helper 或隔离的 Linux 服务中注入凭证，agent 收到响应；主动读取明文和导出文件遵循各自的授权策略；
 - **你决定凭证授权的频率**：每次、每个凭证（默认）、每个会话，或记住几个小时；每个新会话仍需认证硬件密钥。在 Claude Code 或 Devin 里用 `/keyvalet:mode`（Cursor 里是 `/keyvalet-mode`）切换，放宽一定要你的指纹；
 - **SDK 和流式输出**：本地网关让脚本和 SDK（`OPENAI_BASE_URL=…`）边收边输出，却拿不到真实 key；`per_use` 模式须逐次代理调用，不开放可复用网关；
 - **各种认证都支持**：API key（约 50 个模板）、OAuth 2.0、Google 服务账号、GitHub App、JWT、TOTP、AWS STS；

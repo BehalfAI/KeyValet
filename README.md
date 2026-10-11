@@ -2,7 +2,7 @@
 
 **Give your AI agents a valet key, not your master key.**
 
-KeyValet lets Claude Code, Cursor, Devin and other AI agents use your API keys and OAuth accounts — without ever seeing them. You approve each credential with Touch ID, KeyValet makes the call, and every use is logged.
+KeyValet lets Claude Code, Cursor, Devin and other AI agents use your API keys and OAuth accounts through authorized proxy calls. You approve access with Touch ID on macOS, Windows Hello on Windows, or polkit on Linux; KeyValet makes the call and logs its use.
 
 [Website](https://keyvalet.dev/) · [Guide](https://keyvalet.dev/guide/) · [Security](SECURITY.md) · [简体中文](README.zh-CN.md)
 
@@ -22,7 +22,11 @@ Linux local support is implemented with a systemd service, polkit approval and T
 Without TPM, software protection requires explicit opt-in; hardware failures never trigger
 automatic fallback. Install the source checkout with `sh scripts/install.sh` (or `--software`
 on a machine without TPM). See [Linux installation, SSH approval and recovery](docs/linux.md).
-Public Linux packages and the WSL-to-Windows vault bridge remain pending.
+The v0.3.0 release workflow builds Linux x64 and ARM64 archives, with checksums, alongside the
+notarized macOS archive. The command above installs the matching Linux package. Linux requires
+systemd, polkit, sudo and `tpm2-tools` for TPM protection; use `sh -s -- --software` with the online
+installer when explicitly choosing software protection on a host without TPM.
+The WSL-to-Windows vault bridge remains pending.
 
 The macOS and Linux source installers use `CARGO_TARGET_DIR` when set; relative paths are resolved
 from `rust/`. Otherwise they build into `rust/target`. This explicit directory overrides Cargo's
@@ -53,7 +57,7 @@ OAuth, refresh tokens and private keys stay in KeyValet; the agent only ever get
 
 ## Why
 
-- **Use, don't see** — keys are injected inside a root-owned helper; the agent gets responses, not secrets.
+- **Use, don't see** — proxy calls inject credentials inside the privileged helper or isolated Linux service; the agent receives responses. Explicit plaintext reads and exports follow their separate authorization policy.
 - **You choose the credential approval cadence** — per use, per credential (default), per session, or remembered for hours. Every new session still authenticates the hardware key. Switch with `/keyvalet:mode` in Claude Code or Devin (`/keyvalet-mode` in Cursor); loosening always needs your fingerprint.
 - **SDKs and streaming** — a local gateway lets scripts and SDKs (`OPENAI_BASE_URL=…`) stream without holding the real key. In `per_use` mode, use individual proxied requests; reusable gateways are disabled.
 - **Every auth flow** — API keys (~50 templates), OAuth 2.0, Google service accounts, GitHub Apps, JWT, TOTP, AWS STS.

@@ -26,9 +26,9 @@ the repository root in PowerShell; the tag must match `rust/crates/kv-cli/Cargo.
 
 ```powershell
 rustup target add x86_64-pc-windows-msvc
-.\scripts\package-windows.ps1 -Tag v0.2.1 -Architecture x64 -AllowUnsigned
+.\scripts\package-windows.ps1 -Tag v0.3.0 -Architecture x64 -AllowUnsigned
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1 `
-    -PackagePath .\dist\keyvalet-v0.2.1-windows-x64.zip -AllowUnsignedAgent
+    -PackagePath .\dist\keyvalet-v0.3.0-windows-x64.zip -AllowUnsignedAgent
 ```
 
 Start installation from the intended account's **unelevated** interactive PowerShell. UAC handles

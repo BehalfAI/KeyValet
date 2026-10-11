@@ -36,17 +36,20 @@ daemon trusts the agent only after checking its audit-token code signature (`AGE
 ## Releases
 
 Push a `vX.Y.Z` tag matching `rust/crates/kv-cli/Cargo.toml`; `.github/workflows/release.yml`
-builds `keyvalet-<tag>-macos-arm64.tar.gz` + `SHA256SUMS` into a draft release, with notes from
+builds `keyvalet-<tag>-macos-arm64.tar.gz`, native Linux x64/ARM64 archives and their individual
+checksums, then verifies all three packages and assembles a combined `SHA256SUMS` into a draft
+release, with notes from
 `.github/release-notes/<tag>.md` (`marketing/` is gitignored). A maintainer publishes the draft.
 
-The job runs in the protected `release` environment (a reviewer approves each run; its secrets
+The macOS job runs in the protected `release` environment (a reviewer approves each run; its secrets
 hold the Developer ID p12, imported into a temporary keychain that the run deletes at the end,
 plus the App Store Connect API key `ASC_KEY_P8_BASE64` / `ASC_KEY_ID` / `ASC_ISSUER_ID` used for
-notarization). Every binary in a workflow package is signed with the Simvito Limited Developer ID
+notarization). Every binary in the macOS workflow package is signed with the Simvito Limited Developer ID
 (`PWCRJPY7YC`, hardened runtime, timestamped) and the signed binaries are submitted to Apple with
 `notarytool`; the job fails before creating the draft if notarization is rejected or Gatekeeper
 does not accept them (added after v0.2.0; the v0.2.0 binaries were notarized after publication).
 `REQUIRE_SIGNED=1` makes signing mandatory; `SIGN_IDENTITY=<sha1> scripts/package-release.sh <tag>`
-signs a local package.
+signs a local macOS package. `.github/workflows/linux-package.yml` is also reusable from the
+release workflow. Windows remains a separate manual artifact workflow pending production signing.
 Dry run without a tag: **Actions → release → Run workflow** (`workflow_dispatch`) builds and
 signs the package and uploads it as an artifact — no release is created.

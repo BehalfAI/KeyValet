@@ -9,7 +9,16 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  linux:
+    uses: ./.github/workflows/linux-package.yml
+    permissions:
+      contents: read
+
   release:
     runs-on: macos-latest
     # Protected environment: a reviewer must approve each run. Secrets there hold the
@@ -58,7 +67,11 @@ jobs:
           # a genuinely broken chain still fails below at codesign --verify --strict.
           /usr/bin/security add-certificates -k "$KC" "$RUNNER_TEMP/DeveloperIDG2CA.cer" 2>/dev/null || true
           /usr/bin/security set-key-partition-list -S apple-tool:,apple: -s -k "$KC_PASS" "$KC" >/dev/null
-          /usr/bin/security list-keychain -d user -s "$KC" $(/usr/bin/security list-keychain -d user | /usr/bin/sed -n 's/^ *"\(.*\)"/\1/p')
+          keychains=()
+          while IFS= read -r keychain; do
+            keychains+=("$keychain")
+          done < <(/usr/bin/security list-keychain -d user | /usr/bin/sed -n 's/^ *"\(.*\)"/\1/p')
+          /usr/bin/security list-keychain -d user -s "$KC" "${keychains[@]}"
           SIGN_IDENTITY=$(/usr/bin/security find-identity -v -p codesigning "$KC" | /usr/bin/sed -n 's/^ *[0-9]*) \([0-9A-F]*\) "Developer ID Application: Simvito Limited (PWCRJPY7YC)"/\1/p' | /usr/bin/head -1)
           [ -n "$SIGN_IDENTITY" ] || { echo "Developer ID identity for PWCRJPY7YC not found in the imported p12" >&2; exit 1; }
           echo "SIGN_IDENTITY=$SIGN_IDENTITY" >> "$GITHUB_ENV"
@@ -98,6 +111,7 @@ jobs:
               /usr/bin/codesign --verify --check-notarization -R=notarized "$f" 2>/dev/null || missing="$missing ${f##*/}"
             done
             [ -z "$missing" ] && { echo "Gatekeeper sees all binaries as notarized"; exit 0; }
+            echo "Waiting for notarization tickets (attempt $i/12)"
             sleep 10
           done
           echo "Notarization ticket not visible for:$missing" >&2
@@ -105,20 +119,72 @@ jobs:
       - name: Check release notes exist
         if: github.event_name == 'push'
         run: test -f ".github/release-notes/$TAG.md"
-      - name: Create draft release
-        if: github.event_name == 'push'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release create "$TAG" "dist/keyvalet-$TAG-macos-arm64.tar.gz" dist/SHA256SUMS --draft --verify-tag --title "KeyValet $TAG" --notes-file ".github/release-notes/$TAG.md"
-      - name: Upload dry-run package
-        if: github.event_name == 'workflow_dispatch'
+      - name: Upload notarized macOS package
         uses: actions/upload-artifact@v4
         with:
-          name: keyvalet-${{ env.TAG }}-macos-arm64
+          name: release-${{ env.TAG }}-macos-arm64
           path: |
             dist/keyvalet-${{ env.TAG }}-macos-arm64.tar.gz
             dist/SHA256SUMS
+          if-no-files-found: error
           retention-days: 7
       - name: Delete the signing keychain
         if: always()
         run: /usr/bin/security delete-keychain "$KC" 2>/dev/null || true
+
+  publish:
+    if: github.event_name == 'push'
+    needs: [release, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-${{ github.ref_name }}-*
+          path: dist/release
+          merge-multiple: true
+      - name: Verify packages and assemble SHA256SUMS
+        env:
+          PACKAGE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import os
+          import re
+          from pathlib import Path
+
+          root = Path("dist/release")
+          tag = os.environ["PACKAGE_TAG"]
+          if not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
+              raise SystemExit("Invalid release tag")
+          expected = {f"keyvalet-{tag}-{platform}.tar.gz" for platform in
+                      ("macos-arm64", "linux-x64", "linux-arm64")}
+          entries = []
+          checksum_files = [root / "SHA256SUMS", *sorted(root.glob("*.sha256"))]
+          for checksum in checksum_files:
+              for line in checksum.read_text().splitlines():
+                  digest, name = line.split()
+                  if not re.fullmatch(r"[a-f0-9]{64}", digest) or name not in expected:
+                      raise SystemExit(f"Invalid checksum entry in {checksum.name}")
+                  entries.append((digest, name))
+          if len(entries) != len(expected) or {name for _, name in entries} != expected:
+              raise SystemExit("Missing or duplicate release packages")
+          if {path.name for path in root.glob("*.tar.gz")} != expected:
+              raise SystemExit("Unexpected release archives")
+          for digest, name in entries:
+              with (root / name).open("rb") as package:
+                  actual = hashlib.file_digest(package, "sha256").hexdigest()
+              if actual != digest:
+                  raise SystemExit(f"Checksum mismatch: {name}")
+          (root / "SHA256SUMS").write_text("".join(
+              f"{digest}  {name}\n" for digest, name in sorted(entries, key=lambda entry: entry[1])))
+          print("Verified macOS arm64 and Linux x64/arm64 packages")
+          PY
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$PACKAGE_TAG" dist/release/*.tar.gz dist/release/*.sha256 dist/release/SHA256SUMS \
+            --draft --verify-tag --title "KeyValet $PACKAGE_TAG" \
+            --notes-file ".github/release-notes/$PACKAGE_TAG.md"

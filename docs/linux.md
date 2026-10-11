@@ -12,9 +12,15 @@ The supported build is GNU/Linux on x86_64 or aarch64, with systemd, polkit and 
 ARM64 packaging is defined but has not been tested on ARM64 hardware. Native archives require
 the builder's glibc baseline: the archive tested on `ndu` requires glibc 2.39 (Ubuntu 24.04);
 the x64 packaging workflow builds on Ubuntu 22.04, while ARM64 builds on Ubuntu 24.04.
-Build from source on an older supported distribution. Public Linux release
-archives have not yet been published; install the current source checkout with stable Rust and
-a C compiler:
+Build from source on an older supported distribution. The v0.3.0 release workflow packages
+both architectures and verifies them before creating the release. Install a published package:
+
+```sh
+curl -fsSL https://keyvalet.dev/install.sh | sh
+```
+
+The installer checks the archive's SHA-256 against the checksum attached to the same release.
+Alternatively, install a source checkout with stable Rust and a C compiler:
 
 ```sh
 # Ubuntu / Debian
@@ -30,6 +36,8 @@ summary; `keyvalet status --summary` displays it again without unlocking the vau
 When there is no TPM 2.0, software protection requires an explicit choice:
 
 ```sh
+curl -fsSL https://keyvalet.dev/install.sh | sh -s -- --software
+# Or from a source checkout:
 sh scripts/install.sh --software
 # After an installation made with --no-setup:
 keyvalet setup-software

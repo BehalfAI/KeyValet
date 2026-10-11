@@ -1,11 +1,21 @@
 name: Linux package
 on:
   workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
 jobs:
   package:
     strategy:
+      fail-fast: false
       matrix:
-        runner: [ubuntu-22.04, ubuntu-24.04-arm]
+        include:
+          - runner: ubuntu-22.04
+            architecture: x64
+          - runner: ubuntu-24.04-arm
+            architecture: arm64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -13,13 +23,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
+      - name: Native tests
+        working-directory: rust
+        run: cargo test --workspace --locked
       - name: Native package
         run: |
           version=$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' rust/crates/kv-cli/Cargo.toml | head -1)
+          echo "PACKAGE_TAG=v$version" >> "$GITHUB_ENV"
           sh scripts/package-linux.sh "v$version"
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-${{ matrix.runner }}
+          name: release-${{ env.PACKAGE_TAG }}-linux-${{ matrix.architecture }}
           path: |
             dist/keyvalet-*-linux-*.tar.gz
             dist/keyvalet-*-linux-*.sha256
+          if-no-files-found: error
+          retention-days: 7

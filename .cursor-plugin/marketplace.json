@@ -9,7 +9,7 @@
       "name": "keyvalet",
       "source": "./cursor-plugin",
       "description": "Keeps your keys in KeyValet: stores secrets you share, blocks keys about to be hard-coded, and adds the /keyvalet-* commands (requires the KeyValet install: curl -fsSL https://keyvalet.dev/install.sh | sh).",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "author": {
         "name": "Simvito Limited"
       },

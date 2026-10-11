@@ -1,6 +1,6 @@
 {
   "name": "keyvalet",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "KeyValet for Claude Code: stores keys you share into KeyValet automatically, warns before secrets are hard-coded, and adds /keyvalet:add, /keyvalet:mode, /keyvalet:status, /keyvalet:lock and /keyvalet:audit.",
   "author": {
     "name": "Simvito Limited",

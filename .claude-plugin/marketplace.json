@@ -10,7 +10,7 @@
       "name": "keyvalet",
       "source": "./claude-plugin",
       "description": "Keeps your keys in KeyValet: stores secrets you share, warns before keys are hard-coded, and adds slash commands (requires the KeyValet MCP server: curl -fsSL https://keyvalet.dev/install.sh | sh).",
-      "version": "0.2.0"
+      "version": "0.3.0"
     }
   ]
 }

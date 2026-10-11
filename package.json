@@ -1,6 +1,6 @@
 {
   "name": "keyvalet",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "scripts": {
     "templates:import": "node scripts/import-n8n-templates.mjs",
     "templates:build": "node scripts/build-catalog.mjs"

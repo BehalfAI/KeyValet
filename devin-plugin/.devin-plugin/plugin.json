@@ -1,6 +1,6 @@
 {
   "name": "keyvalet",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "KeyValet for Devin: stores keys you share into KeyValet automatically, blocks secrets from being hard-coded, and adds /keyvalet:add, /keyvalet:mode, /keyvalet:status, /keyvalet:lock and /keyvalet:audit. Requires the KeyValet install (curl -fsSL https://keyvalet.dev/install.sh | sh).",
   "author": {
     "name": "Simvito Limited"
