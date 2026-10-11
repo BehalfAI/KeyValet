@@ -106,12 +106,13 @@ jobs:
           key: linux-${{ matrix.container }}
       - name: Prepare unprivileged checks
         run: chown -R builder:builder "$GITHUB_WORKSPACE" "$CARGO_HOME" "$RUSTUP_HOME"
-      - run: su -s /bin/sh builder -c 'cargo fmt --all -- --check'
-      - run: su -s /bin/sh builder -c 'cargo clippy --workspace --all-targets --locked -- -D warnings'
-      - run: su -s /bin/sh builder -c 'cargo build --workspace --locked'
-      - run: su -s /bin/sh builder -c 'cargo test --workspace --locked'
+      # su resets PATH; restore the Rust toolchain inside the unprivileged child shell.
+      - run: su -s /bin/sh builder -c "export PATH=\"$CARGO_HOME/bin:\$PATH\"; cargo fmt --all -- --check"
+      - run: su -s /bin/sh builder -c "export PATH=\"$CARGO_HOME/bin:\$PATH\"; cargo clippy --workspace --all-targets --locked -- -D warnings"
+      - run: su -s /bin/sh builder -c "export PATH=\"$CARGO_HOME/bin:\$PATH\"; cargo build --workspace --locked"
+      - run: su -s /bin/sh builder -c "export PATH=\"$CARGO_HOME/bin:\$PATH\"; cargo test --workspace --locked"
       - name: Linux production line coverage (100% required)
-        run: su -s /bin/sh builder -c 'sh ../scripts/test-linux-coverage.sh'
+        run: su -s /bin/sh builder -c "export PATH=\"$CARGO_HOME/bin:\$PATH\"; sh ../scripts/test-linux-coverage.sh"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
