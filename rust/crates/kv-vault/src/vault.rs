@@ -419,6 +419,10 @@ impl Vault {
         if !self.dir.exists() {
             std::fs::create_dir(&self.dir)?;
             set_private(&self.dir, 0o700)?;
+            // Only the Linux service transfers ownership to a vault's user. A normal
+            // File::open cannot open directories on Windows, where the DACL above
+            // already establishes the access policy.
+            #[cfg(target_os = "linux")]
             self.adopt_file_owner(&std::fs::File::open(&self.dir)?)?;
         }
         self.assert_private(&self.dir, true)?;
@@ -657,6 +661,7 @@ impl Vault {
             exclude_from_backups(&path);
             f.write_all(secret.as_ref())?;
             f.sync_all()?;
+            #[cfg(unix)]
             std::fs::File::open(&self.dir)?.sync_all()?;
             Ok(())
         })();
@@ -684,6 +689,7 @@ impl Vault {
                 std::fs::remove_file(entry.path())?;
             }
         }
+        #[cfg(unix)]
         std::fs::File::open(&self.dir)?.sync_all()?;
         Ok(())
     }
@@ -695,6 +701,7 @@ impl Vault {
         let path = self.dir.join("vault.migration-backup.enc");
         if path.symlink_metadata().is_ok() {
             std::fs::remove_file(&path)?;
+            #[cfg(unix)]
             std::fs::File::open(&self.dir)?.sync_all()?;
         }
         Ok(())
@@ -1013,6 +1020,9 @@ impl Vault {
             f.write_all(bytes)?;
             f.sync_all()?;
             std::fs::rename(&tmp, &self.data_path)?;
+            // POSIX directory fsync persists the rename. Windows syncs file contents
+            // above; it does not support opening a directory with File::open.
+            #[cfg(unix)]
             std::fs::File::open(&self.dir)?.sync_all()?;
             Ok(())
         })();
@@ -1175,6 +1185,7 @@ impl Vault {
         if self.key_path.symlink_metadata().is_ok() {
             self.assert_private(&self.key_path, false)?;
             std::fs::remove_file(&self.key_path)?;
+            #[cfg(unix)]
             std::fs::File::open(&self.dir)?.sync_all()?;
         }
         self.remove_migration_backup()
