@@ -7,7 +7,7 @@ const MAX_FILE_BYTES: u64 = 64 * 1024;
 /// than 64KB.
 pub fn resolve_secret_file(p: &str) -> Result<std::path::PathBuf, String> {
     let expanded = if let Some(rest) = p.strip_prefix("~/") {
-        dirs_home().join(rest)
+        dirs_home()?.join(rest)
     } else {
         std::path::PathBuf::from(p)
     };
@@ -44,10 +44,13 @@ pub fn read_secret_file(abs: &std::path::Path) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&buf).to_string())
 }
 
-fn dirs_home() -> std::path::PathBuf {
-    std::env::var("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_default()
+fn dirs_home() -> Result<std::path::PathBuf, String> {
+    std::env::home_dir().ok_or_else(|| {
+        kv_i18n::t(
+            "无法确定当前用户的主目录",
+            "Cannot determine the current user's home directory",
+        )
+    })
 }
 
 #[cfg(test)]
@@ -99,15 +102,16 @@ mod tests {
 
     #[test]
     fn tilde_prefix_expands_to_the_real_home_directory() {
-        // Doesn't create or touch anything under $HOME -- a nonexistent path still proves
+        // Doesn't create or touch anything under the user profile -- a nonexistent path proves
         // expansion happened, because the error message shows the expanded absolute path, not
         // a literal "~/...".
-        let home = std::env::var("HOME").unwrap();
+        let home = std::env::home_dir().unwrap();
         let err = resolve_secret_file("~/kv-mcp-test-file-that-definitely-does-not-exist-xyz123")
             .unwrap_err();
         assert!(
-            err.contains(&home),
-            "expected the error to mention the expanded home dir {home}, got: {err}"
+            err.contains(home.to_str().unwrap()),
+            "expected the error to mention the expanded home dir {}, got: {err}",
+            home.display()
         );
     }
 
