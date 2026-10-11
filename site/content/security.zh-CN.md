@@ -11,6 +11,14 @@ description = "KeyValet 的安全模型：保护什么、信任边界、能保�
 - 协议凭证的长期秘密：OAuth client secret 与 refresh token、Google service account 私钥、GitHub App 私钥、JWT 签名密钥、TOTP 种子、AWS secret access key。
 - 凭证库主密钥，以及审计日志和设置的完整性。
 
+## 保护状态
+
+安装时和 `keyvalet status --summary` 会展示实际密钥方案、硬件证据和本机 TPM 检测结果。
+`credential_status` 在锁定时也能读取这些公开元数据，不触发认证或秘密访问。
+Secure Enclave 不是 TPM；Hello 证明不可用或 Linux TPM 实现无法确认时，明确标为 unknown。
+Linux 的 polkit 批准本身不是 TPM PIN 或启动状态策略。三种系统的完整分类见
+[密钥保护与 TPM 状态](https://github.com/KeyValet/KeyValet/blob/main/docs/key-protection.zh-CN.md)。
+
 ## 信任边界
 
 AI agent / MCP 客户端是*半可信*的：它可能被提示注入，可以调用 KeyValet 的 MCP 服务，也能以你的用户身份执行任意命令。KeyValet 的 MCP 服务只是便利层——**安全检查从不只依赖它**。每个安全决策都由 root helper（或 launchd 守护进程 `dev.keyvalet.helper`）做出，它在空闲时不持有凭证库密钥。Touch ID 和 Secure Enclave 的工作由每用户代理 `dev.keyvalet.agent` 完成，守护进程只有在校验了对端 uid 和代码签名（`dev.keyvalet.touchid`、team `PWCRJPY7YC`、精确安装路径）后才接受它——同用户的其他进程无法冒充它来替你批准。

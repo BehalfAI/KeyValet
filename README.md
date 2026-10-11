@@ -14,6 +14,25 @@ curl -fsSL https://keyvalet.dev/install.sh | sh
 
 An Apple Silicon Mac on macOS 14 or later (the installer uses the release's prebuilt arm64 binaries; Intel Macs build from source instead, which needs a Rust toolchain (`cargo` from [rustup.rs](https://rustup.rs)) and Xcode Command Line Tools). You'll be asked for your password once. Claude Code is configured automatically; the installer also installs the Cursor plugin (`~/.cursor/plugins/local/keyvalet`, restart Cursor) when Cursor is present; for Devin CLI, install the plugin with `devin plugins install KeyValet/KeyValet#devin-plugin`; for other MCP clients see the [guide](site/guide.md#install).
 
+Windows 11 support is a **development preview**: Hello, the service, UI agent and local package
+installer are implemented; signed public packages and real Windows validation are pending.
+See [Windows build, installation and verification](docs/windows.md). WSL support is still open.
+
+Linux local support is implemented with a systemd service, polkit approval and TPM 2.0 keys.
+Without TPM, software protection requires explicit opt-in; hardware failures never trigger
+automatic fallback. Install the source checkout with `sh scripts/install.sh` (or `--software`
+on a machine without TPM). See [Linux installation, SSH approval and recovery](docs/linux.md).
+Public Linux packages and the WSL-to-Windows vault bridge remain pending.
+
+The macOS and Linux source installers use `CARGO_TARGET_DIR` when set; relative paths are resolved
+from `rust/`. Otherwise they build into `rust/target`. This explicit directory overrides Cargo's
+configured `build.target-dir` so installation always uses the output of the current build.
+
+Installation displays the configured key protection scheme, hardware evidence and current TPM
+detection. Check it later with `keyvalet status --summary` or the AI client's `credential_status`,
+even while locked. `unknown` means hardware protection is unconfirmed. See the
+[macOS / Windows / Linux protection matrix](docs/key-protection.md).
+
 ## Use it
 
 Just ask your agent:

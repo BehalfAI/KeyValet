@@ -2,6 +2,7 @@
 name = "kv-protocols"
 version = "0.2.1"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
@@ -27,6 +28,8 @@ ed25519-dalek = { version = "2", features = ["pem", "rand_core"] }
 signature = "2"
 rand_core = { version = "0.6", features = ["std"] }
 regex = "1"
+zeroize = { version = "1", features = ["serde"] }
+bytes = "1"
 tokio = { version = "1", features = ["time"] }
 
 [dev-dependencies]

@@ -131,9 +131,9 @@ fn start_time(pid: i32) -> Option<u64> {
     };
     (n == size).then(|| info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
 }
-#[cfg(not(target_os = "macos"))]
-fn start_time(_pid: i32) -> Option<u64> {
-    None
+#[cfg(target_os = "linux")]
+fn start_time(pid: i32) -> Option<u64> {
+    kv_platform::peer::process_start_time(pid.try_into().ok()?).ok()
 }
 
 /// The creator tag at the start of every file this process writes: `pid.start`, or `pid` where
@@ -341,22 +341,26 @@ mod tests {
         assert_eq!(std::fs::read_to_string(target).unwrap(), "original");
     }
     #[tokio::test]
-    async fn locking_removes_files_and_rejects_late_writes() {
-        let home = tempfile::tempdir().unwrap();
-        let dir = PrivateDir::open(home.path()).unwrap();
-        let (path, name) = dir.write("test.key", b"synthetic-password").unwrap();
-        {
-            let mut state = CREATED.lock().unwrap();
-            state.active = true;
-            state.files.push((dir.fd.try_clone().unwrap(), name));
+    async fn ending_a_session_removes_files_and_rejects_late_writes() {
+        for explicit_lock in [true, false] {
+            let home = tempfile::tempdir().unwrap();
+            let dir = PrivateDir::open(home.path()).unwrap();
+            let (path, name) = dir.write("test.key", b"synthetic-password").unwrap();
+            {
+                let mut state = CREATED.lock().unwrap();
+                state.active = true;
+                state.files.push((dir.fd.try_clone().unwrap(), name));
+            }
+            let session = crate::session::HelperSession::new(std::time::Duration::ZERO);
+            if explicit_lock {
+                session.lock().await;
+            }
+            drop(session);
+            assert!(!path.exists());
+            assert!(
+                write_secret_file("test", "api_key", "review", None, "synthetic-password").is_err()
+            );
         }
-        crate::session::HelperSession::new(std::time::Duration::ZERO)
-            .lock()
-            .await;
-        assert!(!path.exists());
-        assert!(
-            write_secret_file("test", "api_key", "review", None, "synthetic-password").is_err()
-        );
     }
     #[test]
     fn sanitize_and_quote_are_safe() {

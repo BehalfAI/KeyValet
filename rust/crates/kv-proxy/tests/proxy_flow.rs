@@ -85,6 +85,54 @@ fn new_vault() -> (tempfile::TempDir, Vault) {
 }
 
 #[tokio::test]
+async fn network_errors_exclude_the_url_with_injected_short_query_secrets() {
+    let _guard = with_insecure_loopback();
+    let server = MockServer::start().await;
+    let (_tmp, vault) = new_vault();
+    setup_static_credential(&vault, &server, "xy").await;
+    let inject = json!({"query":{"api_key":"{{value}}"}});
+    configure_http(
+        &vault,
+        ConfigureHttpParams {
+            r#type: "api_key",
+            name: "svc",
+            purpose: "test query error redaction",
+            remove: false,
+            inject: Some(&inject),
+            allowed_hosts: None,
+            proxy_only: None,
+            test: None,
+        },
+        &AlwaysApprove,
+    )
+    .await
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let peer = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        use tokio::io::AsyncReadExt;
+        stream.read_exact(&mut [0u8; 1]).await.unwrap();
+        // Close without sending HTTP headers, producing a real reqwest error with a URL.
+    });
+    let error = proxy_request(
+        &vault,
+        "api_key",
+        "svc",
+        ProxyInput {
+            url: format!("http://{address}/private-route"),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err();
+    peer.await.unwrap();
+    assert!(!error.0.contains("api_key="), "{}", error.0);
+    assert!(!error.0.contains("/private-route"), "{}", error.0);
+    assert!(!error.0.contains("xy"), "{}", error.0);
+}
+
+#[tokio::test]
 async fn injects_the_credential_and_the_agent_never_sees_it_in_the_request_it_sent() {
     let _guard = with_insecure_loopback();
     let server = MockServer::start().await;
@@ -265,8 +313,44 @@ async fn sse_deltas_split_across_two_response_chunks_still_assemble_and_redact()
     )
     .await
     .unwrap();
+    assert_eq!(
+        out.body, "[REDACTED]",
+        "raw SSE must not expose reconstructable secret fragments"
+    );
     let stream = out
         .stream
         .expect("an event-stream response must be recognized as such");
     assert_eq!(stream.text.as_deref(), Some("key is [REDACTED] ok"));
+}
+
+#[tokio::test]
+async fn unicode_escaped_sse_secrets_are_not_returned_in_raw_events() {
+    let _guard = with_insecure_loopback();
+    let server = MockServer::start().await;
+    let (_tmp, vault) = new_vault();
+    setup_static_credential(&vault, &server, "sk-real-secret-999").await;
+    let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"key is \\u0073k-real-secret-999 ok\"}}]}\n\n";
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
+        .mount(&server)
+        .await;
+    let out = proxy_request(
+        &vault,
+        "api_key",
+        "svc",
+        ProxyInput {
+            method: Some("GET".into()),
+            url: server.uri(),
+            headers: Default::default(),
+            query: Default::default(),
+            body: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.body, "[REDACTED]");
+    assert_eq!(
+        out.stream.unwrap().text.as_deref(),
+        Some("key is [REDACTED] ok")
+    );
 }

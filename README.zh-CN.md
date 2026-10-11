@@ -14,6 +14,24 @@ curl -fsSL https://keyvalet.dev/install.sh | sh
 
 需要 macOS 14 或更高版本的 Apple Silicon Mac（安装器使用发行版的预编译 arm64 二进制；Intel Mac 改为源码构建，需要 Rust 工具链（`cargo`，来自 [rustup.rs](https://rustup.rs)）和 Xcode 命令行工具）。安装时要输一次密码。会自动配置好 Claude Code；检测到 Cursor 时安装器也会装好插件（`~/.cursor/plugins/local/keyvalet`，重启 Cursor 生效）；Devin CLI 用户执行 `devin plugins install KeyValet/KeyValet#devin-plugin` 安装插件；其他 MCP 客户端见[使用指南](https://keyvalet.dev/zh-CN/guide/#安装)。
 
+Windows 11 已补上 Hello、后台服务、UI agent 和本地安装打包，当前为**开发预览**；
+正式签名包和 Windows 真机验证尚未完成。构建、安装及验收步骤见
+[Windows 支持记录](docs/windows.md)，WSL 桥仍待实现。
+
+Linux 本地版已实现：systemd 独立服务用户、polkit 认证、TPM 2.0 密钥保护；无 TPM 时须显式
+开启软件保护，硬件访问失败不会自动降级。从当前源码运行 `sh scripts/install.sh` 安装，
+无 TPM 的机器加 `--software`。安装、SSH 审批和恢复步骤见 [Linux 支持记录](docs/linux.md)。
+Linux 正式发行包和访问 Windows vault 的 WSL 桥仍待发布或实现。
+
+macOS 和 Linux 源码安装器支持 `CARGO_TARGET_DIR`，相对路径以仓库的 `rust/` 为基准；未设置时
+使用 `rust/target`。安装器明确指定这个目录，覆盖 Cargo 配置中的 `build.target-dir`，确保安装
+本次构建的产物。
+
+安装时会醒目显示密钥保护方案、硬件保护证据和当前 TPM 检测结果。之后可以用
+`keyvalet status --summary` 或 AI 客户端的 `credential_status` 查看，会话锁定时也可以。
+`unknown` 明确表示硬件保护未确认。三种系统的方案与安全边界见
+[密钥保护与 TPM 状态说明](docs/key-protection.zh-CN.md)。
+
 ## 怎么用
 
 直接对 agent 说：

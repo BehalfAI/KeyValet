@@ -7,13 +7,14 @@
 //! - Secrets appearing in the response (including base64 / URL-encoded forms) are replaced with [REDACTED]
 
 use crate::config::{field_values, host_allowed, render};
-use crate::redact::{contains_secret, redact, redaction_list};
+use crate::redact::{contains_secret, redact, redaction_list, Redactions};
 use futures_util::StreamExt;
 use kv_protocols::index::{access_token, AccessTokenParams};
 use kv_vault::{CredentialRecord, Vault, VaultError};
 use serde_json::Value;
 use std::sync::LazyLock;
 use std::time::Duration;
+use zeroize::{Zeroize, Zeroizing};
 
 const TIMEOUT: Duration = Duration::from_millis(180_000); // LLM streaming responses can last several minutes
 const MAX_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
@@ -53,23 +54,25 @@ static HEADER_NAME_RE: LazyLock<regex::Regex> =
 /// (candidates[].content.parts[].text).
 pub fn aggregate_sse(raw: &str) -> (usize, Option<String>) {
     let mut events = 0;
-    let mut text = String::new();
+    let mut text = String::with_capacity(raw.len());
     let mut recognized = false;
     for block in regex_split(raw, r"\r?\n\r?\n") {
-        let data: String = regex_split(block, r"\r?\n")
-            .into_iter()
-            .filter(|l| l.starts_with("data:"))
-            .map(|l| l[5..].strip_prefix(' ').unwrap_or(&l[5..]))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let data = Zeroizing::new(
+            regex_split(block, r"\r?\n")
+                .into_iter()
+                .filter(|l| l.starts_with("data:"))
+                .map(|l| l[5..].strip_prefix(' ').unwrap_or(&l[5..]))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
         if data.is_empty() {
             continue;
         }
         events += 1;
-        if data == "[DONE]" {
+        if data.as_str() == "[DONE]" {
             continue;
         }
-        let Ok(j) = serde_json::from_str::<Value>(&data) else {
+        let Ok(mut j) = serde_json::from_str::<Value>(&data) else {
             continue;
         };
         let mut pieces: Vec<Option<&str>> = Vec::new();
@@ -110,6 +113,7 @@ pub fn aggregate_sse(raw: &str) -> (usize, Option<String>) {
             text.push_str(p);
             recognized = true;
         }
+        kv_vault::scrub_json(&mut j);
     }
     (events, if recognized { Some(text) } else { None })
 }
@@ -229,7 +233,42 @@ fn check_url(raw: &str, allowed: &[String]) -> kv_vault::Result<url::Url> {
 pub struct Injection {
     pub headers: std::collections::HashMap<String, String>,
     pub query: std::collections::HashMap<String, String>,
-    pub redactions: Vec<Vec<u8>>,
+    pub redactions: Redactions,
+}
+
+impl Drop for Injection {
+    fn drop(&mut self) {
+        for value in self.headers.values_mut().chain(self.query.values_mut()) {
+            value.zeroize();
+        }
+    }
+}
+
+fn basic_token(
+    basic: &kv_vault::BasicAuth,
+    fields: &crate::config::FieldValues,
+) -> kv_vault::Result<Zeroizing<String>> {
+    use base64::engine::{general_purpose::STANDARD, Engine};
+    let username = Zeroizing::new(render(&basic.username, fields)?);
+    let password = Zeroizing::new(render(&basic.password, fields)?);
+    let credentials = Zeroizing::new(format!("{}:{}", username.as_str(), password.as_str()));
+    Ok(Zeroizing::new(STANDARD.encode(credentials.as_bytes())))
+}
+
+/// Injected query fields override client values, just like injected headers.
+pub(crate) fn inject_query(url: &mut url::Url, query: &std::collections::HashMap<String, String>) {
+    if query.is_empty() {
+        return;
+    }
+    let retained = Zeroizing::new(
+        url.query_pairs()
+            .filter(|(key, _)| !query.contains_key(key.as_ref()))
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect::<Vec<_>>(),
+    );
+    let mut pairs = url.query_pairs_mut();
+    pairs.clear().extend_pairs(retained.iter());
+    pairs.extend_pairs(query);
 }
 
 /// Computes the headers and query parameters to inject, along with the secrets that need to be stripped.
@@ -239,17 +278,24 @@ pub async fn build_injection(
     name: &str,
     rec: &CredentialRecord,
 ) -> kv_vault::Result<Injection> {
-    let mut headers = std::collections::HashMap::new();
-    let mut query = std::collections::HashMap::new();
-    let mut secrets: Vec<String> = Vec::new();
+    // Own the maps from the beginning so an error rendering a later field wipes earlier ones.
+    let mut injection = Injection {
+        headers: Default::default(),
+        query: Default::default(),
+        redactions: Zeroizing::new(Vec::new()),
+    };
+    let Injection { headers, query, .. } = &mut injection;
+    let mut secrets = Zeroizing::new(Vec::<String>::new());
     let kind = rec.kind_or_static();
     // All long-lived secrets are added to the redaction list (so they won't leak even if upstream echoes them back).
-    secrets.extend(rec.secrets.clone().unwrap_or_default().into_values());
+    if let Some(values) = &rec.secrets {
+        secrets.extend(values.values().cloned());
+    }
     if !rec.value.is_empty() {
         secrets.push(rec.value.clone());
     }
     if TOKEN_KINDS.contains(&kind) {
-        let tok = access_token(
+        let mut tok = access_token(
             vault,
             ty,
             name,
@@ -262,23 +308,25 @@ pub async fn build_injection(
             },
         )
         .await?;
-        let access_token_str = tok
-            .get("access_token")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        secrets.push(access_token_str.clone());
+        let access_token_str = Zeroizing::new(
+            tok.get("access_token")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        );
+        kv_vault::scrub_json(&mut tok);
+        secrets.push(access_token_str.to_string());
         match rec.http.as_ref().and_then(|h| h.inject.as_ref()) {
             None => {
                 headers.insert(
                     "Authorization".to_string(),
-                    format!("Bearer {access_token_str}"),
+                    format!("Bearer {}", access_token_str.as_str()),
                 );
             }
             Some(rule) => {
                 // Custom injection rule: {{access_token}} references the current token.
                 let f = crate::config::FieldValues {
-                    secrets: [("access_token".to_string(), access_token_str)].into(),
+                    secrets: [("access_token".to_string(), access_token_str.to_string())].into(),
                     attributes: rec.attributes.clone(),
                     value: String::new(),
                 };
@@ -293,14 +341,9 @@ pub async fn build_injection(
                     }
                 }
                 if let Some(basic) = &rule.basic {
-                    use base64::engine::{general_purpose::STANDARD, Engine};
-                    let b = STANDARD.encode(format!(
-                        "{}:{}",
-                        render(&basic.username, &f)?,
-                        render(&basic.password, &f)?
-                    ));
-                    headers.insert("Authorization".to_string(), format!("Basic {b}"));
-                    secrets.push(b);
+                    let b = basic_token(basic, &f)?;
+                    headers.insert("Authorization".to_string(), format!("Basic {}", b.as_str()));
+                    secrets.push(b.to_string());
                 }
                 secrets.extend(headers.values().cloned());
                 secrets.extend(query.values().cloned());
@@ -333,24 +376,16 @@ pub async fn build_injection(
             }
         }
         if let Some(basic) = &rule.basic {
-            use base64::engine::{general_purpose::STANDARD, Engine};
-            let b = STANDARD.encode(format!(
-                "{}:{}",
-                render(&basic.username, &f)?,
-                render(&basic.password, &f)?
-            ));
-            headers.insert("Authorization".to_string(), format!("Basic {b}"));
-            secrets.push(b);
+            let b = basic_token(basic, &f)?;
+            headers.insert("Authorization".to_string(), format!("Basic {}", b.as_str()));
+            secrets.push(b.to_string());
         }
         secrets.extend(headers.values().cloned());
         secrets.extend(query.values().cloned());
     }
     let refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
-    Ok(Injection {
-        headers,
-        query,
-        redactions: redaction_list(&refs),
-    })
+    injection.redactions = redaction_list(&refs);
+    Ok(injection)
 }
 
 fn client() -> reqwest::Client {
@@ -368,12 +403,13 @@ pub async fn proxy_request(
     p: ProxyInput,
 ) -> kv_vault::Result<ProxyResult> {
     let (_, _, record) = vault.get_record(ty, name)?;
-    let mut baseline_values: Vec<String> = record
-        .secrets
-        .clone()
-        .unwrap_or_default()
-        .into_values()
-        .collect();
+    let mut baseline_values = Zeroizing::new(
+        record
+            .secrets
+            .iter()
+            .flat_map(|secrets| secrets.values().cloned())
+            .collect::<Vec<String>>(),
+    );
     if !record.value.is_empty() {
         baseline_values.push(record.value.clone());
     }
@@ -451,10 +487,10 @@ async fn proxy_request_inner(
     }
 
     let inj = build_injection(vault, &ty, &name, &record).await?;
-    let mut headers: Vec<(String, String)> = vec![
+    let mut headers = Zeroizing::new(vec![
         ("User-Agent".to_string(), "keyvalet/0.1".to_string()),
         ("Accept-Encoding".to_string(), "identity".to_string()),
-    ];
+    ]);
     let injected: std::collections::HashSet<String> =
         inj.headers.keys().map(|k| k.to_lowercase()).collect();
     for (k, v) in &agent_headers {
@@ -471,15 +507,10 @@ async fn proxy_request_inner(
         headers.push((k.clone(), v.clone()));
     }
     headers.extend(inj.headers.iter().map(|(k, v)| (k.clone(), v.clone())));
-    {
-        let mut qp = url.query_pairs_mut();
-        for (k, v) in &inj.query {
-            qp.append_pair(k, v);
-        }
-    }
+    inject_query(&mut url, &inj.query);
 
     let mut req = client().request(method.parse().unwrap(), url.as_str());
-    for (k, v) in &headers {
+    for (k, v) in headers.iter() {
         req = req.header(k, v);
     }
     if let Some(b) = body.clone() {
@@ -488,9 +519,13 @@ async fn proxy_request_inner(
     let res = match req.send().await {
         Ok(r) => r,
         Err(e) => {
-            let detail =
-                String::from_utf8_lossy(&redact(e.to_string().as_bytes(), &inj.redactions))
-                    .to_string();
+            // The URL already contains injected query secrets. Remove it before formatting;
+            // pattern redaction intentionally skips short values and cannot protect every URL.
+            let detail = String::from_utf8_lossy(&redact(
+                e.without_url().to_string().as_bytes(),
+                &inj.redactions,
+            ))
+            .to_string();
             let host = url.host_str().unwrap_or_default();
             return Err(VaultError::new(
                 &format!("请求 {host} 失败：{detail}"),
@@ -530,6 +565,13 @@ async fn proxy_request_inner(
             // Redact once more after assembling: a secret may have been split across multiple
             // deltas, or appear as a JSON \uXXXX escape.
             let redacted_text = stream_text.map(|t| {
+                let t = Zeroizing::new(t);
+                if contains_secret(t.as_bytes(), &inj.redactions) {
+                    // Raw deltas would let the client reconstruct the same secret, even
+                    // though the assembled text below is redacted.
+                    text.zeroize();
+                    text.push_str("[REDACTED]");
+                }
                 String::from_utf8_lossy(&redact(t.as_bytes(), &inj.redactions)).to_string()
             });
             stream = Some(StreamInfo {
@@ -544,7 +586,7 @@ async fn proxy_request_inner(
             return Err(VaultError::new("响应中包含凭证秘密，已拒绝返回该二进制响应", "The response contains a credential secret; refusing to return this binary response"));
         }
         use base64::engine::{general_purpose::STANDARD, Engine};
-        text = STANDARD.encode(&buf);
+        text = STANDARD.encode(&*buf);
         body_encoding = "base64";
     }
     let mut truncated = text.chars().count() > MAX_RETURN_CHARS;
@@ -573,9 +615,9 @@ async fn read_limited(
     res: reqwest::Response,
     limit: usize,
     host: &str,
-) -> kv_vault::Result<Vec<u8>> {
+) -> kv_vault::Result<Zeroizing<Vec<u8>>> {
     let mut stream = res.bytes_stream();
-    let mut out = Vec::new();
+    let mut out = Zeroizing::new(Vec::with_capacity(limit));
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| {
             VaultError::new(
@@ -583,13 +625,13 @@ async fn read_limited(
                 &format!("Failed to read the response from {host}: {e}"),
             )
         })?;
-        out.extend_from_slice(&chunk);
-        if out.len() > limit {
+        if chunk.len() > limit - out.len() {
             return Err(VaultError::new(
                 &format!("{host} 的响应过大"),
                 &format!("Response from {host} is too large"),
             ));
         }
+        out.extend_from_slice(&chunk);
     }
     Ok(out)
 }
@@ -651,6 +693,21 @@ pub async fn test_credential(vault: &Vault, ty: &str, name: &str) -> kv_vault::R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn injected_query_values_replace_all_client_duplicates() {
+        let mut url = url::Url::parse("https://example.com/?key=one&page=2&key=two").unwrap();
+        let query = [("key".to_string(), "actual secret".to_string())].into();
+        inject_query(&mut url, &query);
+        assert_eq!(
+            url.query_pairs()
+                .filter(|(k, _)| k == "key")
+                .map(|(_, v)| v.into_owned())
+                .collect::<Vec<_>>(),
+            ["actual secret"]
+        );
+        assert!(url.query_pairs().any(|(k, v)| k == "page" && v == "2"));
+    }
 
     #[test]
     fn aggregate_sse_recognizes_openai_chat_completions_deltas() {

@@ -1,0 +1,78 @@
+name: Windows package
+
+on:
+  workflow_dispatch:
+    inputs:
+      signed:
+        description: 'Sign for production (requires the Windows signing certificate in the release environment)'
+        type: boolean
+        default: true
+
+# Builds reviewable artifacts. Public release attachment waits for the Windows hardware matrix
+# and a maintainer; it does not change the existing notarized macOS release flow.
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-latest
+    environment: release
+    strategy:
+      matrix:
+        include:
+          - architecture: x64
+            target: x86_64-pc-windows-msvc
+          - architecture: arm64
+            target: aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Resolve package version
+        shell: pwsh
+        run: |
+          $version = [regex]::Match((Get-Content rust/crates/kv-cli/Cargo.toml -Raw), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+          "PACKAGE_TAG=v$version" >> $env:GITHUB_ENV
+      - name: Import Windows signing certificate
+        if: inputs.signed
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING_PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
+          WINDOWS_SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
+        run: |
+          if (!$env:WINDOWS_SIGNING_PFX_BASE64) { throw 'Windows signing certificate is not configured. Choose an unsigned development artifact explicitly.' }
+          $path = Join-Path $env:RUNNER_TEMP keyvalet-signing.pfx
+          try {
+            [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($env:WINDOWS_SIGNING_PFX_BASE64))
+            $password = ConvertTo-SecureString $env:WINDOWS_SIGNING_PFX_PASSWORD -AsPlainText -Force
+            $certificates = Import-PfxCertificate -FilePath $path -CertStoreLocation Cert:\CurrentUser\My -Password $password
+            $certificate = @($certificates | Where-Object { $_.HasPrivateKey })
+            if ($certificate.Count -ne 1) { throw 'The signing PFX must contain one private signing certificate.' }
+            $certificate = $certificate[0]
+            "WINDOWS_CERT_THUMBPRINT=$($certificate.Thumbprint)" >> $env:GITHUB_ENV
+          } finally { Remove-Item $path -Force -ErrorAction SilentlyContinue }
+      - name: Build package
+        shell: pwsh
+        run: |
+          $options = @{ Tag = $env:PACKAGE_TAG; Architecture = '${{ matrix.architecture }}' }
+          if ('${{ inputs.signed }}' -eq 'true') { $options.SigningCertificateThumbprint = $env:WINDOWS_CERT_THUMBPRINT }
+          else { $options.AllowUnsigned = $true }
+          ./scripts/package-windows.ps1 @options
+      - uses: actions/upload-artifact@v4
+        with:
+          name: keyvalet-${{ env.PACKAGE_TAG }}-windows-${{ matrix.architecture }}
+          path: |
+            dist/keyvalet-${{ env.PACKAGE_TAG }}-windows-${{ matrix.architecture }}.zip
+            dist/SHA256SUMS-windows-${{ matrix.architecture }}
+          retention-days: 7
+      - name: Remove signing certificate
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:WINDOWS_CERT_THUMBPRINT) {
+            Remove-Item "Cert:\CurrentUser\My\$env:WINDOWS_CERT_THUMBPRINT" -DeleteKey -Force -ErrorAction SilentlyContinue
+          }

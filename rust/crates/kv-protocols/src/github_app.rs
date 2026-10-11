@@ -2,11 +2,13 @@
 //! token valid for 1 hour. Direct port of src/helper/protocols/github-app.ts.
 
 use crate::check::{now_sec, str_req};
+use crate::expiry::{is_fresh, iso_millis, now_ms};
 use crate::http::{assert_https_url, http_request, obj, remote_error, Method};
 use crate::jwt::sign_jwt;
 use kv_vault::{Kind, Vault, VaultError};
 use serde_json::{json, Value};
 use std::sync::LazyLock;
+use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GitHubAppConfig {
@@ -18,7 +20,7 @@ pub struct GitHubAppConfig {
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct CachedToken {
-    token: String,
+    token: Zeroizing<String>,
     expires_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     permissions: Option<Value>,
@@ -140,10 +142,10 @@ pub async fn github_app_token(
         .state
         .as_ref()
         .and_then(|s| s.get("token"))
-        .and_then(|v| serde_json::from_value::<CachedToken>(v.clone()).ok());
+        .and_then(|v| <CachedToken as serde::Deserialize>::deserialize(v).ok());
     if !narrowed {
         if let Some(c) = &cached {
-            if !p.force && (c.expires_at - 5 * 60_000) > now_ms() {
+            if !p.force && is_fresh(c.expires_at, 5 * 60_000) {
                 return Ok(serde_json::to_value(out(c, &cfg)).unwrap());
             }
         }
@@ -151,7 +153,7 @@ pub async fn github_app_token(
 
     let iat = now_sec() - 60; // tolerate clock skew
     let claims = json!({"iat": iat, "exp": iat + 600, "iss": cfg.app_id});
-    let jwt = sign_jwt(
+    let jwt = Zeroizing::new(sign_jwt(
         "RS256",
         record
             .secrets
@@ -161,11 +163,11 @@ pub async fn github_app_token(
             .unwrap_or(""),
         claims.as_object().unwrap(),
         &Default::default(),
-    )?;
+    )?);
 
     let mut installation_id = cfg.installation_id.clone();
     if installation_id.is_none() {
-        let headers = gh_headers(&jwt);
+        let headers = Zeroizing::new(gh_headers(&jwt));
         let header_refs: Vec<(&str, &str)> = headers
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -220,7 +222,7 @@ pub async fn github_app_token(
     if let Some(perm) = &p.permissions {
         body.insert("permissions".into(), perm.clone());
     }
-    let mut headers = gh_headers(&jwt);
+    let mut headers = Zeroizing::new(gh_headers(&jwt));
     headers.push(("Content-Type".into(), "application/json".into()));
     let header_refs: Vec<(&str, &str)> = headers
         .iter()
@@ -249,7 +251,7 @@ pub async fn github_app_token(
         return Err(remote_error(&host, &r));
     }
     let tok = CachedToken {
-        token: token.to_string(),
+        token: Zeroizing::new(token.to_string()),
         expires_at: j
             .get("expires_at")
             .and_then(Value::as_str)
@@ -259,52 +261,46 @@ pub async fn github_app_token(
         permissions: j.get("permissions").cloned(),
         repository_selection: j.get("repository_selection").cloned(),
     };
+    if iso_millis(tok.expires_at).is_none() {
+        return Err(VaultError::new(
+            "token 响应的 expires_at 无效",
+            "Token response expires_at is invalid",
+        ));
+    }
     if !narrowed {
         let gen = record.generation.clone();
         let inst = installation_id.clone();
         vault.patch_record(&ty, &name, Kind::GithubApp, gen.as_deref(), |rec| {
-            let mut state = rec
-                .state
-                .clone()
-                .unwrap_or(json!({}))
-                .as_object()
-                .cloned()
-                .unwrap_or_default();
-            state.insert("token".into(), serde_json::to_value(&tok).unwrap());
+            rec.set_state_field("token", serde_json::to_value(&tok).unwrap());
             if let Some(i) = &inst {
-                state.insert("installation_id".into(), json!(i));
+                rec.set_state_field("installation_id", json!(i));
             }
-            rec.state = Some(Value::Object(state));
         })?;
     }
     Ok(serde_json::to_value(out(&tok, &cfg)).unwrap())
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 struct GitHubAppTokenOut {
     access_token: String,
     token_type: &'static str,
-    expires_at: String,
+    expires_at: Option<String>,
     permissions: Value,
     repository_selection: Value,
     api_base_url: String,
 }
 
+impl Drop for GitHubAppTokenOut {
+    fn drop(&mut self) {
+        self.access_token.zeroize();
+    }
+}
+
 fn out(tok: &CachedToken, cfg: &GitHubAppConfig) -> GitHubAppTokenOut {
     GitHubAppTokenOut {
-        access_token: tok.token.clone(),
+        access_token: tok.token.to_string(),
         token_type: "token",
-        expires_at: chrono::DateTime::<chrono::Utc>::from(
-            std::time::UNIX_EPOCH + std::time::Duration::from_millis(tok.expires_at.max(0) as u64),
-        )
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        expires_at: iso_millis(tok.expires_at),
         permissions: tok.permissions.clone().unwrap_or(Value::Null),
         repository_selection: tok.repository_selection.clone().unwrap_or(Value::Null),
         api_base_url: cfg.api_base_url.clone(),

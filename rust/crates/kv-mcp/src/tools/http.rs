@@ -913,12 +913,16 @@ impl Server {
             env.extend(sdk_env(g.template.as_deref(), &g.base_urls, &g.token));
             let file = write_gateway_env(&self.session.session_id, &g.r#type, &g.name, &env).map_err(|e| SessionError(e.to_string()))?;
             let file_str = file.display().to_string();
+            #[cfg(unix)]
+            let usage = format!("set -a; . {}; set +a; <command>", crate::gateway_env::quote(&file_str));
+            #[cfg(windows)]
+            let usage = format!(". {}; <command>", crate::gateway_env::quote(&file_str));
             Ok(ok_data(
                 kv_i18n::t("网关已开通：", "Gateway opened:"),
                 json!({
                     "env_file": file_str,
                     "variables": env.iter().map(|(k,_)| k).collect::<Vec<_>>(),
-                    "usage": format!("set -a; . {}; set +a; <command>", crate::gateway_env::quote(&file_str)),
+                    "usage": usage,
                     "base_urls": g.base_urls,
                     "how_to_call": kv_i18n::t(
                         "请求 <base_urls 中的地址>/<API 路径>，并把 $KEYVALET_GATEWAY_TOKEN 作为 API key 发送（Authorization: Bearer、x-api-key 或 x-goog-api-key）。不要读取、打印或在命令行参数中写出该文件的内容。",

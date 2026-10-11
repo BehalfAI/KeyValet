@@ -3,6 +3,7 @@
 //! credentials valid for at most a few hours. Direct port of src/helper/protocols/aws.ts.
 
 use crate::check::{int, opt_str, str_req};
+use crate::expiry::{is_fresh, iso_millis};
 use crate::http::{http_request, Method};
 use crate::totp::totp_code;
 use hmac::{Hmac, Mac};
@@ -10,6 +11,7 @@ use kv_vault::{Kind, Vault, VaultError};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::sync::LazyLock;
+use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MfaTotpRef {
@@ -37,8 +39,8 @@ pub struct AwsConfig {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct SessionCreds {
     access_key_id: String,
-    secret_access_key: String,
-    session_token: String,
+    secret_access_key: Zeroizing<String>,
+    session_token: Zeroizing<String>,
     expiration: i64,
 }
 
@@ -246,6 +248,13 @@ pub struct AwsCredentialsOut {
     pub role_arn: Option<String>,
 }
 
+impl Drop for AwsCredentialsOut {
+    fn drop(&mut self) {
+        self.secret_access_key.zeroize();
+        self.session_token.zeroize();
+    }
+}
+
 pub async fn aws_credentials(
     vault: &Vault,
     ty: &str,
@@ -275,10 +284,10 @@ pub async fn aws_credentials(
         .state
         .as_ref()
         .and_then(|s| s.get("session"))
-        .and_then(|v| serde_json::from_value::<SessionCreds>(v.clone()).ok())
+        .and_then(|v| <SessionCreds as serde::Deserialize>::deserialize(v).ok())
     {
-        if !force && duration_seconds.is_none() && (cached.expiration - 5 * 60_000) > now_ms() {
-            return Ok(out(&cached, &cfg));
+        if !force && duration_seconds.is_none() && is_fresh(cached.expiration, 5 * 60_000) {
+            return out(&cached, &cfg);
         }
     }
 
@@ -388,12 +397,16 @@ pub async fn aws_credentials(
         access_key_id: xml_tag(&r.text, "AccessKeyId")
             .unwrap_or_default()
             .to_string(),
-        secret_access_key: xml_tag(&r.text, "SecretAccessKey")
-            .unwrap_or_default()
-            .to_string(),
-        session_token: xml_tag(&r.text, "SessionToken")
-            .unwrap_or_default()
-            .to_string(),
+        secret_access_key: Zeroizing::new(
+            xml_tag(&r.text, "SecretAccessKey")
+                .unwrap_or_default()
+                .to_string(),
+        ),
+        session_token: Zeroizing::new(
+            xml_tag(&r.text, "SessionToken")
+                .unwrap_or_default()
+                .to_string(),
+        ),
         expiration: xml_tag(&r.text, "Expiration")
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
             .map(|d| d.timestamp_millis())
@@ -403,6 +416,7 @@ pub async fn aws_credentials(
         || creds.secret_access_key.is_empty()
         || creds.session_token.is_empty()
         || creds.expiration == 0
+        || iso_millis(creds.expiration).is_none()
     {
         return Err(VaultError::new(
             "AWS STS 响应缺少凭证字段",
@@ -411,43 +425,28 @@ pub async fn aws_credentials(
     }
     let gen = record.generation.clone();
     vault.patch_record(&ty, &name, Kind::Aws, gen.as_deref(), |rec| {
-        let mut state = rec
-            .state
-            .clone()
-            .unwrap_or(json!({}))
-            .as_object()
-            .cloned()
-            .unwrap_or_default();
         if duration_seconds.is_none() {
-            state.insert("session".into(), serde_json::to_value(&creds).unwrap());
+            rec.set_state_field("session", serde_json::to_value(&creds).unwrap());
         }
         if let Some(code) = &token_code {
-            state.insert("last_mfa_code".into(), json!(code));
+            rec.set_state_field("last_mfa_code", json!(code));
         }
-        rec.state = Some(Value::Object(state));
     })?;
-    Ok(out(&creds, &cfg))
+    out(&creds, &cfg)
 }
 
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
-}
-
-fn out(c: &SessionCreds, cfg: &AwsConfig) -> AwsCredentialsOut {
-    AwsCredentialsOut {
+fn out(c: &SessionCreds, cfg: &AwsConfig) -> kv_vault::Result<AwsCredentialsOut> {
+    let expiration = iso_millis(c.expiration).ok_or_else(|| {
+        VaultError::new("AWS 凭证有效期无效", "AWS credential expiration is invalid")
+    })?;
+    Ok(AwsCredentialsOut {
         access_key_id: c.access_key_id.clone(),
-        secret_access_key: c.secret_access_key.clone(),
-        session_token: c.session_token.clone(),
-        expiration: chrono::DateTime::<chrono::Utc>::from(
-            std::time::UNIX_EPOCH + std::time::Duration::from_millis(c.expiration as u64),
-        )
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        secret_access_key: c.secret_access_key.to_string(),
+        session_token: c.session_token.to_string(),
+        expiration,
         region: cfg.region.clone(),
         role_arn: cfg.role_arn.clone(),
-    }
+    })
 }
 
 #[cfg(test)]

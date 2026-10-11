@@ -2,23 +2,54 @@
 //! Launched by /usr/local/bin/keyvalet via `sudo -k`, reads and writes the credential vault
 //! directly as root. Direct port of src/cli/main.ts.
 
-use kv_core::settings::{parse_mode, read_settings, write_settings};
+use kv_core::settings::{compare_and_write_settings, parse_mode, read_settings};
 use kv_platform::paths::{CLI_BIN, VAULT_DIR};
 use kv_platform::trust::verify_root_environment;
 use kv_vault::{SetParams, Vault, MAX_VALUE_LENGTH};
 use serde_json::{json, Map, Value};
 use std::io::IsTerminal;
+#[cfg(target_os = "linux")]
+mod linux_cli;
+#[cfg(target_os = "linux")]
+fn real_home() -> std::path::PathBuf {
+    linux_cli::real_home(&linux_cli::Environment::system()).unwrap_or_else(|e| fatal(&e))
+}
+#[cfg(target_os = "linux")]
+fn choose_from_list(prompt: &str, items: &[String]) -> Option<Vec<String>> {
+    linux_cli::choose_from_list(&linux_cli::Environment::system(), prompt, items)
+}
+#[cfg(target_os = "linux")]
+fn confirm_yes_no(message: &str, yes_label: &str, no_label: &str) -> bool {
+    linux_cli::confirm_yes_no(
+        &linux_cli::Environment::system(),
+        message,
+        yes_label,
+        no_label,
+    )
+}
 
 fn fatal(msg: &str) -> ! {
     eprintln!("keyvalet: {msg}");
     std::process::exit(1);
 }
 
+fn commit_settings(dir: &std::path::Path, expected: &kv_core::Settings, next: &kv_core::Settings) {
+    match compare_and_write_settings(dir, expected, next) {
+        Ok(true) => {}
+        Ok(false) => fatal(&kv_i18n::t(
+            "授权设置在操作期间已修改，请重试",
+            "Authorization settings changed during the operation; please retry",
+        )),
+        Err(error) => fatal(&error.to_string()),
+    }
+}
+
 fn usage() -> String {
-    kv_i18n::t(
+    let usage = kv_i18n::t(
         "用法：keyvalet <命令>\n\n\
         \u{20}\u{20}setup-enclave                      初始化或迁移到 macOS 必需的硬件保护\n\
-        \u{20}\u{20}protection                         查看主密钥保护方式（无需 Touch ID）\n\
+        \u{20}\u{20}status [--summary]                 查看密钥保护方案、硬件证据和 TPM（无需解锁凭证库）\n\
+        \u{20}\u{20}protection [--summary]             status 的别名\n\
         \u{20}\u{20}enclave-test                       两次认证验证硬件密钥，不修改凭证库\n\
         \u{20}\u{20}migrate-to-enclave                 启用 Secure Enclave，设置独立恢复口令\n\
         \u{20}\u{20}recover-vault                      用恢复口令重新绑定本机硬件密钥\n\
@@ -43,7 +74,8 @@ fn usage() -> String {
         \u{20}\u{20}\u{20}\u{20}\u{20}\u{20}--report-only                  只扫描和报告，不弹窗、不导入、不改动任何文件",
         "Usage: keyvalet <command>\n\n\
         \u{20}\u{20}setup-enclave                      Initialize or migrate to required macOS hardware protection\n\
-        \u{20}\u{20}protection                         Show master-key protection (no Touch ID)\n\
+        \u{20}\u{20}status [--summary]                 Show key protection, hardware evidence and TPM (without unlocking the vault)\n\
+        \u{20}\u{20}protection [--summary]             Alias for status\n\
         \u{20}\u{20}enclave-test                       Verify hardware key with two prompts; vault unchanged\n\
         \u{20}\u{20}migrate-to-enclave                 Enable Secure Enclave and set a recovery passphrase\n\
         \u{20}\u{20}recover-vault                      Rebind the vault to this Mac with the recovery passphrase\n\
@@ -66,7 +98,31 @@ fn usage() -> String {
         \u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}Show/set grant mode: Touch ID per use / per credential / per session, or once and remember for a while\n\
         \u{20}\u{20}scan [--report-only]               Look for possible secrets in common config files (.env, ~/.claude.json, ...); shows a checkbox dialog, imports what's picked (configured from the matching template as proxy-only when there is one), and removes it from the file (backup at <file>.bak-keyvalet); add --report-only to only report, never change anything\n\
         \u{20}\u{20}\u{20}\u{20}\u{20}\u{20}--report-only                  Only scan and report; no dialog, no import, no file changes",
-    )
+    );
+    #[cfg(windows)]
+    let usage = usage
+        .replace("setup-enclave", "setup-hello")
+        .replace("enclave-test", "hello-test")
+        .replace("Secure Enclave", "Windows Hello")
+        .replace("macOS", "Windows")
+        .replace("Touch ID", "Windows Hello");
+    #[cfg(target_os = "linux")]
+    let usage = usage
+        .replace("setup-enclave", "setup-tpm")
+        .replace("enclave-test", "tpm-test")
+        .replace("Secure Enclave", "TPM 2.0")
+        .replace("macOS", "Linux")
+        .replace("Touch ID", "polkit")
+        .replace("this Mac", "this machine")
+        .replace("required Linux hardware protection", "default Linux TPM protection")
+        .replace("Linux 必需的硬件保护", "Linux 默认的 TPM 保护")
+        .replace("with two prompts", "with two TPM operations")
+        .replace("两次认证验证硬件密钥", "两次 TPM 运算验证设备密钥")
+        + &kv_i18n::t(
+            "\n  setup-software                    无 TPM 时显式开启软件保护\n  recover-vault --software          在无 TPM 的机器上显式恢复到软件保护\n  approve <kv-mcp-pid>               在本 SSH 终端运行 polkit 认证代理\n",
+            "\n  setup-software                    Explicit software protection when no TPM is present\n  recover-vault --software          Explicit software recovery on a machine without TPM\n  approve <kv-mcp-pid>               Run a polkit authentication agent in this SSH terminal\n",
+        );
+    usage
 }
 
 fn read_value(label: &str) -> String {
@@ -191,6 +247,11 @@ fn audited<T>(
 }
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    if std::env::args().nth(1).as_deref() == Some("approve") {
+        linux_cli::approve(&linux_cli::Environment::system()).unwrap_or_else(|e| fatal(&e));
+        return;
+    }
     #[cfg(unix)]
     unsafe {
         libc::umask(0o077);
@@ -202,6 +263,7 @@ fn main() {
         libc::setrlimit(libc::RLIMIT_CORE, &limit);
     }
     let self_path = std::env::current_exe().unwrap_or_default();
+    #[cfg(not(windows))]
     if let Err(e) = verify_root_environment(&self_path, std::path::Path::new(CLI_BIN), &[]) {
         fatal(&e);
     }
@@ -220,6 +282,29 @@ fn main() {
     } else {
         Vec::new()
     };
+    #[cfg(windows)]
+    {
+        let peer = kv_platform::peer::self_identity()
+            .unwrap_or_else(|| fatal("Cannot determine the current Windows process identity"));
+        if matches!(cmd.as_deref(), Some("status" | "protection")) && !peer.elevated {
+            check_status_args(&args);
+            if self_path != std::path::Path::new(CLI_BIN) {
+                fatal("Run the installed KeyValet CLI to view protection status");
+            }
+            if let Some(reason) = kv_platform::trust::untrusted_reason(&self_path) {
+                fatal(&reason);
+            }
+            let runtime = tokio::runtime::Runtime::new().unwrap_or_else(|e| fatal(&e.to_string()));
+            let report = runtime
+                .block_on(kv_platform::protection::service_status())
+                .unwrap_or_else(|e| fatal(&e.to_string()));
+            print_status(&report, &args);
+            return;
+        }
+        if let Err(e) = verify_root_environment(&self_path, std::path::Path::new(CLI_BIN), &[]) {
+            fatal(&e);
+        }
+    }
     match cmd.as_deref() {
         None | Some("help") | Some("--help") | Some("-h") => {
             println!("{}", usage());
@@ -231,6 +316,14 @@ fn main() {
     let mut args = args;
 
     let vault = Vault::new(VAULT_DIR);
+    #[cfg(target_os = "linux")]
+    let vault = vault
+        .owned_by(
+            kv_platform::linux::LinuxHost::system()
+                .verify_vault_owner()
+                .unwrap_or_else(|e| fatal(&e)),
+        )
+        .unwrap_or_else(|e| fatal(&e.0));
     // `recovery-read <cmd> ...` runs one read-only command after opening the vault with the
     // recovery passphrase instead of Secure Enclave; the vault rejects writes in that state.
     let recovery_read = cmd == "recovery-read";
@@ -269,8 +362,19 @@ fn main() {
             &kv_platform::enclave::EnclaveMasterKeyProvider,
             &kv_core::prompt::terminal_unlock(&cmd),
         );
-        #[cfg(not(target_os = "macos"))]
-        let initialized = vault.init_legacy();
+        #[cfg(windows)]
+        let initialized = vault.init_with_provider(
+            &kv_platform::windows::HelloMasterKeyProvider,
+            &kv_core::prompt::terminal_unlock(&cmd),
+        );
+        #[cfg(target_os = "linux")]
+        let initialized = vault.init_with_provider(
+            &kv_platform::linux::LinuxMasterKeyProvider::for_root_cli(
+                kv_platform::linux::KeyMode::Tpm2,
+            )
+            .unwrap_or_else(|e| fatal(&e.0)),
+            &kv_core::prompt::terminal_unlock(&cmd),
+        );
         if let Err(e) = initialized {
             fatal(&e.0);
         }
@@ -488,7 +592,7 @@ fn main() {
                     remember_hours: cur.remember_hours,
                     remember_until: None,
                 };
-                let _ = write_settings(&vault.dir, &next);
+                commit_settings(&vault.dir, &cur, &next);
                 let _ = vault.audit(Map::from_iter([
                     ("op".to_string(), json!("settings")),
                     ("forget".to_string(), json!(true)),
@@ -524,7 +628,7 @@ fn main() {
                 remember_hours: hours,
                 remember_until: None,
             };
-            let _ = write_settings(&vault.dir, &next);
+            commit_settings(&vault.dir, &cur, &next);
             let _ = vault.audit(Map::from_iter([
                 ("op".to_string(), json!("settings")),
                 ("grant_mode".to_string(), json!(mode.as_str())),
@@ -554,7 +658,7 @@ fn main() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn recovery_password(confirm: bool) -> zeroize::Zeroizing<String> {
     let prompt = kv_i18n::t(
         "输入独立的恢复长口令（12–1024 字节，建议六个以上随机单词）。请离线保管；换机恢复需要它，持有口令与 vault 密文可绕过硬件解密：",
@@ -607,14 +711,15 @@ fn read_recovery_secret(prompt: &str) -> zeroize::Zeroizing<String> {
             rpassword::prompt_password(prompt).unwrap_or_else(|_| failed()),
         );
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        // The hidden-answer dialog goes through the per-user agent on Windows (W3); a piped
-        // passphrase is not accepted (it would sit in the caller's history/memory unzeroed).
-        let _ = prompt;
-        failed();
+        kv_platform::windows::prompt_secret(prompt).unwrap_or_else(|| failed())
     }
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
+    {
+        zeroize::Zeroizing::new(rpassword::prompt_password(prompt).unwrap_or_else(|_| failed()))
+    }
+    #[cfg(target_os = "macos")]
     {
         // Only fixed, localized prompts reach this dialog. Passwords return directly to the root
         // CLI through a private pipe; never through an agent, argv, environment or temporary file.
@@ -717,6 +822,18 @@ fn daemon_session_state() -> DaemonState {
         Err(_) => return DaemonState::Unknown,
         Ok(s) => s,
     };
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        if kv_platform::peer::peer_uid(stream.as_raw_fd()).ok()
+            != kv_platform::linux::LinuxHost::system()
+                .service_identity()
+                .ok()
+                .map(|i| i.0)
+        {
+            return DaemonState::Unknown;
+        }
+    }
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(1)));
     let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(1)));
     if stream
@@ -740,7 +857,7 @@ fn daemon_session_state() -> DaemonState {
 
 /// Legacy pre-daemon helpers: spawned as exactly `kv-helper` with no argv -- the daemon's
 /// `kv-helper --daemon --uid ...` argv does NOT match this pattern, deliberately.
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn legacy_helper_running() -> bool {
     matches!(
         std::process::Command::new("/usr/bin/pgrep")
@@ -748,6 +865,11 @@ fn legacy_helper_running() -> bool {
             .output(),
         Ok(output) if output.status.code() == Some(0)
     )
+}
+
+#[cfg(target_os = "linux")]
+fn legacy_helper_running() -> bool {
+    false
 }
 
 #[cfg(unix)]
@@ -769,9 +891,34 @@ fn require_no_helper_sessions() {
     ))
 }
 
+#[cfg(windows)]
+fn require_no_helper_sessions() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|e| fatal(&e.to_string()));
+    let request = tokio::time::Duration::from_secs(6);
+    let reply = runtime.block_on(async {
+        tokio::time::timeout(
+            request,
+            kv_platform::windows::control_request("sessions", Value::Null),
+        )
+        .await
+    });
+    if !matches!(reply, Ok(Ok((ref view, _))) if view["sessions"].as_u64() == Some(0)) {
+        fatal(&kv_i18n::t(
+            "请先关闭所有 KeyValet / AI 会话，并确保服务已启动",
+            "Close all KeyValet / AI sessions and ensure the service is running first",
+        ));
+    }
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn warn_if_binding_exclusion_unconfirmed(_vault: &Vault) {}
+
 /// Prints a warning when the device binding key's Time Machine exclusion can't be confirmed
 /// (`tmutil isexcluded` failed, reported `[Included]`, or the file is missing).
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn warn_if_binding_exclusion_unconfirmed(vault: &Vault) {
     if matches!(vault.binding_backup_exclusion(), Ok(Some(false))) {
         println!(
@@ -784,15 +931,71 @@ fn warn_if_binding_exclusion_unconfirmed(vault: &Vault) {
     }
 }
 
+fn check_status_args(args: &[String]) {
+    if !args.is_empty() && args != ["--summary"] {
+        fatal(&kv_i18n::t(
+            "用法：keyvalet status|protection [--summary]",
+            "Usage: keyvalet status|protection [--summary]",
+        ));
+    }
+}
+
+fn print_status(report: &Value, args: &[String]) {
+    if args == ["--summary"] {
+        print!("{}", kv_platform::protection::summary(report));
+    } else {
+        println!("{}", serde_json::to_string_pretty(report).unwrap());
+    }
+}
+
 fn enclave_command(cmd: &str, args: &[String], vault: &Vault, client: &Value) -> bool {
-    if cmd == "protection" {
-        let status = vault.protection().unwrap_or_else(|e| fatal(&e.0));
-        let mut view = serde_json::to_value(&status).unwrap();
+    if matches!(cmd, "status" | "protection") {
+        check_status_args(args);
+        let mut view = kv_platform::protection::status(vault).unwrap_or_else(|e| fatal(&e.0));
         view["binding_excluded_from_backups"] =
             json!(vault.binding_backup_exclusion().unwrap_or(None));
-        println!("{}", serde_json::to_string_pretty(&view).unwrap());
+        print_status(&view, args);
         return true;
     }
+    #[cfg(target_os = "linux")]
+    let (linux_mode, args) = {
+        use kv_platform::linux::KeyMode;
+        let explicit_software =
+            cmd == "setup-software" || (cmd == "recover-vault" && args == ["--software"]);
+        if explicit_software && kv_platform::linux::TpmDevice::system().available() {
+            fatal("TPM 2.0 is available; use setup-tpm. Software protection is only permitted explicitly on machines without TPM.");
+        }
+        let mode = if explicit_software
+            || (matches!(cmd, "rotate-recovery" | "finish-enclave-migration")
+                && vault
+                    .protection()
+                    .is_ok_and(|s| s.provider == "software_key"))
+        {
+            KeyMode::Software
+        } else {
+            KeyMode::Tpm2
+        };
+        (
+            mode,
+            if explicit_software && args == ["--software"] {
+                &args[..0]
+            } else {
+                args
+            },
+        )
+    };
+    #[cfg(target_os = "linux")]
+    let cmd = match cmd {
+        "setup-tpm" | "setup-software" => "setup-enclave",
+        "tpm-test" => "enclave-test",
+        other => other,
+    };
+    #[cfg(windows)]
+    let cmd = match cmd {
+        "setup-hello" => "setup-enclave",
+        "hello-test" => "enclave-test",
+        other => other,
+    };
     if cmd == "recovery-check" {
         if !args.is_empty() {
             fatal(&kv_i18n::t(
@@ -830,15 +1033,30 @@ fn enclave_command(cmd: &str, args: &[String], vault: &Vault, client: &Value) ->
             "This command takes no arguments; never put passphrases on the command line",
         ));
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     fatal(&kv_i18n::t(
         "Secure Enclave 仅支持 macOS",
         "Secure Enclave requires macOS",
     ));
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     {
         use kv_vault::MasterKeyProvider;
+        #[cfg(target_os = "macos")]
         let provider = kv_platform::enclave::EnclaveMasterKeyProvider;
+        #[cfg(windows)]
+        let provider = kv_platform::windows::HelloMasterKeyProvider;
+        #[cfg(target_os = "linux")]
+        let provider = kv_platform::linux::LinuxMasterKeyProvider::for_root_cli(linux_mode)
+            .unwrap_or_else(|e| fatal(&e.0));
+        #[cfg(target_os = "macos")]
+        let expected_provider = "secure_enclave";
+        #[cfg(windows)]
+        let expected_provider = "windows_hello";
+        #[cfg(target_os = "linux")]
+        let expected_provider = match linux_mode {
+            kv_platform::linux::KeyMode::Tpm2 => "tpm2",
+            kv_platform::linux::KeyMode::Software => "software_key",
+        };
         let reason = match cmd {
             "enclave-test" => kv_i18n::t("验证硬件保护（1/2）", "verify hardware protection (1/2)"),
             "recover-vault" => kv_i18n::t(
@@ -876,14 +1094,14 @@ fn enclave_command(cmd: &str, args: &[String], vault: &Vault, client: &Value) ->
                 println!(
                     "{}",
                     kv_i18n::t(
-                        "Secure Enclave 验证成功；未修改凭证库",
-                        "Secure Enclave verification passed; vault unchanged"
+                        "设备密钥验证成功；未修改凭证库",
+                        "Device key verification passed; vault unchanged"
                     )
                 );
             }
             "setup-enclave" | "migrate-to-enclave" => {
                 let status = vault.protection().unwrap_or_else(|e| fatal(&e.0));
-                if status.provider == "secure_enclave" {
+                if status.provider == expected_provider {
                     if status.legacy_key_present {
                         vault
                             .init_with_provider(
@@ -904,10 +1122,7 @@ fn enclave_command(cmd: &str, args: &[String], vault: &Vault, client: &Value) ->
                     }
                     println!(
                         "{}",
-                        kv_i18n::t(
-                            "Secure Enclave 已配置",
-                            "Secure Enclave is already configured"
-                        )
+                        kv_i18n::t("设备密钥已配置", "Device key is already configured")
                     );
                     if !status.device_binding {
                         println!(
@@ -932,6 +1147,26 @@ fn enclave_command(cmd: &str, args: &[String], vault: &Vault, client: &Value) ->
                 }
                 require_no_helper_sessions();
                 // Find a missing or mismatched legacy key before asking for a passphrase.
+                #[cfg(target_os = "linux")]
+                if matches!(status.provider, "tpm2" | "software_key") {
+                    vault
+                        .init_with_provider(&provider, &reason)
+                        .unwrap_or_else(|e| fatal(&e.0));
+                    let password = recovery_password(true);
+                    require_no_helper_sessions();
+                    audited(vault, cmd, Map::new(), client, || {
+                        vault.rotate_enclave(&provider, &password, &reason)
+                    });
+                    if let Some(metadata) =
+                        vault.master_key_metadata().unwrap_or_else(|e| fatal(&e.0))
+                    {
+                        provider
+                            .cleanup_software_keys(&metadata.enclave)
+                            .unwrap_or_else(|e| fatal(&e.0));
+                    }
+                    println!("Migrated to {expected_provider}");
+                    return true;
+                }
                 if status.provider != "uninitialized" {
                     vault.init_legacy().unwrap_or_else(|e| fatal(&e.0));
                 }
@@ -943,10 +1178,7 @@ fn enclave_command(cmd: &str, args: &[String], vault: &Vault, client: &Value) ->
                     });
                     println!(
                         "{}",
-                        kv_i18n::t(
-                            "Secure Enclave 凭证库初始化完成",
-                            "Secure Enclave vault initialized"
-                        )
+                        kv_i18n::t("设备密钥凭证库初始化完成", "Device key vault initialized")
                     );
                 } else {
                     audited(vault, cmd, Map::new(), client, || {
@@ -954,14 +1186,17 @@ fn enclave_command(cmd: &str, args: &[String], vault: &Vault, client: &Value) ->
                     });
                     println!(
                         "{}",
-                        kv_i18n::t("已迁移至 Secure Enclave", "Migrated to Secure Enclave")
+                        kv_i18n::t("已迁移至设备密钥", "Migrated to device key protection")
                     );
                 }
                 warn_if_binding_exclusion_unconfirmed(vault);
             }
             "recover-vault" => {
                 let status = vault.protection().unwrap_or_else(|e| fatal(&e.0));
-                if status.provider != "secure_enclave" {
+                if !matches!(
+                    status.provider,
+                    "secure_enclave" | "windows_hello" | "tpm2" | "software_key"
+                ) {
                     fatal(&kv_i18n::t(
                         "此凭证库没有硬件恢复信息；请先把备份的 vault.enc 放回凭证库目录",
                         "This vault has no hardware recovery information; restore the backed-up vault.enc to the vault directory first",
@@ -969,8 +1204,8 @@ fn enclave_command(cmd: &str, args: &[String], vault: &Vault, client: &Value) ->
                 }
                 require_no_helper_sessions();
                 let password = enter_recovery_password();
-                let message = kv_i18n::t("使用恢复口令恢复凭证库，并绑定本机新的 Secure Enclave 密钥？这会使原会话失效。",
-                    "Recover the vault with your passphrase and bind it to a new Secure Enclave key on this Mac? Existing sessions will be invalidated.");
+                let message = kv_i18n::t("使用恢复口令恢复凭证库，并绑定本机新的设备密钥？这会使原会话失效。",
+                    "Recover the vault with your passphrase and bind it to a new device key? Existing sessions will be invalidated.");
                 if !confirm_yes_no(
                     &message,
                     &kv_i18n::t("恢复", "Recover"),
@@ -986,17 +1221,17 @@ fn enclave_command(cmd: &str, args: &[String], vault: &Vault, client: &Value) ->
                     "{}",
                     kv_i18n::t(
                         "恢复成功，已绑定本机的新硬件密钥",
-                        "Recovered and bound to a new hardware key on this Mac"
+                        "Recovered and bound to a new device key on this machine"
                     )
                 );
                 warn_if_binding_exclusion_unconfirmed(vault);
             }
             "rotate-recovery" => {
                 let status = vault.protection().unwrap_or_else(|e| fatal(&e.0));
-                if status.provider != "secure_enclave" {
+                if status.provider != expected_provider {
                     fatal(&kv_i18n::t(
-                        "尚未启用 Secure Enclave；请先运行 keyvalet setup-enclave",
-                        "Secure Enclave is not enabled; run keyvalet setup-enclave first",
+                        "尚未配置本机设备密钥；请先运行 setup-enclave（macOS）、setup-hello（Windows）或 setup-tpm（Linux）",
+                        "No device key is configured; run setup-enclave (macOS), setup-hello (Windows) or setup-tpm (Linux) first",
                     ));
                 }
                 require_no_helper_sessions();
@@ -1035,6 +1270,14 @@ fn enclave_command(cmd: &str, args: &[String], vault: &Vault, client: &Value) ->
             }
             _ => unreachable!(),
         }
+        #[cfg(target_os = "linux")]
+        if cmd != "enclave-test" {
+            if let Some(metadata) = vault.master_key_metadata().unwrap_or_else(|e| fatal(&e.0)) {
+                provider
+                    .cleanup_software_keys(&metadata.enclave)
+                    .unwrap_or_else(|e| fatal(&e.0));
+            }
+        }
         true
     }
 }
@@ -1045,7 +1288,7 @@ fn enclave_command(cmd: &str, args: &[String], vault: &Vault, client: &Value) ->
 /// directory); `/Users/<name>` is the fallback if that lookup fails, which is right for the
 /// overwhelming majority of real Macs. Falls back to `$HOME` itself when there's no `SUDO_USER`
 /// at all (e.g. invoking `kv-cli` directly as root for testing).
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn real_home() -> std::path::PathBuf {
     if let Some(user) = std::env::var("SUDO_USER").ok().filter(|u| !u.is_empty()) {
         if let Ok(out) = std::process::Command::new("dscl")
@@ -1279,7 +1522,7 @@ fn rewrite_content(content: &str, replacements: &[(usize, String, String)]) -> S
     out
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn escape_applescript_string(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -1291,7 +1534,7 @@ fn escape_applescript_string(s: &str) -> String {
 /// is a plain synchronous binary, so pulling in tokio for one dialog call wasn't worth it.
 /// `None` means the dialog couldn't even be attempted (no `SUDO_UID`/`SUDO_GID` -- e.g. kv-cli
 /// invoked as literal root, not via `sudo` -- or `osascript` itself failed to run).
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn run_osascript_as_user(script: &str, args: &[&str]) -> Option<(i32, String)> {
     let (uid, gid) = kv_platform::user::invoking_user()?;
     use std::os::unix::process::CommandExt;
@@ -1319,7 +1562,7 @@ fn run_osascript_as_user(script: &str, args: &[&str]) -> Option<(i32, String)> {
 /// don't need to tell them apart. Items are passed as actual argv list elements, not interpolated
 /// into the script text, so arbitrary file paths/previews in them can't affect the AppleScript
 /// itself.
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn choose_from_list(prompt: &str, items: &[String]) -> Option<Vec<String>> {
     if items.is_empty() {
         return Some(Vec::new());
@@ -1358,7 +1601,7 @@ end run"#,
 /// Shows a native two-button confirmation in the invoking user's GUI session. `false` on Cancel,
 /// on a timeout, or if the dialog couldn't be shown at all -- "did nothing" is always the safe
 /// default for this tool.
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn confirm_yes_no(message: &str, yes_label: &str, no_label: &str) -> bool {
     let script = format!(
         r#"on run argv
@@ -1381,16 +1624,22 @@ end run"#,
     matches!(run_osascript_as_user(&script, &[]), Some((0, out)) if out.trim() == yes_label)
 }
 
-/// Checkbox dialogs belong to the per-user agent (W3); until then the import path is skipped
-/// with an explicit message rather than silently pretending.
+/// Windows selects each non-secret scan label in a native confirmation dialog.
 #[cfg(windows)]
-fn choose_from_list(_prompt: &str, _items: &[String]) -> Option<Vec<String>> {
-    None
+fn choose_from_list(prompt: &str, items: &[String]) -> Option<Vec<String>> {
+    let label = kv_i18n::t("选择导入", "Select for import");
+    Some(
+        items
+            .iter()
+            .filter(|item| kv_platform::windows::confirm(&format!("{prompt}\n\n{item}"), &label))
+            .cloned()
+            .collect(),
+    )
 }
 
 #[cfg(windows)]
-fn confirm_yes_no(_message: &str, _yes_label: &str, _no_label: &str) -> bool {
-    false
+fn confirm_yes_no(message: &str, yes_label: &str, _no_label: &str) -> bool {
+    kv_platform::windows::confirm(message, yes_label)
 }
 
 /// The slice of `catalog.json` `keyvalet scan` needs to configure an imported credential for the
@@ -1540,16 +1789,6 @@ fn scan(args: &[String], vault: &Vault, client: &Value) {
         return;
     }
 
-    if cfg!(windows) {
-        println!(
-            "{}",
-            kv_i18n::t(
-                "检测到可导入的密钥，但图形导入对话框要到 W3（每用户 agent）才可用；现在请用上面的建议命令手动处理。",
-                "Importable secrets were found, but the selection dialog needs the per-user agent (W3); for now handle them by hand with the suggested commands above."
-            )
-        );
-        return;
-    }
     let items: Vec<String> = importable
         .iter()
         .enumerate()
@@ -1563,8 +1802,8 @@ fn scan(args: &[String], vault: &Vault, client: &Value) {
         println!(
             "{}",
             kv_i18n::t(
-                "没能弹出选择窗口（没有通过 sudo 调用，或 osascript 失败），跳过导入；可以用上面建议的命令手动处理。",
-                "Couldn't show the selection dialog (not invoked via sudo, or osascript failed); skipping import. Handle them by hand with the suggested commands above."
+                "无法打开交互式选择界面，跳过导入；可以用上面建议的命令手动处理。",
+                "Couldn't open the interactive selection; skipping import. Handle them by hand with the suggested commands above."
             )
         );
         return;

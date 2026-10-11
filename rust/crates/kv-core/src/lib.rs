@@ -14,6 +14,6 @@ pub use dispatch::{
 };
 pub use kv_platform::{AuthOutcome, Authenticator, Confirmer};
 pub use settings::{
-    is_loosening, parse_mode, read_settings, remember_active, remember_until, stricter,
-    write_settings, GrantMode, Settings, GRANT_MODES,
+    compare_and_write_settings, is_loosening, parse_mode, read_settings, remember_active,
+    remember_until, stricter, write_settings, GrantMode, Settings, GRANT_MODES,
 };

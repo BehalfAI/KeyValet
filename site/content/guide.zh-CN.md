@@ -11,7 +11,11 @@ KeyValet 是一个运行在 macOS 本机的「AI agent 凭证代理」。Claude 
 
 [安全模型](https://github.com/KeyValet/KeyValet/blob/main/SECURITY.md)
 
-> **状态**：早期版本（0.1），仅支持 macOS。界面支持英文和简体中文，跟随 macOS 系统语言；也可以用 `KEYVALET_LANG=en|zh` 指定。
+> **状态**：macOS 已有发行版；Windows 11 当前为开发预览，Hello、服务与安装器代码已实现，正式签名包和真机验证尚待完成，见 [Windows 支持记录](https://github.com/KeyValet/KeyValet/blob/main/docs/windows.md)。本指南介绍 macOS 发行版。界面支持英文和简体中文，也可以用 `KEYVALET_LANG=en|zh` 指定。
+
+Linux 本地版已实现 systemd 服务、polkit 认证和 TPM 2.0 保护；无 TPM 时允许显式开启软件
+保护。当前从源码运行 `sh scripts/install.sh` 安装，详见
+[Linux 安装、SSH 审批与恢复](https://github.com/KeyValet/KeyValet/blob/main/docs/linux.md)。
 
 它能做的：
 
@@ -310,6 +314,26 @@ keyvalet grant-mode all                       # 切换授权范围（per-credent
 ```
 
 每条命令都会以 `sudo -k` 运行，也就是每次都要输入密码。访问 vault 的命令还需要系统认证来解锁 Secure Enclave 密钥。
+
+### 密钥保护与 TPM 状态
+
+安装器会醒目显示实际配置的保护方案、硬件证据、本机 TPM 检测结果和密钥使用授权。
+之后无需解锁即可查看：
+
+```sh
+keyvalet status                 # JSON；protection 是别名
+keyvalet status --summary       # 可读的保护摘要
+```
+
+`credential_status` 和插件的 status 命令在锁定会话中也返回 `vault_protection`，不会触发
+指纹/PIN 认证或凭证授权。macOS/Linux CLI 仍需 sudo；Windows 的凭证库主人可以直接查询
+服务，无需 UAC。helper 不可用时显示 `protection_error`，不会猜测硬件保护。
+
+Secure Enclave 是硬件保护，但不是 TPM。Windows Hello 将系统报告的 TPM 证明和 `unknown`
+明确分开；Linux 的设备节点不能证明物理硬件保护，显式软件模式也会直接标明。
+TPM 可以是独立、集成、固件或虚拟实现，无法确认实现类型时显示 unknown。
+已配置方案和当前设备检测分别展示；status 不执行密钥操作。完整分类和字段解释见
+[密钥保护与 TPM 说明](https://github.com/KeyValet/KeyValet/blob/main/docs/key-protection.zh-CN.md)。
 
 ### Secure Enclave 主密钥
 

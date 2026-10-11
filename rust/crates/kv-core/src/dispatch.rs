@@ -3,8 +3,8 @@
 
 use crate::auth_gate::touch_id_gate;
 use crate::settings::{
-    is_loosening, parse_mode, read_settings, remember_active, remember_until, stricter,
-    write_settings, GrantMode, Settings, GRANT_MODES,
+    compare_and_write_settings, is_loosening, parse_mode, read_settings, remember_active,
+    remember_until, stricter, GrantMode, Settings, GRANT_MODES,
 };
 use kv_ipc::{clean_purpose, Op, Response};
 use kv_platform::{Authenticator, Confirmer};
@@ -92,6 +92,16 @@ pub struct ClientContext {
     /// Random ID of the MCP server process (i.e. one agent session).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
+    /// How the UI/hardware channel behind this session was established: "signed" (verified
+    /// agent signature), "unsigned" (allow-unsigned marker), "none" (no agent broker). Set by
+    /// the helper, never accepted from the client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_trust: Option<String>,
+    /// Captured from the socket by the helper, never accepted from handshake JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_uid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_pid: Option<u32>,
 }
 
 pub fn cred_key(ty: &str, name: &str) -> kv_vault::Result<String> {
@@ -208,6 +218,15 @@ impl<G: AuthorizeGate> SessionAuth<G> {
         }
     }
 
+    fn tighten_mode(&mut self, settings: &Settings) -> bool {
+        let current = self.mode.unwrap_or(GrantMode::PerCredential);
+        if stricter(current, Some(stricter(settings.grant_mode, self.requested))) == current {
+            return false;
+        }
+        self.apply_mode(settings);
+        true
+    }
+
     fn snapshot(&self) -> AuthSnapshot {
         let mut grants: Vec<String> = self.grants.iter().cloned().collect();
         grants.sort();
@@ -292,15 +311,20 @@ fn operation_binding(vault: &Vault, op: Op, p: &JsonMap) -> kv_vault::Result<Str
         &get_str(p, "type").unwrap_or_default(),
         &get_str(p, "name").unwrap_or_default(),
     )?;
+    Ok(operation_binding_for(&record, op, p))
+}
+
+fn operation_binding_for(record: &CredentialRecord, op: Op, p: &JsonMap) -> String {
     let mut bound = p.clone();
     bound.retain(|_, v| !v.is_null());
     bound.insert(
         "__keyvalet_context".into(),
         json!({
             "updated_at": record.updated_at, "generation": record.generation, "http": record.http,
+            "kind": record.kind_or_static(), "config": record.config, "attributes": record.attributes,
         }),
     );
-    Ok(kv_ipc::operation_digest(op.as_str(), &bound))
+    kv_ipc::operation_digest(op.as_str(), &bound)
 }
 
 /// Operations a credential kind can perform. Others are refused before any prompt, so a prompt
@@ -475,6 +499,7 @@ async fn grant_credential<G: AuthorizeGate>(
     if !per_use && (auth.grant_all || auth.grants.contains(&key)) {
         return Ok(json!({"granted": key, "already": true}));
     }
+    let approval_context = operation_binding_for(&record, Op::Grant, p);
     // Untrusted clients supply the operation, never its trusted display text or digest.
     let operation = get_str(p, "operation");
     let approved_params = p.get("request").and_then(Value::as_object);
@@ -509,7 +534,8 @@ async fn grant_credential<G: AuthorizeGate>(
             } else {
                 session_grant_description(&record)
             };
-            Some((operation_binding(vault, op, request)?, op, description))
+            // Describe and bind the same snapshot, even if another session replaces the record.
+            Some((operation_binding_for(&record, op, request), op, description))
         }
         (None, None) if !per_use => None,
         _ => {
@@ -525,6 +551,19 @@ async fn grant_credential<G: AuthorizeGate>(
     };
     let reason = crate::prompt::credential_grant(&key, per_use, Some(&description));
     auth.authorize(&reason).await.map_err(VaultError)?;
+    if auth.tighten_mode(&read_settings(&vault.dir)) {
+        return Err(VaultError::new(
+            "授权策略在确认期间被修改，请重试",
+            "Authorization policy changed during approval; please retry",
+        ));
+    }
+    let (_, _, current_record) = vault.get_record(&ty, &name)?;
+    if operation_binding_for(&current_record, Op::Grant, p) != approval_context {
+        return Err(VaultError::new(
+            "凭证在确认期间被修改，请重新授权",
+            "Credential changed during approval; please authorize again",
+        ));
+    }
     if per_use {
         let (binding, op, _) = binding.expect("per-use requires a request");
         auth.add_pending(key.clone(), binding, op);
@@ -539,10 +578,11 @@ fn settings_view(s: &Settings, auth: Option<&AuthSnapshot>) -> Value {
     let remembered_until = if remember_active(s, now) {
         match s.remember_until {
             Some(u) if u == crate::settings::MAX_SAFE_INTEGER => json!("forever"),
-            Some(u) => json!(chrono::DateTime::<chrono::Utc>::from(
-                std::time::UNIX_EPOCH + std::time::Duration::from_millis(u as u64)
-            )
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+            Some(u) => json!(
+                chrono::DateTime::<chrono::Utc>::from_timestamp_millis(u as i64)
+                    .filter(|date| (0..=9999).contains(&chrono::Datelike::year(date)))
+                    .map(|date| date.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+            ),
             None => Value::Null,
         }
     } else {
@@ -613,7 +653,7 @@ async fn settings_op<G: AuthorizeGate, C: Confirmer>(
             remember_hours: current.remember_hours,
             remember_until: None,
         };
-        write_settings(&vault.dir, &next)?;
+        commit_settings(vault, &current, &next, auth.as_deref_mut())?;
         if let Some(a) = auth.as_deref_mut() {
             a.apply_mode(&next);
         }
@@ -690,7 +730,7 @@ async fn settings_op<G: AuthorizeGate, C: Confirmer>(
     } else if let Some(u) = next.remember_until {
         next.remember_until = Some(u.min(remember_until(hours, now_ms()))); // shortening the duration also shortens the current window
     }
-    write_settings(&vault.dir, &next)?;
+    commit_settings(vault, &current, &next, auth.as_deref_mut())?;
     if let Some(a) = auth.as_deref_mut() {
         a.apply_mode(&next);
     }
@@ -703,6 +743,24 @@ async fn settings_op<G: AuthorizeGate, C: Confirmer>(
         ),
     );
     Ok(v)
+}
+
+fn commit_settings<G: AuthorizeGate>(
+    vault: &Vault,
+    expected: &Settings,
+    next: &Settings,
+    auth: Option<&mut SessionAuth<G>>,
+) -> kv_vault::Result<()> {
+    if compare_and_write_settings(&vault.dir, expected, next)? {
+        return Ok(());
+    }
+    if let Some(auth) = auth {
+        auth.tighten_mode(&read_settings(&vault.dir));
+    }
+    Err(VaultError::new(
+        "授权设置在操作期间已修改，请重试",
+        "Authorization settings changed during the operation; please retry",
+    ))
 }
 
 fn merge_note(v: &mut Value, note: String) {
@@ -1227,7 +1285,10 @@ async fn run<G: AuthorizeGate, C: Confirmer>(
                 &read_settings(&vault.dir),
                 auth.as_deref().map(SessionAuth::snapshot).as_ref(),
             );
-            view["vault_protection"] = serde_json::to_value(vault.protection()?)?;
+            view["vault_protection"] = kv_platform::protection::status(vault)?;
+            if let Some(trust) = ctx.agent_trust.clone() {
+                view["agent_trust"] = serde_json::Value::String(trust);
+            }
             Ok(view)
         }
         Op::AuditQuery => Ok(audit_query(vault, p, ctx)),
@@ -1420,12 +1481,7 @@ pub async fn dispatch<G: AuthorizeGate, C: Confirmer>(
         // A mode tightened elsewhere (the terminal CLI, another session) applies to this live
         // session from its next request, revoking gateway tokens like a local change would.
         // Loosening still needs this session's own authenticated settings change.
-        if let Some(current) = a.mode {
-            let latest = read_settings(&vault.dir);
-            if stricter(current, Some(stricter(latest.grant_mode, a.requested))) != current {
-                a.apply_mode(&latest);
-            }
-        }
+        a.tighten_mode(&read_settings(&vault.dir));
     }
     if op.grant_required() {
         if let Some(a) = auth.as_deref_mut() {
@@ -1483,6 +1539,29 @@ pub async fn dispatch<G: AuthorizeGate, C: Confirmer>(
 #[cfg(test)]
 mod pending_approval_tests {
     use super::*;
+
+    #[test]
+    fn settings_status_handles_unrepresentable_remember_timestamps_without_panicking() {
+        let mut settings = Settings {
+            grant_mode: GrantMode::Remember,
+            remember_hours: 8.0,
+            remember_until: None,
+        };
+        for timestamp in [1e300, i64::MAX as f64, 253_402_300_800_000.0, f64::INFINITY] {
+            settings.remember_until = Some(timestamp);
+            assert!(settings_view(&settings, None)["remembered_until"].is_null());
+        }
+        settings.remember_until = Some(4_102_444_800_000.0);
+        assert_eq!(
+            settings_view(&settings, None)["remembered_until"],
+            "2100-01-01T00:00:00.000Z"
+        );
+        settings.remember_until = Some(crate::settings::MAX_SAFE_INTEGER);
+        assert_eq!(
+            settings_view(&settings, None)["remembered_until"],
+            "forever"
+        );
+    }
 
     struct NoGate;
     impl AuthorizeGate for NoGate {

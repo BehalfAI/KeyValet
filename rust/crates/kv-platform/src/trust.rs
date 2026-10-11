@@ -45,7 +45,9 @@ fn untrusted_reason_hops(p: &Path, hops: u8) -> Option<String> {
                 &format!("{shown} is not owned by root"),
             ));
         }
-        if st.mode() & 0o022 != 0 {
+        // Linux reports symlinks as 0777; those bits cannot grant write access to a
+        // symlink. Its owner, containing directory and resolved target are checked below.
+        if !st.file_type().is_symlink() && st.mode() & 0o022 != 0 {
             return Some(kv_i18n::t(
                 &format!("{shown} 可被 group/other 写入"),
                 &format!("{shown} is writable by group/other"),
@@ -214,6 +216,16 @@ mod tests {
             }
         }
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_root_owned_0777_symlinks_do_not_grant_write_access() {
+        if let Ok(st) = fs::symlink_metadata("/bin") {
+            if st.uid() == 0 && st.file_type().is_symlink() {
+                assert_eq!(untrusted_reason(Path::new("/bin/true")), None);
+            }
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -225,9 +237,8 @@ mod windows_impl {
         ConvertStringSidToSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT,
     };
     use windows::Win32::Security::{
-        CreateWellKnownSid, EqualSid, GetAce, IsValidSid, WinAuthenticatedUserSid,
-        WinBuiltinAdministratorsSid, WinBuiltinUsersSid, WinInteractiveSid, WinLocalSystemSid,
-        WinWorldSid, ACCESS_ALLOWED_ACE, ACL, DACL_SECURITY_INFORMATION,
+        CreateWellKnownSid, EqualSid, GetAce, IsValidSid, WinBuiltinAdministratorsSid,
+        WinLocalSystemSid, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION,
         OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, WELL_KNOWN_SID_TYPE,
     };
 
@@ -236,8 +247,9 @@ mod windows_impl {
         | 0x1000_0000                  // GENERIC_ALL
         | 0x0002                       // FILE_WRITE_DATA / FILE_ADD_FILE
         | 0x0004                       // FILE_APPEND_DATA / FILE_ADD_SUBDIRECTORY
-        | 0x0008                       // FILE_WRITE_EA
-        | 0x0010                       // FILE_EXECUTE (can overwrite via scripts is still covered by the other bits)
+        | 0x0010                       // FILE_WRITE_EA (FILE_READ_EA is 0x0008)
+        | 0x0100                       // FILE_WRITE_ATTRIBUTES
+        | 0x0040                       // FILE_DELETE_CHILD (directories)
         | 0x0001_0000                  // DELETE
         | 0x0004_0000                  // WRITE_DAC
         | 0x0008_0000; // WRITE_OWNER
@@ -304,27 +316,23 @@ mod windows_impl {
         .collect()
     }
 
-    /// SIDs that must never get tamper rights: Everyone, Authenticated Users, Users, Interactive.
-    fn untrusted_principal_sids() -> Vec<Vec<u8>> {
-        [
-            WinWorldSid,
-            WinAuthenticatedUserSid,
-            WinBuiltinUsersSid,
-            WinInteractiveSid,
-        ]
-        .into_iter()
-        .filter_map(well_known_sid)
-        .collect()
-    }
-
     /// See the module docs: file exists and is a regular file or directory, owner is a privileged
     /// principal, and no DACL entry grants tamper rights to a well-known unprivileged group.
     pub fn untrusted_reason(p: &Path) -> Option<String> {
-        let meta = match std::fs::metadata(p) {
+        check_path(p, BAD_MASK)
+    }
+
+    fn check_path(p: &Path, bad_mask: u32) -> Option<String> {
+        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::fs::MetadataExt;
+        let meta = match std::fs::symlink_metadata(p) {
             Ok(m) => m,
             Err(_) => return Some(kv_i18n::t("文件不存在", "file does not exist")),
         };
         let shown = p.display();
+        if meta.file_attributes() & 0x400 != 0 {
+            return Some(format!("{shown} is a reparse point"));
+        }
         if !meta.is_file() && !meta.is_dir() {
             return Some(kv_i18n::t(
                 &format!("{shown} 不是普通文件或目录"),
@@ -333,8 +341,7 @@ mod windows_impl {
         }
         let wide: Vec<u16> = p
             .as_os_str()
-            .to_string_lossy()
-            .encode_utf16()
+            .encode_wide()
             .chain(std::iter::once(0))
             .collect();
         unsafe {
@@ -377,29 +384,151 @@ mod windows_impl {
                     &format!("{shown} has a NULL DACL granting everyone access"),
                 ));
             }
-            let bad = untrusted_principal_sids();
+            let trusted = trusted_owner_sids();
             for i in 0..(*dacl).AceCount as u32 {
                 let mut ace: *mut core::ffi::c_void = std::ptr::null_mut();
                 if GetAce(dacl, i, &mut ace).is_err() || ace.is_null() {
+                    return Some(format!("cannot read an ACE on {shown}"));
+                }
+                let header = &*(ace as *const ACE_HEADER);
+                if header.AceFlags & 0x08 != 0 {
+                    continue; // INHERIT_ONLY_ACE does not apply to this object.
+                }
+                // Deny ACEs cannot grant access. Reject unfamiliar allow/callback/object ACEs
+                // rather than interpreting a different layout as ACCESS_ALLOWED_ACE.
+                if matches!(header.AceType, 1 | 6 | 10 | 12) {
                     continue;
                 }
-                let ace = ace as *const ACCESS_ALLOWED_ACE;
-                if (*ace).Header.AceType != 0 {
-                    continue; // only ACCESS_ALLOWED_ACE
+                if header.AceType != 0 {
+                    return Some(format!("unsupported ACE on {shown}"));
                 }
-                if (*ace).Mask & BAD_MASK == 0 {
+                let ace = ace as *const ACCESS_ALLOWED_ACE;
+                if (*ace).Mask & bad_mask == 0 {
                     continue;
                 }
                 let sid = PSID(&(*ace).SidStart as *const u32 as _);
-                if bad.iter().any(|s| sid_is(s, sid)) {
+                if !trusted.iter().any(|s| sid_is(s, sid)) {
                     return Some(kv_i18n::t(
                         &format!("{shown} 可被普通用户写入"),
-                        &format!("{shown} is writable by an unprivileged group"),
+                        &format!("{shown} is writable by an unprivileged principal"),
                     ));
                 }
             }
         }
         None
+    }
+
+    pub fn trusted_path(p: &Path) -> bool {
+        p.ancestors().enumerate().all(|(n, path)| {
+            // Creating unrelated children in C:\ cannot replace a protected Program Files.
+            check_path(path, if n == 0 { BAD_MASK } else { BAD_MASK & !0x06 }).is_none()
+        })
+    }
+
+    /// Authenticode check: the file's signature must chain to a trusted root
+    /// (`WINTRUST_ACTION_GENERIC_VERIFY_V2`, including whole-chain revocation) and its *leaf*
+    /// certificate's CN must equal
+    /// `publisher_cn` exactly. This is the Windows counterpart to `verify_peer_code`'s
+    /// designated-requirement check on macOS.
+    pub fn verify_publisher(path: &Path, publisher_cn: &str) -> Result<(), String> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::Security::Cryptography::{
+            szOID_COMMON_NAME, CertGetNameStringW, CERT_NAME_ATTR_TYPE,
+        };
+        use windows::Win32::Security::WinTrust::{
+            WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData, WinVerifyTrust,
+            WINTRUST_DATA, WINTRUST_FILE_INFO, WTD_CHOICE_FILE, WTD_REVOKE_WHOLECHAIN,
+            WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UICONTEXT_EXECUTE, WTD_UI_NONE,
+        };
+        // WINTRUST_ACTION_GENERIC_VERIFY_V2
+        let mut action = windows::core::GUID::from_u128(0x00aa_c56b_cd44_11d0_8cc2_00c0_4fc2_95ee);
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut file = WINTRUST_FILE_INFO {
+            cbStruct: std::mem::size_of::<WINTRUST_FILE_INFO>() as u32,
+            pcwszFilePath: PCWSTR(wide.as_ptr()),
+            ..Default::default()
+        };
+        let mut data = WINTRUST_DATA {
+            cbStruct: std::mem::size_of::<WINTRUST_DATA>() as u32,
+            dwUIChoice: WTD_UI_NONE,
+            fdwRevocationChecks: WTD_REVOKE_WHOLECHAIN,
+            dwUnionChoice: WTD_CHOICE_FILE,
+            dwStateAction: WTD_STATEACTION_VERIFY,
+            dwUIContext: WTD_UICONTEXT_EXECUTE,
+            ..Default::default()
+        };
+        data.Anonymous.pFile = &mut file;
+        unsafe {
+            let rc = WinVerifyTrust(
+                windows::Win32::Foundation::HWND::default(),
+                &mut action,
+                &mut data as *mut _ as _,
+            );
+            let signer_cn = {
+                let prov = WTHelperProvDataFromStateData(data.hWVTStateData);
+                if prov.is_null() {
+                    None
+                } else {
+                    let sgnr = WTHelperGetProvSignerFromChain(prov, 0, false, 0);
+                    if sgnr.is_null() || (*sgnr).csCertChain == 0 {
+                        None
+                    } else {
+                        let cert = (*(*sgnr).pasCertChain).pCert;
+                        let mut name = [0u16; 256];
+                        let n = CertGetNameStringW(
+                            cert,
+                            CERT_NAME_ATTR_TYPE,
+                            0,
+                            Some(szOID_COMMON_NAME.0 as *const _),
+                            Some(&mut name),
+                        );
+                        (n > 1 && n as usize <= name.len())
+                            .then(|| String::from_utf16_lossy(&name[..(n - 1) as usize]))
+                    }
+                }
+            };
+            // Always release the state data.
+            data.dwStateAction = WTD_STATEACTION_CLOSE;
+            let _ = WinVerifyTrust(
+                windows::Win32::Foundation::HWND::default(),
+                &mut action,
+                &mut data as *mut _ as _,
+            );
+            if rc != 0 {
+                return Err(format!("signature check failed ({rc:#010x})"));
+            }
+            match signer_cn {
+                Some(cn) if cn == publisher_cn => Ok(()),
+                Some(cn) => Err(format!("signed by {cn}, expected {publisher_cn}")),
+                None => Err("signature has no readable signer".to_string()),
+            }
+        }
+    }
+
+    /// Reads `owner.sid`: the file must pass the same trust check as the helper binary (an
+    /// attacker who can rewrite it could nominate themselves as the owner), then parse the text
+    /// SID it contains.
+    pub fn load_owner_sid(path: &Path) -> Result<Vec<u8>, String> {
+        if let Some(reason) = untrusted_reason(path) {
+            return Err(kv_i18n::t(
+                &format!("owner.sid 不可信：{reason}"),
+                &format!("owner.sid is not trustworthy: {reason}"),
+            ));
+        }
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        crate::peer::sid_from_string(text.trim())
+            .ok_or_else(|| format!("{} does not contain a valid SID", path.display()))
+    }
+
+    /// The unsigned-agent escape hatch exists and is ACL-trusted (a user-writable marker would
+    /// defeat the signature check for anyone).
+    pub fn allow_unsigned_agent(marker: &Path) -> bool {
+        marker.exists() && untrusted_reason(marker).is_none()
     }
 
     /// Whether the current process token is elevated (UAC) — the Windows analogue of `getuid()==0`.
@@ -413,6 +542,15 @@ mod windows_impl {
             if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
                 return false;
             }
+            struct Token(windows::Win32::Foundation::HANDLE);
+            impl Drop for Token {
+                fn drop(&mut self) {
+                    unsafe {
+                        let _ = windows::Win32::Foundation::CloseHandle(self.0);
+                    }
+                }
+            }
+            let _token = Token(token);
             let mut elevation = TOKEN_ELEVATION::default();
             let mut len = 0u32;
             GetTokenInformation(
@@ -440,7 +578,7 @@ mod windows_impl {
                 "must run elevated (or be started by the KeyValetHelper service)",
             ));
         }
-        if self_path != expected_path {
+        if !same_file_path(self_path, expected_path) {
             return Err(kv_i18n::t(
                 &format!("必须从安装目录运行：{}", expected_path.display()),
                 &format!(
@@ -450,14 +588,28 @@ mod windows_impl {
             ));
         }
         for f in std::iter::once(self_path).chain(extra_files.iter().map(PathBuf::as_path)) {
-            if let Some(reason) = untrusted_reason(f) {
-                return Err(kv_i18n::t(
-                    &format!("{reason}，拒绝以管理员身份运行"),
-                    &format!("{reason}; refusing to run elevated"),
-                ));
+            for (n, path) in f.ancestors().enumerate() {
+                if let Some(reason) =
+                    check_path(path, if n == 0 { BAD_MASK } else { BAD_MASK & !0x06 })
+                {
+                    return Err(kv_i18n::t(
+                        &format!("{reason}，拒绝以管理员身份运行"),
+                        &format!("{reason}; refusing to run elevated"),
+                    ));
+                }
             }
         }
         Ok(())
+    }
+
+    pub fn same_file_path(a: &Path, b: &Path) -> bool {
+        match (a.canonicalize(), b.canonicalize()) {
+            (Ok(a), Ok(b)) => a
+                .as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&b.as_os_str().to_string_lossy()),
+            _ => false,
+        }
     }
 
     #[cfg(test)]
@@ -483,14 +635,57 @@ mod windows_impl {
         }
 
         #[test]
+        fn unsigned_fixture_never_verifies_as_our_publisher() {
+            let temp = tempfile::tempdir().unwrap();
+            let binary = temp.path().join("unsigned.exe");
+            std::fs::write(&binary, b"MZ unsigned synthetic fixture").unwrap();
+            assert!(verify_publisher(&binary, "Simvito Limited").is_err());
+            assert!(!allow_unsigned_agent(&temp.path().join("missing-marker")));
+        }
+
+        #[test]
+        fn read_and_execute_rights_do_not_count_as_tampering() {
+            assert_eq!(BAD_MASK & 0x0012_00a9, 0); // FILE_GENERIC_READ | FILE_GENERIC_EXECUTE
+            assert_ne!(BAD_MASK & 0x0010, 0); // writing extended attributes is tampering
+        }
+
+        #[test]
         fn a_system_binary_is_trusted() {
             let notepad = Path::new(r"C:\Windows\System32\notepad.exe");
             if notepad.exists() {
                 assert_eq!(untrusted_reason(notepad), None);
             }
         }
+
+        #[test]
+        #[ignore = "Signed-file integration check: cargo test -p kv-platform verify_publisher_checks -- --ignored"]
+        fn verify_publisher_checks_signature_and_cn() {
+            // Windows' own binaries are Microsoft-signed on a stock image; if the runner image
+            // strips signatures, kernel32.dll is the fallback.
+            for candidate in [
+                r"C:\Windows\System32\notepad.exe",
+                r"C:\Windows\System32\kernel32.dll",
+            ] {
+                let p = Path::new(candidate);
+                if !p.exists() {
+                    continue;
+                }
+                if verify_publisher(p, "Simvito Limited").is_ok() {
+                    panic!("{candidate} must not verify against our publisher CN");
+                }
+                if verify_publisher(p, "Microsoft Windows").is_ok()
+                    || verify_publisher(p, "Microsoft Corporation").is_ok()
+                {
+                    return; // signed and the CN check distinguishes publishers
+                }
+            }
+            panic!("no signed system binary available for the signature test");
+        }
     }
 }
 
 #[cfg(windows)]
-pub use windows_impl::{untrusted_reason, verify_root_environment};
+pub use windows_impl::{
+    allow_unsigned_agent, load_owner_sid, same_file_path, trusted_path, untrusted_reason,
+    verify_publisher, verify_root_environment,
+};

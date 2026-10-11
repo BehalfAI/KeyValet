@@ -2,10 +2,12 @@
 //! (RFC 7523 JWT bearer grant). Direct port of src/helper/protocols/google-sa.ts.
 
 use crate::check::{now_sec, opt_str, str_list, str_req};
+use crate::expiry::{expires_at, is_fresh, iso_millis};
 use crate::http::{assert_https_url, obj, post_form, remote_error};
 use crate::jwt::sign_jwt;
 use kv_vault::{Kind, Vault, VaultError};
 use serde_json::{json, Value};
+use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SaConfig {
@@ -22,7 +24,7 @@ pub struct SaConfig {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct CachedToken {
-    access_token: String,
+    access_token: Zeroizing<String>,
     expires_at: i64,
 }
 
@@ -142,10 +144,10 @@ pub async fn service_account_token(
         .state
         .as_ref()
         .and_then(|s| s.get("tokens"))
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .and_then(|v| serde::Deserialize::deserialize(v).ok())
         .unwrap_or_default();
     if let Some(hit) = cache.get(&cache_key) {
-        if !p.force && (hit.expires_at - 60_000) > now_ms() {
+        if !p.force && is_fresh(hit.expires_at, 60_000) {
             return Ok(serde_json::to_value(out(hit, &cache_key, &cfg)).unwrap());
         }
     }
@@ -173,7 +175,12 @@ pub async fn service_account_token(
         .and_then(|s| s.get("private_key"))
         .map(String::as_str)
         .unwrap_or("");
-    let assertion = sign_jwt("RS256", private_key, claims.as_object().unwrap(), &header)?;
+    let assertion = Zeroizing::new(sign_jwt(
+        "RS256",
+        private_key,
+        claims.as_object().unwrap(),
+        &header,
+    )?);
     let r = post_form(
         &cfg.token_uri,
         &[
@@ -193,14 +200,10 @@ pub async fn service_account_token(
     if r.status >= 300 {
         return Err(remote_error(&host, &r));
     }
-    let expires_in = j
-        .get("expires_in")
-        .and_then(Value::as_f64)
-        .filter(|v| v.is_finite() && *v > 0.0)
-        .unwrap_or(3600.0);
+    let expiry = expires_at(j.get("expires_in"), Some(3600))?.unwrap();
     let tok = CachedToken {
-        access_token: access_token.to_string(),
-        expires_at: now_ms() + (expires_in * 1000.0) as i64,
+        access_token: Zeroizing::new(access_token.to_string()),
+        expires_at: expiry,
     };
 
     let gen = record.generation.clone();
@@ -216,7 +219,7 @@ pub async fn service_account_token(
                 .state
                 .as_ref()
                 .and_then(|s| s.get("tokens"))
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .and_then(|v| serde::Deserialize::deserialize(v).ok())
                 .unwrap_or_default();
             tokens.insert(cache_key_clone, tok_clone);
             if tokens.len() > MAX_CACHE {
@@ -231,44 +234,32 @@ pub async fn service_account_token(
                     tokens.remove(&k);
                 }
             }
-            let mut state = rec
-                .state
-                .clone()
-                .unwrap_or(json!({}))
-                .as_object()
-                .cloned()
-                .unwrap_or_default();
-            state.insert("tokens".into(), serde_json::to_value(&tokens).unwrap());
-            rec.state = Some(Value::Object(state));
+            rec.set_state_field("tokens", serde_json::to_value(&tokens).unwrap());
         },
     )?;
     Ok(serde_json::to_value(out(&tok, &cache_key, &cfg)).unwrap())
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 struct SaTokenOut {
     access_token: String,
     token_type: &'static str,
-    expires_at: String,
+    expires_at: Option<String>,
     scope: String,
     account: String,
 }
 
+impl Drop for SaTokenOut {
+    fn drop(&mut self) {
+        self.access_token.zeroize();
+    }
+}
+
 fn out(tok: &CachedToken, scope: &str, cfg: &SaConfig) -> SaTokenOut {
     SaTokenOut {
-        access_token: tok.access_token.clone(),
+        access_token: tok.access_token.to_string(),
         token_type: "Bearer",
-        expires_at: chrono::DateTime::<chrono::Utc>::from(
-            std::time::UNIX_EPOCH + std::time::Duration::from_millis(tok.expires_at.max(0) as u64),
-        )
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        expires_at: iso_millis(tok.expires_at),
         scope: scope.to_string(),
         account: cfg
             .subject

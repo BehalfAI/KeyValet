@@ -2,6 +2,7 @@
 name = "kv-cli"
 version = "0.2.1"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [[bin]]
@@ -19,6 +20,9 @@ serde_json = "1"
 rpassword = "7"
 libc = "0.2"
 zeroize = "1"
+
+[target.'cfg(windows)'.dependencies]
+tokio = { version = "1", features = ["rt", "net", "io-util", "time"] }
 
 [dev-dependencies]
 tempfile = "3"

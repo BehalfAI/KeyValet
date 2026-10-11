@@ -2,14 +2,14 @@
 //! local user it was installed for, and accepts the per-user agent's connection after code
 //! verification. Holds no vault key while idle.
 
-use crate::{fatal, serve, MAX_CLIENTS};
+use crate::{control, fatal, serve, MAX_CLIENTS};
 use kv_platform::agent::{
     accept_agent, AgentAuthenticator, AgentConfirmer, AgentHub, AgentMasterKeyProvider,
 };
 use kv_platform::paths::{AGENT_SOCKET, HELPER_BIN, HELPER_SOCKET, RUN_DIR, VAULT_DIR};
 use kv_platform::trust::verify_root_environment;
 use kv_vault::Vault;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Map};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -89,30 +89,6 @@ fn bind(path: &str) -> UnixListener {
     listener
 }
 
-/// Answers a uid-0 control connection: `{"op":"control","command":"sessions"}` ->
-/// `{"sessions":N}`; anything else closes the connection.
-async fn control(stream: UnixStream, sessions: Arc<AtomicUsize>) {
-    let (mut reader, mut writer) = tokio::io::split(stream);
-    let mut line = String::new();
-    let n = tokio::io::AsyncBufReadExt::read_line(
-        &mut tokio::io::BufReader::new(&mut reader),
-        &mut line,
-    )
-    .await;
-    let ok = matches!(n, Ok(1..)) && {
-        let v: Value = serde_json::from_str(line.trim()).unwrap_or(Value::Null);
-        v.get("op").and_then(Value::as_str) == Some("control")
-            && v.get("command").and_then(Value::as_str) == Some("sessions")
-    };
-    if ok {
-        let reply = json!({"sessions": sessions.load(Ordering::SeqCst)});
-        let mut bytes = serde_json::to_vec(&reply).unwrap();
-        bytes.push(b'\n');
-        let _ = writer.write_all(&bytes).await;
-    }
-    let _ = writer.shutdown().await;
-}
-
 #[tokio::main]
 pub async fn run(uid: u32) {
     if unsafe { libc::getuid() } != 0 {
@@ -183,7 +159,7 @@ pub async fn run(uid: u32) {
                         if let Some(stream) =
                             accept_agent(stream, uid, |r| audit_reject(r.to_string())).await
                         {
-                            hub.register(uid, stream);
+                            hub.register(uid, stream, "signed");
                         }
                     }
                     Err(_) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
@@ -262,15 +238,17 @@ pub async fn run(uid: u32) {
                                 if let Ok(writer) = dup_stream(&stream) {
                                     let provider = Arc::new(AgentMasterKeyProvider {
                                         hub: hub.clone(),
-                                        uid,
+                                        key: uid,
                                     });
                                     let _ = serve(
                                         stream,
                                         writer,
                                         vault,
                                         Some(uid),
-                                        AgentAuthenticator { hub: hub.clone(), uid },
-                                        AgentConfirmer { hub, uid },
+                                        // macOS only ever registers a signature-verified agent.
+                                        "signed",
+                                        AgentAuthenticator { hub: hub.clone(), key: uid },
+                                        AgentConfirmer { hub, key: uid },
                                         provider,
                                     )
                                     .await;
@@ -325,7 +303,7 @@ mod tests {
             .read_line(&mut line)
             .await
             .unwrap();
-        let reply: Value = serde_json::from_str(line.trim()).unwrap();
+        let reply: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
         assert_eq!(reply, json!({"sessions": 3}));
         task.await.unwrap();
     }

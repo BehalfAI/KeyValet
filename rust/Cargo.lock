@@ -21,6 +21,7 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures 0.2.17",
+ "zeroize",
 ]
 
 [[package]]
@@ -35,6 +36,7 @@ dependencies = [
  "ctr",
  "ghash",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -700,6 +702,7 @@ checksum = "f0d8a4362ccb29cb0b265253fb0a2728f592895ee6854fd9bc13f2ffda266ff1"
 dependencies = [
  "opaque-debug",
  "polyval",
+ "zeroize",
 ]
 
 [[package]]
@@ -1058,6 +1061,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "kv-agent"
+version = "0.2.1"
+dependencies = [
+ "base64 0.22.1",
+ "hkdf",
+ "kv-i18n",
+ "kv-ipc",
+ "kv-platform",
+ "kv-vault",
+ "rand 0.8.8",
+ "rsa",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "windows",
+ "windows-future",
+ "zeroize",
+]
+
+[[package]]
 name = "kv-cli"
 version = "0.2.1"
 dependencies = [
@@ -1071,6 +1095,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
  "zeroize",
 ]
 
@@ -1107,6 +1132,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "windows",
+ "windows-service",
 ]
 
 [[package]]
@@ -1156,6 +1183,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rmcp",
+ "rpassword",
  "rustls",
  "schemars",
  "serde",
@@ -1177,11 +1205,13 @@ version = "0.2.1"
 dependencies = [
  "base64 0.22.1",
  "core-foundation-sys",
+ "hkdf",
  "kv-i18n",
  "kv-ipc",
  "kv-vault",
  "libc",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "windows",
@@ -1193,6 +1223,7 @@ name = "kv-protocols"
 version = "0.2.1"
 dependencies = [
  "base64 0.22.1",
+ "bytes",
  "chrono",
  "ecdsa",
  "ed25519-dalek",
@@ -1217,6 +1248,7 @@ dependencies = [
  "tokio",
  "url",
  "wiremock",
+ "zeroize",
 ]
 
 [[package]]
@@ -1243,6 +1275,7 @@ dependencies = [
  "tokio-stream",
  "url",
  "wiremock",
+ "zeroize",
 ]
 
 [[package]]
@@ -1267,13 +1300,16 @@ dependencies = [
 name = "kv-vault"
 version = "0.2.1"
 dependencies = [
+ "aes",
  "aes-gcm",
  "argon2",
  "base64 0.22.1",
  "chrono",
+ "ghash",
  "hkdf",
  "kv-i18n",
  "libc",
+ "polyval",
  "regex",
  "serde",
  "serde_json",
@@ -1547,6 +1583,7 @@ dependencies = [
  "cpufeatures 0.2.17",
  "opaque-debug",
  "universal-hash",
+ "zeroize",
 ]
 
 [[package]]
@@ -2610,6 +2647,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "widestring"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
+
+[[package]]
 name = "windows"
 version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2699,6 +2742,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5"
 dependencies = [
  "windows-link",
+]
+
+[[package]]
+name = "windows-service"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "857224b3b211c6f3616921f081ee54721ee3ad2ace2fac6a6337e032f7b4dcf2"
+dependencies = [
+ "bitflags",
+ "widestring",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2899,6 +2953,9 @@ name = "zeroize"
 version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "zerotrie"

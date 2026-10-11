@@ -11,6 +11,15 @@ This page is a readable digest of [SECURITY.md](https://github.com/KeyValet/KeyV
 - Long-term protocol secrets: OAuth client secrets and refresh tokens, Google service-account private keys, GitHub App private keys, JWT signing keys, TOTP seeds, AWS secret access keys.
 - The vault master key, and the integrity of the audit log and settings.
 
+## Protection status
+
+Installation and `keyvalet status --summary` show the configured key protection scheme, hardware
+evidence and current TPM detection. `credential_status` can query the same public metadata while
+locked, without authentication or secret access. Secure Enclave is not a TPM; missing Hello
+attestation and unverified Linux TPM implementations are explicitly unknown. Linux polkit
+approval alone is not a TPM PIN or boot-state policy. See the
+[macOS / Windows / Linux protection matrix](https://github.com/KeyValet/KeyValet/blob/main/docs/key-protection.md).
+
 ## The trust boundary
 
 The AI agent or MCP client is *semi-trusted*: it may be prompt-injected, may speak MCP to the KeyValet server, and may run arbitrary commands as your user. The KeyValet MCP server is a convenience layer — **security checks never rely on it alone**. Every enforcement decision is made by the root helper (or the `dev.keyvalet.helper` launchd daemon), which holds no vault key while idle. Touch ID and Secure Enclave work happens in the per-user agent `dev.keyvalet.agent`, which the daemon only accepts after verifying its peer uid and its code signature (`dev.keyvalet.touchid`, team `PWCRJPY7YC`, exact installed path) — so a same-user process can't impersonate it and approve prompts for you.

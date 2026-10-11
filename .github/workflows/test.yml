@@ -52,3 +52,94 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo build --workspace --locked
       - run: cargo test --workspace --locked
+      - name: Windows scripts parse and preserve runtime configuration
+        shell: pwsh
+        working-directory: .
+        run: ./scripts/test-windows-scripts.ps1
+      - name: Windows PowerShell 5.1 compatibility
+        shell: powershell
+        working-directory: .
+        run: ./scripts/test-windows-scripts.ps1
+      - name: Exported environment scripts execute safely in PowerShell 7
+        shell: pwsh
+        env:
+          KEYVALET_TEST_POWERSHELL: pwsh
+        run: cargo test -p kv-mcp windows_script::tests::powershell_executes_export_fixture --locked -- --ignored --exact
+      - name: Exported environment scripts execute safely in Windows PowerShell 5.1
+        shell: powershell
+        env:
+          KEYVALET_TEST_POWERSHELL: powershell.exe
+        run: cargo test -p kv-mcp windows_script::tests::powershell_executes_export_fixture --locked -- --ignored --exact
+      - name: Clean Windows SYSTEM service integration (no Hello)
+        shell: powershell
+        working-directory: .
+        run: ./scripts/test-windows-service.ps1 -AllowSystemChanges
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-service-test
+          path: dist/windows-service-test.json
+          if-no-files-found: ignore
+
+  rust-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        container: [ubuntu:22.04, debian:12]
+    container: ${{ matrix.container }}
+    env:
+      CARGO_HOME: /opt/keyvalet-cargo
+      RUSTUP_HOME: /opt/keyvalet-rustup
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - run: apt-get update && apt-get install -y build-essential curl git ca-certificates python3 && useradd -m -u 1001 builder
+        working-directory: /
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt, llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: linux-${{ matrix.container }}
+      - name: Prepare unprivileged checks
+        run: chown -R builder:builder "$GITHUB_WORKSPACE" "$CARGO_HOME" "$RUSTUP_HOME"
+      - run: su -s /bin/sh builder -c 'cargo fmt --all -- --check'
+      - run: su -s /bin/sh builder -c 'cargo clippy --workspace --all-targets --locked -- -D warnings'
+      - run: su -s /bin/sh builder -c 'cargo build --workspace --locked'
+      - run: su -s /bin/sh builder -c 'cargo test --workspace --locked'
+      - name: Linux production line coverage (100% required)
+        run: su -s /bin/sh builder -c 'sh ../scripts/test-linux-coverage.sh'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-coverage-${{ strategy.job-index }}
+          path: |
+            rust/target/linux-coverage/summary.md
+            rust/target/linux-coverage/coverage.json
+            rust/target/linux-coverage/lcov.info
+            rust/target/linux-coverage/build.log
+            rust/target/linux-coverage/cargo.jsonl
+          if-no-files-found: ignore
+      - name: Unix scripts parse
+        working-directory: .
+        run: for script in scripts/*.sh site/static/install.sh; do sh -n "$script"; done
+
+  rust-windows-arm64:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - run: cargo clippy --workspace --all-targets --target aarch64-pc-windows-msvc --locked -- -D warnings
+      - run: cargo build --workspace --target aarch64-pc-windows-msvc --locked

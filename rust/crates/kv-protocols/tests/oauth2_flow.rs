@@ -12,6 +12,110 @@ use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[tokio::test]
+async fn invalid_provider_lifetimes_return_errors_and_preserve_previous_credentials() {
+    let _guard = with_insecure_loopback();
+    let server = MockServer::start().await;
+    let (_tmp, vault) = new_vault();
+    setup(&vault, &server, json!({})).await;
+    let (_, _, record) = vault.get_record("oauth2", "svc").unwrap();
+    vault
+        .patch_record(
+            "oauth2",
+            "svc",
+            Kind::Oauth2,
+            record.generation.as_deref(),
+            |rec| {
+                rec.set_secret("refresh_token", "previous-refresh-token".into());
+                rec.replace_state(Some(
+                    json!({"access_token":"previous-access-token", "scope":"read"}),
+                ));
+            },
+        )
+        .unwrap();
+    for expiry in [
+        json!(100_000_000_000_000u64),
+        json!(1e300),
+        json!(-1),
+        json!(0),
+        json!("3600"),
+    ] {
+        server.reset().await;
+        Mock::given(method("POST")).and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"access_token":"replacement-token", "refresh_token":"replacement-refresh-token", "expires_in":expiry})))
+            .expect(1).mount(&server).await;
+        let error = exchange_code(
+            &vault,
+            "oauth2",
+            "svc",
+            "code",
+            "verifier",
+            &json!("http://127.0.0.1:9999/callback"),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.0.contains("expires_in"));
+        let (_, _, after) = vault.get_record("oauth2", "svc").unwrap();
+        assert_eq!(
+            after.secrets.as_ref().unwrap()["refresh_token"],
+            "previous-refresh-token"
+        );
+        assert_eq!(
+            after.state.as_ref().unwrap()["access_token"],
+            "previous-access-token"
+        );
+    }
+}
+
+#[tokio::test]
+async fn corrupted_cached_expiries_are_refreshed_instead_of_panicking_or_returning_stale_tokens() {
+    let _guard = with_insecure_loopback();
+    let server = MockServer::start().await;
+    let (_tmp, vault) = new_vault();
+    setup(&vault, &server, json!({})).await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"access_token":"fresh-token", "expires_in":3600})),
+        )
+        .expect(3)
+        .mount(&server)
+        .await;
+    let (_, _, record) = vault.get_record("oauth2", "svc").unwrap();
+    for expiry in [i64::MIN, i64::MAX, 100_000_000_000_000_000] {
+        vault
+            .patch_record(
+                "oauth2",
+                "svc",
+                Kind::Oauth2,
+                record.generation.as_deref(),
+                |rec| {
+                    rec.set_secret("refresh_token", "valid-refresh-token".into());
+                    rec.replace_state(Some(
+                        json!({"access_token":"stale-token", "expires_at":expiry}),
+                    ));
+                },
+            )
+            .unwrap();
+        let out = access_token(
+            &vault,
+            "oauth2",
+            "svc",
+            AccessTokenParams {
+                scopes: vec![],
+                repositories: vec![],
+                permissions: None,
+                force: false,
+                via_proxy: false,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["access_token"], "fresh-token");
+    }
+}
+
 // `allow_insecure_loopback_for_tests` flips a crate-global flag; tests in this file run on
 // separate OS threads in parallel by default, so they'd otherwise race on it. Serialize access.
 static LOOPBACK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

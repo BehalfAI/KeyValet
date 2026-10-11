@@ -55,7 +55,7 @@ fi
 # Only the committed catalog; templates/n8n-catalog.json is a gitignored local, personal-use import.
 cp "$SRC_DIR/templates/catalog.json" "$STAGE/templates/"
 cp -R "$SRC_DIR/cursor-plugin" "$STAGE/cursor-plugin"
-cp "$SRC_DIR/scripts/install.sh" "$SRC_DIR/scripts/uninstall.sh" "$STAGE/scripts/"
+cp "$SRC_DIR/scripts/install.sh" "$SRC_DIR/scripts/uninstall.sh" "$SRC_DIR/scripts/configure-runtimes.sh" "$STAGE/scripts/"
 [ -f "$SRC_DIR/LICENSE" ] && cp "$SRC_DIR/LICENSE" "$STAGE/"
 cp "$SRC_DIR/README.md" "$SRC_DIR/SECURITY.md" "$STAGE/"
 

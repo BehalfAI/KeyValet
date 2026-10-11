@@ -1,13 +1,17 @@
 //! Platform interaction traits: the seams every other crate codes against, implemented per-OS
-//! (macOS via objc2, eventually Windows via windows-rs -- see the rewrite plan's "kv-platform interface").
+//! (macOS via objc2 and Windows via windows-rs).
 //! Also the fixed install paths and filesystem trust checks shared by every binary that runs with
 //! root's authority.
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub mod agent;
+#[cfg(windows)]
+pub mod agent_process;
 #[cfg(target_os = "macos")]
 pub mod enclave;
 pub mod fs;
+#[cfg(target_os = "linux")]
+pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod mem;
@@ -15,16 +19,29 @@ pub mod paths;
 #[cfg(target_os = "macos")]
 #[path = "peer.rs"]
 pub mod peer;
+#[cfg(target_os = "linux")]
+#[path = "peer_linux.rs"]
+pub mod peer;
 #[cfg(windows)]
 #[path = "peer_windows.rs"]
 pub mod peer;
+#[cfg(windows)]
+pub mod pipe;
+pub mod protection;
 pub mod trust;
 #[cfg(unix)]
 pub mod user;
+#[cfg(windows)]
+pub mod windows;
+pub mod worker;
 
 /// The thing that actually shows a biometric (or password-fallback) prompt to the user and reports
 /// whether they approved it.
 pub trait Authenticator {
+    /// Kernel identity captured by a resident helper, when the platform supplies one.
+    fn peer_identity(&self) -> Option<(u32, u32)> {
+        None
+    }
     /// `reason` is shown to the user (the stated purpose); `deny_label` is the cancel button's text
     /// (passed through so it can be localized the same way the rest of the UI is).
     ///

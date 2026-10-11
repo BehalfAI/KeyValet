@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN" "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>KeyValet</vendor>
+  <vendor_url>https://keyvalet.dev</vendor_url>
+  <action id="dev.keyvalet.unlock">
+    <annotate key="org.freedesktop.policykit.owner">unix-user:keyvalet</annotate>
+    <description>Unlock your KeyValet vault</description>
+    <message>Authenticate to unlock your KeyValet vault</message>
+    <defaults><allow_any>auth_self</allow_any><allow_inactive>auth_self</allow_inactive><allow_active>auth_self</allow_active></defaults>
+  </action>
+  <action id="dev.keyvalet.use">
+    <annotate key="org.freedesktop.policykit.owner">unix-user:keyvalet</annotate>
+    <description>Approve a KeyValet credential operation</description>
+    <message>Authenticate to approve this KeyValet credential operation</message>
+    <defaults><allow_any>auth_self</allow_any><allow_inactive>auth_self</allow_inactive><allow_active>auth_self</allow_active></defaults>
+  </action>
+  <action id="dev.keyvalet.modify">
+    <annotate key="org.freedesktop.policykit.owner">unix-user:keyvalet</annotate>
+    <description>Approve a sensitive KeyValet change</description>
+    <message>Authenticate to approve this sensitive KeyValet change</message>
+    <defaults><allow_any>auth_self</allow_any><allow_inactive>auth_self</allow_inactive><allow_active>auth_self</allow_active></defaults>
+  </action>
+</policyconfig>

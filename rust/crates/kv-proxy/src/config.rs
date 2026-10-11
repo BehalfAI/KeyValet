@@ -54,7 +54,8 @@ pub fn host_allowed(host: &str, allowed: &[String]) -> bool {
     let h = host.to_lowercase();
     allowed.iter().any(|a| {
         if let Some(suffix) = a.strip_prefix("*.") {
-            h.ends_with(suffix) && h.len() > suffix.len()
+            h.strip_suffix(suffix)
+                .is_some_and(|prefix| prefix.ends_with('.') && prefix.len() > 1)
         } else {
             h == *a
         }
@@ -110,6 +111,16 @@ pub struct FieldValues {
     pub value: String,
 }
 
+impl Drop for FieldValues {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        for value in self.secrets.values_mut() {
+            value.zeroize();
+        }
+        self.value.zeroize();
+    }
+}
+
 pub fn field_values(rec: &CredentialRecord) -> FieldValues {
     // A protocol credential's long-lived secrets (client secret, refresh token, private key, ...)
     // never participate in placeholder rendering.
@@ -159,24 +170,26 @@ pub fn placeholders(values: &[&str]) -> Vec<String> {
 }
 
 pub fn render(tpl: &str, f: &FieldValues) -> kv_vault::Result<String> {
-    let mut err = None;
-    let result = PLACEHOLDER_RE.replace_all(tpl, |cap: &regex::Captures| {
+    let mut length = tpl.len();
+    for cap in PLACEHOLDER_RE.captures_iter(tpl) {
         let n = &cap[1];
-        match lookup(f, n) {
-            Some(v) => v.to_string(),
-            None => {
-                err = Some(VaultError::new(
-                    &format!("缺少字段 {n}"),
-                    &format!("Missing field {n}"),
-                ));
-                String::new()
-            }
-        }
-    });
-    if let Some(e) = err {
-        return Err(e);
+        let value = lookup(f, n).ok_or_else(|| {
+            VaultError::new(&format!("缺少字段 {n}"), &format!("Missing field {n}"))
+        })?;
+        length = length - cap[0].len() + value.len();
     }
-    Ok(result.to_string())
+    // Validate first, then reserve the exact size: no secret replacement strings or abandoned
+    // reallocations, including when a later placeholder is missing.
+    let mut result = zeroize::Zeroizing::new(String::with_capacity(length));
+    let mut previous = 0;
+    for cap in PLACEHOLDER_RE.captures_iter(tpl) {
+        let matched = cap.get(0).unwrap();
+        result.push_str(&tpl[previous..matched.start()]);
+        result.push_str(lookup(f, &cap[1]).unwrap());
+        previous = matched.end();
+    }
+    result.push_str(&tpl[previous..]);
+    Ok(std::mem::take(&mut *result))
 }
 
 /// Placeholders in names (header names/parameter names) may only reference non-sensitive fields,
@@ -392,16 +405,13 @@ pub fn validate_http_config(
         .as_object()
         .ok_or_else(|| VaultError::new("http 配置必须是对象", "http config must be an object"))?;
     let kind = rec.kind_or_static();
-    let base = field_values(rec);
+    let mut f = field_values(rec);
     // Token-based credentials: may only reference the current short-lived token (long-lived
     // secrets don't participate in rendering) and non-sensitive fields.
-    let f = if kind == Kind::Static {
-        base
-    } else {
-        let mut secrets = std::collections::HashMap::new();
-        secrets.insert("access_token".to_string(), "<access_token>".to_string());
-        FieldValues { secrets, ..base }
-    };
+    if kind != Kind::Static {
+        f.secrets
+            .insert("access_token".to_string(), "<access_token>".to_string());
+    }
     let inject = validate_inject(r.get("inject"), &f)?;
     if kind == Kind::Static && inject.is_none() {
         return Err(VaultError::new(
@@ -481,6 +491,23 @@ mod tests {
     fn host_allowed_matches_wildcard_subdomains_only() {
         let allowed = vec!["*.example.com".to_string(), "api.other.com".to_string()];
         assert!(host_allowed("foo.example.com", &allowed));
+        assert!(host_allowed("FOO.BAR.EXAMPLE.COM", &allowed));
+        for host in ["evilexample.com", "evil-example.com", "api.evilexample.com"] {
+            assert!(
+                !host_allowed(host, &allowed),
+                "{host} is outside example.com"
+            );
+            let mut record = static_rec();
+            record.http = Some(HttpConfig {
+                allowed_hosts: allowed.clone(),
+                inject: None,
+                proxy_only: true,
+                test: None,
+            });
+            assert!(
+                crate::proxy::precheck_request(&record, None, &format!("https://{host}/")).is_err()
+            );
+        }
         assert!(
             !host_allowed("example.com", &allowed),
             "the wildcard doesn't match the bare domain itself"

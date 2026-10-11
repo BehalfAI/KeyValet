@@ -105,8 +105,8 @@ pub struct CredentialRecord {
     /// Protocol runtime state (cached short-lived token, expiry, etc.).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<serde_json::Value>,
-    /// Random version generated on each setProtocol; checked before writing back an async
-    /// operation's result, to avoid overwriting a configuration replaced in the meantime.
+    /// Random version generated on each set/setProtocol; binds approvals and asynchronous
+    /// operation results to a credential even when replacements share a timestamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -128,6 +128,74 @@ impl CredentialRecord {
     pub fn kind_or_static(&self) -> Kind {
         self.kind.unwrap_or(Kind::Static)
     }
+
+    pub fn replace_state(&mut self, state: Option<serde_json::Value>) {
+        if let Some(old) = self.state.as_mut() {
+            scrub_json(old);
+        }
+        self.state = state;
+    }
+
+    pub fn set_state_field(&mut self, name: &str, value: serde_json::Value) {
+        if !self
+            .state
+            .as_ref()
+            .is_some_and(serde_json::Value::is_object)
+        {
+            self.replace_state(Some(serde_json::json!({})));
+        }
+        let state = self.state.as_mut().unwrap().as_object_mut().unwrap();
+        if let Some(mut old) = state.insert(name.into(), value) {
+            scrub_json(&mut old);
+        }
+    }
+
+    pub fn remove_state_field(&mut self, name: &str) {
+        if let Some(mut old) = self
+            .state
+            .as_mut()
+            .and_then(|state| state.as_object_mut())
+            .and_then(|state| state.remove(name))
+        {
+            scrub_json(&mut old);
+        }
+    }
+
+    pub fn set_secret(&mut self, name: &str, value: String) {
+        if let Some(mut old) = self
+            .secrets
+            .get_or_insert_with(Default::default)
+            .insert(name.into(), value)
+        {
+            old.zeroize();
+        }
+    }
+
+    pub fn remove_secret(&mut self, name: &str) {
+        if let Some(mut old) = self
+            .secrets
+            .as_mut()
+            .and_then(|secrets| secrets.remove(name))
+        {
+            old.zeroize();
+        }
+    }
+}
+
+/// Wipe owned JSON strings (including object keys) recursively before releasing their allocations.
+pub fn scrub_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) => text.zeroize(),
+        serde_json::Value::Array(values) => values.iter_mut().for_each(scrub_json),
+        serde_json::Value::Object(values) => {
+            for (mut key, mut value) in std::mem::take(values) {
+                key.zeroize();
+                scrub_json(&mut value);
+            }
+        }
+        _ => {}
+    }
+    *value = serde_json::Value::Null;
 }
 
 /// Overwrites this record's secret bytes before the memory is freed, rather than leaving them for
@@ -137,7 +205,8 @@ impl CredentialRecord {
 /// value) -- either way, whichever scope lets go of the last copy triggers this. Best-effort, not
 /// a substitute for keeping secrets out of long-lived structures in the first place: cloning a
 /// record before this runs (e.g. into a `serde_json::Value` for a response) still leaves that
-/// copy's bytes wherever the clone's allocation landed, unscrubbed.
+/// copy's bytes wherever the clone's allocation landed, unscrubbed. Cached state is scrubbed
+/// recursively as well; replacement helpers erase superseded state and refresh tokens.
 impl CredentialRecord {
     /// The actual scrubbing logic, factored out of `Drop::drop` so it can be exercised directly
     /// in a test: calling `drop()` for real also triggers the subsequent field-by-field
@@ -150,6 +219,9 @@ impl CredentialRecord {
             for v in secrets.values_mut() {
                 v.zeroize();
             }
+        }
+        if let Some(state) = self.state.as_mut() {
+            scrub_json(state);
         }
     }
 }
@@ -223,9 +295,16 @@ mod drop_zeroize_tests {
     #[test]
     fn scrub_secrets_clears_the_value_and_every_secret_field() {
         let mut record = record_with_secrets("SENSITIVE_MARKER_VALUE_0123456789");
+        record.state = Some(serde_json::json!({
+            "access_token": "cached-oauth-token",
+            "tokens": {"scope": {"access_token": "cached-google-token"}},
+            "session": {"secret_access_key": "cached-aws-secret", "session_token": "cached-aws-token"},
+            "nested": [null, {"array_token": ["nested-secret"]}]
+        }));
         record.scrub_secrets();
         assert_eq!(record.value, "");
         assert_eq!(record.secrets.as_ref().unwrap()["field"], "");
+        assert_eq!(record.state, Some(serde_json::Value::Null));
     }
 
     #[test]

@@ -1,28 +1,34 @@
-//! Native dialogs on Windows go through the per-user agent (kv-agent, W3) because the helper
-//! service runs in session 0 and cannot show UI. Until then every entry point behaves as a
-//! declined/absent prompt -- callers already treat None/false as "the user didn't confirm".
+//! UI runs in this interactive MCP process. Authoritative approvals still come from the
+//! signed agent through the helper, so a client cannot self-authorize a vault operation.
 
-/// Returns `None`: there is no dialog channel on Windows yet (W3).
-pub async fn prompt_secret(_message: &str) -> Option<String> {
-    None
+/// Collect application secrets in a hidden native input field.
+pub async fn prompt_secret(message: &str) -> Option<String> {
+    let message = message.to_owned();
+    tokio::task::spawn_blocking(move || {
+        kv_platform::windows::prompt_secret(&message).map(|s| (*s).clone())
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
-/// Returns `false`: without a dialog channel the safe answer to a confirm prompt is "no".
-pub async fn confirm(_message: &str, _ok_label: &str) -> bool {
-    false
+/// Cancellation and failures deny the request.
+pub async fn confirm(message: &str, ok_label: &str) -> bool {
+    let message = message.to_owned();
+    let label = ok_label.to_owned();
+    tokio::task::spawn_blocking(move || kv_platform::windows::confirm(&message, &label))
+        .await
+        .unwrap_or(false)
 }
 
-/// Returns `false` for the same reason as `confirm`.
-pub async fn ask(_message: &str, _ok_label: &str) -> bool {
-    false
+/// The default button remains Cancel.
+pub async fn ask(message: &str, ok_label: &str) -> bool {
+    confirm(message, ok_label).await
 }
 
-/// Placeholder for the non-blocking notice dialog (device codes etc.); `None` until W3.
-pub struct Notice;
-impl Drop for Notice {
-    fn drop(&mut self) {}
-}
+/// Device-code and other notices close on timeout or when the handle is dropped.
+pub type Notice = kv_platform::windows::Notice;
 
-pub fn show_notice(_message: &str, _timeout_sec: u64) -> Option<Notice> {
-    None
+pub fn show_notice(message: &str, timeout_sec: u64) -> Option<Notice> {
+    Some(kv_platform::windows::show_notice(message, timeout_sec))
 }

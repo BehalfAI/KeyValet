@@ -8,11 +8,27 @@
 use serde::{Deserialize, Serialize};
 
 pub mod agent;
+pub mod mcp_worker;
 mod request;
 pub use request::{operation_digest, request_digest};
 
 pub const PROTOCOL_VERSION: u32 = 4;
 pub const MAX_LINE_BYTES: usize = 1024 * 1024;
+/// Maximum outstanding helper operations. Clients queue before sending beyond this bound.
+pub const MAX_IN_FLIGHT_REQUESTS: usize = 8;
+
+/// A separate, read-only startup exchange. It never authenticates or opens a credential session;
+/// the helper replies with public protection metadata and then closes the connection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", deny_unknown_fields)]
+pub enum ProtectionProbe {
+    #[serde(rename = "protection")]
+    Status {
+        protocol: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        lang: Option<String>,
+    },
+}
 
 /// Prefix the helper returns for a "needs authorization" error, followed by type/name.
 pub const GRANT_REQUIRED_PREFIX: &str = "[GRANT_REQUIRED] ";

@@ -15,6 +15,9 @@ extern "C" {
     fn getpeereid(s: libc::c_int, uid: *mut libc::uid_t, gid: *mut libc::gid_t) -> libc::c_int;
 }
 
+/// Identity the gateway compares a loopback client against: the session user's uid.
+pub type GatewayPeer = u32;
+
 /// The real uid of the process on the other end of a connected Unix socket.
 pub fn peer_uid(fd: RawFd) -> io::Result<u32> {
     unsafe {
@@ -173,6 +176,36 @@ pub fn verify_peer_code(
         }
         Ok(())
     }
+}
+
+/// Who owns the local (client) end of a TCP connection whose remote port is `port` on
+/// loopback — moved out of kv-proxy so the Windows `GetExtendedTcpTable` twin lives under the
+/// same `kv_platform::peer` seam. Returns the uid of the other process (never our own).
+pub fn loopback_client(port: u16) -> Option<GatewayPeer> {
+    let out = std::process::Command::new("/usr/sbin/lsof")
+        .args([
+            "-nP",
+            &format!("-iTCP@127.0.0.1:{port}"),
+            "-sTCP:ESTABLISHED",
+            "-F",
+            "pu",
+        ])
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut pid: u32 = 0;
+    let my_pid = std::process::id();
+    for line in text.lines() {
+        if let Some(p) = line.strip_prefix('p') {
+            pid = p.parse().unwrap_or(0);
+        } else if let Some(u) = line.strip_prefix('u') {
+            if pid != my_pid {
+                return u.parse().ok();
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

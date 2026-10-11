@@ -2,6 +2,25 @@
 
 KeyValet installs a sudoers rule and runs code as root, so it is important to be precise about what it protects against and what it does not.
 
+The process and OS details below describe the released macOS implementation. The Windows
+development preview uses a LocalSystem service, Windows Hello and protected interactive workers;
+its implementation, remaining native validation and input-desktop limitations are documented in
+[Windows status](docs/windows.md).
+Linux uses a non-login `keyvalet` service account, systemd, a peer-verified Unix socket and
+polkit. Its filesystem, TPM, software opt-in and recovery boundaries are documented in
+[Linux support](docs/linux.md). It installs no passwordless general-purpose sudo rule.
+
+## Protection status
+
+Protection status is public metadata, available while locked through `keyvalet status` (or
+`protection`) and `credential_status`. The helper accepts a strictly typed, versioned startup
+probe over the existing peer-verified transport and closes immediately after replying; it does
+not unlock, issue grants, return key descriptors or process later buffered credential commands.
+The configured provider, hardware evidence and current host TPM observation are distinct. An
+unconfirmed TPM implementation or missing Hello attestation is reported as unknown, not verified
+hardware protection. Linux polkit approval is OS authorization, without a TPM PIN/PCR policy.
+See the [cross-platform protection matrix and status fields](docs/key-protection.md).
+
 ## Reporting a vulnerability
 
 Please **do not** open a public issue. Use GitHub's private vulnerability reporting ("Security" tab → "Report a vulnerability") on this repository. Include steps to reproduce and the affected version/commit. We aim to acknowledge reports within a few days.

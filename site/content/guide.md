@@ -11,7 +11,11 @@ KeyValet is a local credential broker for AI agents on macOS. It lets agents suc
 
 [Security model](https://github.com/KeyValet/KeyValet/blob/main/SECURITY.md)
 
-> **Status:** early (0.1). macOS only. UI in English and 简体中文 — follows your macOS language; override with `KEYVALET_LANG=en|zh`.
+> **Status:** macOS releases are available. Windows 11 is a development preview; Hello, service and installer code are implemented, with signed packages and native verification pending. See the [Windows support record](https://github.com/KeyValet/KeyValet/blob/main/docs/windows.md). This guide covers the macOS release. UI in English and 简体中文; override with `KEYVALET_LANG=en|zh`.
+
+Linux local support is implemented with systemd, polkit and TPM 2.0, with explicit software
+protection for machines without TPM. Install the source checkout with `sh scripts/install.sh`;
+see [Linux setup, SSH approval and recovery](https://github.com/KeyValet/KeyValet/blob/main/docs/linux.md).
 
 ---
 
@@ -229,6 +233,28 @@ keyvalet grant-mode per-credential        # or: all
 ```
 
 Each command runs through `sudo -k`, so it asks for your password every time. Protected vault commands also require system authentication to unlock the Secure Enclave key.
+
+### Key protection and TPM status
+
+Installers prominently show the configured scheme, hardware evidence, current TPM detection and
+key-use authorization. View the same information later without unlocking:
+
+```sh
+keyvalet status                 # JSON; protection is an alias
+keyvalet status --summary       # readable protection summary
+```
+
+`credential_status` and the plugin status command include `vault_protection` even while locked,
+without biometric/PIN authentication or credential grants. The macOS/Linux CLI still needs sudo;
+the Windows owner can query the running service without UAC. An unavailable helper is reported
+as `protection_error`, with no guessed hardware status.
+
+Secure Enclave is hardware protection, not a TPM. Windows Hello separates OS-reported TPM
+attestation from `unknown`. Linux TPM mode cannot establish physical backing from a device node,
+and explicit software mode is labelled as software. A detected TPM can be discrete, integrated,
+firmware or virtual; current probes report the implementation as unknown. Configured protection
+and current device detection are separate, and status does not test the key. See the
+[complete protection matrix and fields](https://github.com/KeyValet/KeyValet/blob/main/docs/key-protection.md).
 
 ### Secure Enclave master key
 

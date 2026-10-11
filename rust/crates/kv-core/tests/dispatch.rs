@@ -57,6 +57,14 @@ impl kv_core::AuthorizeGate for FakeAuth {
     }
 }
 
+struct ChangeOnApprove<F>(F);
+impl<F: Fn() + Sync> kv_core::AuthorizeGate for ChangeOnApprove<F> {
+    async fn authorize(&self, _reason: &str) -> Result<(), String> {
+        (self.0)();
+        Ok(())
+    }
+}
+
 /// grants.test.ts sets a confirmer that panics if ever called: with `auth` present, loosening
 /// settings must go through Touch ID, never a confirmation dialog.
 struct PanicConfirmer;
@@ -778,6 +786,35 @@ async fn a_mode_tightened_elsewhere_applies_to_a_live_session() {
     let r = call(&vault, &mut auth, &confirmer, "get", get).await;
     assert!(error_of(&r).unwrap().starts_with(GRANT_REQUIRED_PREFIX));
     assert_eq!(auth.mode, Some(GrantMode::PerUse));
+}
+
+#[tokio::test]
+async fn settings_changed_during_approval_do_not_overwrite_a_stricter_policy() {
+    let (_tmp, vault) = new_vault();
+    let tightened = Settings {
+        grant_mode: GrantMode::PerUse,
+        remember_hours: 1.0,
+        remember_until: None,
+    };
+    let gate = ChangeOnApprove(|| {
+        kv_core::write_settings(&vault.dir, &tightened).unwrap();
+    });
+    let mut auth = SessionAuth::new(gate);
+    auth.apply_mode(&kv_core::read_settings(&vault.dir));
+    let result = dispatch(
+        &vault,
+        1,
+        "settings",
+        params(json!({"grant_mode":"per_session"})),
+        &ctx(),
+        Some(&mut auth),
+        &PanicConfirmer,
+    )
+    .await;
+    assert!(!is_ok(&result), "a stale approval must require a retry");
+    assert_eq!(kv_core::read_settings(&vault.dir), tightened);
+    assert_eq!(auth.mode, Some(GrantMode::PerUse));
+    assert!(!auth.grant_all);
 }
 
 #[tokio::test]
@@ -1542,6 +1579,106 @@ async fn per_use_test_approval_is_invalidated_by_stored_configuration_changes() 
     assert!(error_of(&result)
         .unwrap()
         .starts_with(GRANT_REQUIRED_PREFIX));
+}
+
+#[tokio::test]
+async fn approvals_do_not_commit_when_the_credential_or_policy_changes_during_the_prompt() {
+    for mode in [GrantMode::PerCredential, GrantMode::PerUse] {
+        for change in ["exposure", "replacement", "policy"] {
+            if change == "policy" && mode == GrantMode::PerUse {
+                continue; // This policy is already the strictest.
+            }
+            let (_tmp, vault) = new_vault();
+            vault
+                .update_http("api_key", "openai", |_| {
+                    Some(kv_vault::HttpConfig {
+                        inject: None,
+                        allowed_hosts: vec!["example.com".into()],
+                        proxy_only: true,
+                        test: None,
+                    })
+                })
+                .unwrap();
+            let generation = vault
+                .get_record("api_key", "openai")
+                .unwrap()
+                .2
+                .generation
+                .clone();
+            let gate = ChangeOnApprove(|| match change {
+                "exposure" => {
+                    vault
+                        .update_http("api_key", "openai", |record| {
+                            let mut http = record.http.clone().unwrap();
+                            http.proxy_only = false;
+                            Some(http)
+                        })
+                        .unwrap();
+                }
+                "replacement" => {
+                    vault
+                        .set(SetParams {
+                            r#type: "api_key".into(),
+                            name: "openai".into(),
+                            value: Some("replacement-synthetic-secret".into()),
+                            overwrite: true,
+                            ..Default::default()
+                        })
+                        .unwrap();
+                }
+                "policy" => {
+                    kv_core::write_settings(
+                        &vault.dir,
+                        &Settings {
+                            grant_mode: GrantMode::PerUse,
+                            remember_hours: 8.0,
+                            remember_until: None,
+                        },
+                    )
+                    .unwrap();
+                }
+                _ => unreachable!(),
+            });
+            let mut auth = SessionAuth::new(gate);
+            auth.mode = Some(mode);
+            let request = params(json!({"type": "api_key", "name": "openai"}));
+            let grant = dispatch(
+                &vault,
+                1,
+                "grant",
+                params(json!({
+                    "type": "api_key", "name": "openai", "operation": "get", "request": request,
+                })),
+                &ctx(),
+                Some(&mut auth),
+                &PanicConfirmer,
+            )
+            .await;
+            assert!(
+                !is_ok(&grant),
+                "stale {mode:?} approval for {change} must be refused"
+            );
+            assert!(auth.grants.is_empty());
+            let get = dispatch(
+                &vault,
+                2,
+                "get",
+                request,
+                &ctx(),
+                Some(&mut auth),
+                &PanicConfirmer,
+            )
+            .await;
+            assert!(error_of(&get).unwrap().starts_with(GRANT_REQUIRED_PREFIX));
+            if change == "replacement" {
+                let replacement = vault.get_record("api_key", "openai").unwrap().2;
+                assert!(generation.is_some());
+                assert_ne!(replacement.generation, generation);
+            } else if change == "policy" {
+                assert_eq!(auth.mode, Some(GrantMode::PerUse));
+            }
+        }
+    }
 }
 
 #[tokio::test]

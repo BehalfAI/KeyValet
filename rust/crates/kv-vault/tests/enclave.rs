@@ -379,6 +379,117 @@ fn metadata_is_authenticated_and_malformed_metadata_never_prompts_or_creates_a_f
 }
 
 #[test]
+fn protection_rejects_malformed_public_data_before_unlocking_or_changing_files() {
+    let (_tmp, vault) = fixture();
+    let hardware = Hardware::new(67);
+    vault
+        .migrate_to_enclave(&hardware, PASSWORD, "test")
+        .unwrap();
+    let path = vault.dir.join("vault.enc");
+    let original: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let audit = std::fs::read(vault.dir.join("audit.log")).ok();
+    let unlocks = hardware.unlocks.get();
+    let creates = hardware.creates.get();
+    for (pointer, bad) in [
+        ("/v", serde_json::json!(2)),
+        ("/alg", serde_json::json!("unsupported")),
+        ("/iv", serde_json::json!("not base64!")),
+        ("/iv", serde_json::json!(STANDARD.encode([0u8; 11]))),
+        ("/tag", serde_json::json!("not base64!")),
+        ("/tag", serde_json::json!(STANDARD.encode([0u8; 15]))),
+        ("/ct", serde_json::json!("not base64!")),
+        ("/ct", serde_json::json!("")),
+        ("/master_key/recovery/version", serde_json::json!(2)),
+        (
+            "/master_key/recovery/salt",
+            serde_json::json!("not base64!"),
+        ),
+        (
+            "/master_key/recovery/salt",
+            serde_json::json!(STANDARD.encode([0u8; 15])),
+        ),
+        (
+            "/master_key/recovery/nonce",
+            serde_json::json!("not base64!"),
+        ),
+        (
+            "/master_key/recovery/nonce",
+            serde_json::json!(STANDARD.encode([0u8; 11])),
+        ),
+        (
+            "/master_key/recovery/ciphertext",
+            serde_json::json!("not base64!"),
+        ),
+        (
+            "/master_key/recovery/ciphertext",
+            serde_json::json!(STANDARD.encode([0u8; 47])),
+        ),
+        ("/master_key/device_binding/version", serde_json::json!(2)),
+        (
+            "/master_key/device_binding/digest",
+            serde_json::json!("not base64!"),
+        ),
+        (
+            "/master_key/device_binding/digest",
+            serde_json::json!(STANDARD.encode([0u8; 31])),
+        ),
+    ] {
+        let mut file = original.clone();
+        *file.pointer_mut(pointer).unwrap() = bad;
+        let damaged = serde_json::to_vec(&file).unwrap();
+        std::fs::write(&path, &damaged).unwrap();
+        let reopened = Vault::new(&vault.dir);
+        assert!(
+            reopened.protection().is_err(),
+            "status accepted malformed {pointer}"
+        );
+        assert!(
+            reopened.init_with_provider(&hardware, "test").is_err(),
+            "unlock accepted malformed {pointer}"
+        );
+        assert_eq!(hardware.unlocks.get(), unlocks, "prompted for {pointer}");
+        assert_eq!(hardware.creates.get(), creates);
+        assert_eq!(std::fs::read(&path).unwrap(), damaged);
+        assert_eq!(std::fs::read(vault.dir.join("audit.log")).ok(), audit);
+        assert!(!vault.dir.join("master.key").exists());
+        assert!(reopened.get("api_key", "example").is_err());
+    }
+}
+
+#[test]
+fn public_status_checks_format_without_claiming_ciphertext_integrity() {
+    let (_tmp, vault) = fixture();
+    let hardware = Hardware::new(68);
+    vault
+        .migrate_to_enclave(&hardware, PASSWORD, "test")
+        .unwrap();
+    let path = vault.dir.join("vault.enc");
+    let original: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    for pointer in ["/ct", "/master_key/recovery/ciphertext"] {
+        let mut file = original.clone();
+        let mut bytes = STANDARD
+            .decode(file.pointer(pointer).unwrap().as_str().unwrap())
+            .unwrap();
+        bytes[0] ^= 1;
+        *file.pointer_mut(pointer).unwrap() = serde_json::json!(STANDARD.encode(bytes));
+        let damaged = serde_json::to_vec(&file).unwrap();
+        std::fs::write(&path, &damaged).unwrap();
+        let reopened = Vault::new(&vault.dir);
+        let before = hardware.unlocks.get();
+        let status = reopened.protection().unwrap();
+        assert_eq!(status.provider, "secure_enclave");
+        assert!(status.recovery_configured);
+        assert_eq!(hardware.unlocks.get(), before, "status must not use a key");
+        assert!(reopened.get("api_key", "example").is_err());
+        assert!(reopened.init_with_provider(&hardware, "test").is_err());
+        assert_eq!(hardware.unlocks.get(), before + 1);
+        assert_eq!(std::fs::read(&path).unwrap(), damaged);
+    }
+}
+
+#[test]
 fn invalid_password_is_rejected_before_authentication_and_migration_removes_a_stale_backup() {
     let (_tmp, vault) = fixture();
     let hardware = Hardware::new(99);

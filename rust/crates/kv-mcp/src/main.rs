@@ -1,7 +1,10 @@
 //! MCP server entry point. Direct port of src/server/index.ts.
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[path = "dialog.rs"]
+mod dialog;
+#[cfg(target_os = "linux")]
+#[path = "dialog_linux.rs"]
 mod dialog;
 #[cfg(windows)]
 #[path = "dialog_win.rs"]
@@ -19,6 +22,10 @@ mod oauth_presets;
 mod server;
 mod session;
 mod templates;
+#[cfg(windows)]
+mod windows_mcp;
+#[cfg(any(windows, test))]
+mod windows_script;
 mod tools {
     pub mod basic;
     pub mod common;
@@ -73,12 +80,23 @@ impl ServerHandler for Server {
                 But if the user has already given an API key, token, password or other secret in the chat, proactively store it in KeyValet (credential_set with value, plus template when one matches) \
                 instead of writing it to .env, config files, command lines or memory; then use it through the proxy or gateway.\n\
                 Do not echo credential values back to the user or write them to files/logs unless the user explicitly asks.",
-            ))
+            ).replace("Touch ID", if cfg!(windows) { "Windows Hello" } else if cfg!(target_os = "linux") { "polkit" } else { "Touch ID" }))
     }
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    #[cfg(windows)]
+    let worker_channel = match windows_mcp::start().await {
+        Ok(Some(channel)) => channel,
+        // Tokio's blocking stdin reader cannot be cancelled when the service closes stdout.
+        // Exit after the launcher has dropped its channel, without waiting for that reader.
+        Ok(None) => std::process::exit(0),
+        Err(e) => {
+            eprintln!("keyvalet-mcp: {e}");
+            std::process::exit(1);
+        }
+    };
     #[cfg(unix)]
     unsafe {
         libc::umask(0o077);
@@ -87,6 +105,12 @@ async fn main() -> anyhow::Result<()> {
             rlim_max: 0,
         };
         libc::setrlimit(libc::RLIMIT_CORE, &limit);
+    }
+    // Keep an ordinary same-user parent from reading the MCP process's memory.
+    // SO_PEERCRED and polkit's /proc/PID/status UID lookup remain available.
+    #[cfg(target_os = "linux")]
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0 as libc::c_ulong) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
     }
     gateway_env::purge_legacy_records();
     // Both the `ring` and `aws-lc-rs` crypto provider features end up enabled in this binary
@@ -100,13 +124,12 @@ async fn main() -> anyhow::Result<()> {
     // before anything else can touch TLS, removes the ambiguity process-wide for every caller
     // (ours and reqwest's).
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let ttl_minutes: u64 = std::env::var("KEYVALET_SESSION_TTL_MINUTES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    let session = Arc::new(session::HelperSession::new(std::time::Duration::from_secs(
-        ttl_minutes * 60,
-    )));
+    let ttl = session::parse_ttl_minutes(
+        std::env::var("KEYVALET_SESSION_TTL_MINUTES")
+            .ok()
+            .as_deref(),
+    )?;
+    let session = Arc::new(session::HelperSession::new(ttl));
     let server = Server::new(session.clone());
 
     // Lock and exit immediately when the session ends (the client closes stdin or sends a signal).
@@ -135,7 +158,10 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    #[cfg(not(windows))]
     let service = server.serve(rmcp::transport::stdio()).await?;
+    #[cfg(windows)]
+    let service = server.serve(worker_channel).await?;
     let waited = service.waiting().await;
     // Run cleanup to completion here: a task spawned now might never be polled before the
     // runtime shuts down, leaving exported files behind.

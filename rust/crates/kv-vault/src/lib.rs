@@ -16,15 +16,17 @@ mod master_key;
 mod types;
 mod validate;
 mod vault;
+#[cfg(any(windows, test))]
+pub mod winbuf;
 
 pub use error::{Result, VaultError};
 pub use master_key::{
-    DeviceBinding, EnclaveKey, EnclaveMetadata, MasterKey, MasterKeyMetadata, MasterKeyProvider,
-    ProviderId, WrappedMasterKey, DEVICE_BINDING_BYTES,
+    DeviceBinding, EnclaveKey, EnclaveMetadata, HelloMetadata, MasterKey, MasterKeyMetadata,
+    MasterKeyProvider, ProviderId, TpmMetadata, WrappedMasterKey, DEVICE_BINDING_BYTES,
 };
 pub use types::{
-    BasicAuth, CredentialRecord, HttpConfig, InjectRule, Kind, TestRequest, TypeRecord, VaultData,
-    KINDS,
+    scrub_json, BasicAuth, CredentialRecord, HttpConfig, InjectRule, Kind, TestRequest, TypeRecord,
+    VaultData, KINDS,
 };
 pub use validate::{normalize_name, normalize_type, MAX_PROTOCOL_BYTES, MAX_VALUE_LENGTH};
 pub use vault::{

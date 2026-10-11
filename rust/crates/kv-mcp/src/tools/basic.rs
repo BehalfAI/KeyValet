@@ -164,39 +164,78 @@ pub struct SettingsArgs {
     pub purpose: Option<String>,
 }
 
+/// Assemble status without opening a credential session. The future stays lazy when an
+/// existing session already supplied a complete report; old/incomplete reports use the probe.
+async fn protection_status_view(
+    snapshot: impl std::future::Future<Output = (u64, Value)>,
+    grants: Option<(u64, Value)>,
+    probe: impl std::future::Future<Output = Result<Value, crate::session::SessionError>>,
+) -> Value {
+    let protection = match grants
+        .as_ref()
+        .and_then(|(_, grants)| grants.get("vault_protection"))
+        .filter(|report| kv_platform::protection::validate_report(report).is_ok())
+    {
+        Some(report) => Ok(report.clone()),
+        None => probe.await.and_then(|report| {
+            kv_platform::protection::validate_report(&report)
+                .map_err(|error| crate::session::SessionError(error.to_string()))?;
+            Ok(report)
+        }),
+    };
+    let (generation, state) = snapshot.await;
+    let unlocked = state["state"] == "unlocked";
+    let mut merged = state.as_object().cloned().unwrap_or_default();
+    match protection {
+        Ok(report) => {
+            merged.insert("vault_protection".into(), report);
+        }
+        Err(error) => {
+            merged.insert("vault_protection".into(), Value::Null);
+            merged.insert("protection_error".into(), json!(error.to_string()));
+        }
+    }
+    if let Some(grants) = grants
+        .filter(|(source, _)| unlocked && *source == generation)
+        .and_then(|(_, grants)| grants.as_object().cloned())
+    {
+        merged.insert("grants".into(), Value::Object(grants));
+    }
+    Value::Object(merged)
+}
+
 #[tool_router(router = basic_tool_router, vis = "pub")]
 impl Server {
     #[tool(description = kv_i18n::t(
-        "查看凭证库在本 session 中是否已解锁、授权模式、本会话已授权的凭证（不会触发认证）",
-        "Show whether the vault is unlocked for this session, the grant mode, and which credentials this session has been granted (does not trigger authentication)",
+        "查看本会话状态、密钥保护方案、硬件保护证据和当前 TPM 检测结果；解锁后还显示授权模式和已授权凭证。锁定时也可查看保护状态，不会触发认证；unknown 表示未确认硬件保护。",
+        "Show session state, key protection scheme, hardware evidence and current TPM detection. An unlocked session also reports its grant mode and granted credentials. Protection status is available while locked without authentication; unknown means hardware protection is unconfirmed.",
     ), annotations(read_only_hint = true))]
     async fn credential_status(&self) -> CallToolResult {
         wrap(async {
-            let st = self.session.status().await;
+            let (generation, st) = self.session.status_snapshot().await;
             let grants = if st.get("state").and_then(Value::as_str) == Some("unlocked") {
                 self.session
-                    .scoped("status", None)
-                    .request::<Value>("sessionInfo", Map::new())
+                    .session_info()
                     .await
                     .ok()
+                    .map(|grants| (generation, grants))
             } else {
                 None
             };
-            let mut merged = st.as_object().cloned().unwrap_or_default();
-            if let Some(g) = grants.and_then(|g| g.as_object().cloned()) {
-                merged.insert("grants".into(), Value::Object(g));
-            }
-            Ok(ok_data(
-                kv_i18n::t("状态：", "Status:"),
-                Value::Object(merged),
-            ))
+            let merged = protection_status_view(
+                self.session.status_snapshot(),
+                grants,
+                self.session.protection(),
+            )
+            .await;
+            Ok(ok_data(kv_i18n::t("状态：", "Status:"), merged))
         })
         .await
     }
 
     #[tool(description = kv_i18n::t(
-        "弹出系统认证（显示目的），通过后解锁 Secure Enclave 凭证库。每个新会话都必须认证，具体凭证另按授权模式批准。per_credential 模式可传 name 在解锁后授权该凭证；per_use 模式请直接调用具体使用工具以批准完整操作。per_session 模式一次解锁全部。其他工具在需要时也会自动触发认证。",
-        "Show system authentication (displaying the purpose) and unlock the Secure Enclave vault. Every new session requires authentication; specific credentials follow the grant mode separately. In per_credential mode, pass name to grant a credential after unlocking. In per_use mode, call the intended tool directly to approve its complete operation. In per_session mode, one unlock grants everything. Other tools also trigger authentication when needed.",
+        "弹出系统认证（显示目的），通过后解锁 本地凭证库。每个新会话都必须认证，具体凭证另按授权模式批准。per_credential 模式可传 name 在解锁后授权该凭证；per_use 模式请直接调用具体使用工具以批准完整操作。per_session 模式一次解锁全部。其他工具在需要时也会自动触发认证。",
+        "Show system authentication (displaying the purpose) and unlock the local credential vault. Every new session requires authentication; specific credentials follow the grant mode separately. In per_credential mode, pass name to grant a credential after unlocking. In per_use mode, call the intended tool directly to approve its complete operation. In per_session mode, one unlock grants everything. Other tools also trigger authentication when needed.",
     ))]
     async fn credential_unlock(&self, Parameters(a): Parameters<UnlockArgs>) -> CallToolResult {
         wrap(async {
@@ -248,8 +287,8 @@ impl Server {
     }
 
     #[tool(description = kv_i18n::t(
-        "立即锁定凭证库，之后再访问需要重新通过系统硬件认证。remember 模式下传 forget=true 同时清除记住的凭证授权；每个新会话仍须认证解锁 Secure Enclave。",
-        "Lock the vault now; further access requires system hardware authentication again. In remember mode pass forget=true to also clear remembered credential grants. Every new session still requires authentication to unlock Secure Enclave.",
+        "立即锁定凭证库，之后再访问需要重新通过系统认证。remember 模式下传 forget=true 同时清除记住的凭证授权；每个新会话仍须认证解锁凭证库。",
+        "Lock the vault now; further access requires system authentication again. In remember mode pass forget=true to also clear remembered credential grants. Every new session still requires authentication to unlock the vault.",
     ))]
     async fn credential_lock(&self, Parameters(a): Parameters<LockArgs>) -> CallToolResult {
         wrap(async {
@@ -443,8 +482,8 @@ impl Server {
     }
 
     #[tool(description = kv_i18n::t(
-        "保存 static 凭证（API key、密码、token、SSH 私钥等）。会先检查凭证类型是否存在，不存在则先创建该类型，再写入值。推荐传 template（用 credential_templates 搜索，如 openai、anthropic、github，或通用的 bearer / header / query / basic）：按模板逐个弹窗输入秘密字段，并自动配置代理调用（credential_http_request）和验证。value 和 value_file 都省略时会弹出 macOS 隐藏输入框让用户直接输入（推荐，凭证不经过 AI 上下文）；用户已在对话中给出秘密时，直接用 value 传入并主动保存。多行内容（如私钥）用 value_file 从文件导入；可加 delete_source_file: true，在保存成功后弹窗请用户确认删除原文件，避免明文留两份。覆盖已有凭证需要 overwrite=true，并且会弹窗请用户确认。之后要把 SSH 私钥这类文件型秘密用到本地程序（如 ssh -i）时，用 credential_export_file，不要用 credential_get。",
-        "Save a static credential (API key, password, token, SSH private key, etc.). The credential type is created first if it does not exist. Passing template is recommended (search with credential_templates, e.g. openai, anthropic, github, or the generic bearer / header / query / basic): the user is prompted for each secret field in a dialog, and proxied calls (credential_http_request) and verification are configured automatically. If both value and value_file are omitted, a hidden macOS input dialog lets the user type the value directly (recommended - the secret never passes through the AI context); if the user already gave the secret in the chat, pass it via value and store it proactively. Import multi-line content (e.g. private keys) from a file with value_file; add delete_source_file: true to have the user confirm deleting the original file once the save succeeds, so the plaintext doesn't end up in two places. Overwriting an existing credential requires overwrite=true and the user is asked to confirm. Later, to use a file-shaped secret like an SSH private key with a local program (e.g. ssh -i), use credential_export_file, not credential_get.",
+        "保存 static 凭证（API key、密码、token、SSH 私钥等）。会先检查凭证类型是否存在，不存在则先创建该类型，再写入值。推荐传 template（用 credential_templates 搜索，如 openai、anthropic、github，或通用的 bearer / header / query / basic）：按模板逐个弹窗输入秘密字段，并自动配置代理调用（credential_http_request）和验证。value 和 value_file 都省略时会弹出 原生隐藏输入框让用户直接输入（推荐，凭证不经过 AI 上下文）；用户已在对话中给出秘密时，直接用 value 传入并主动保存。多行内容（如私钥）用 value_file 从文件导入；可加 delete_source_file: true，在保存成功后弹窗请用户确认删除原文件，避免明文留两份。覆盖已有凭证需要 overwrite=true，并且会弹窗请用户确认。之后要把 SSH 私钥这类文件型秘密用到本地程序（如 ssh -i）时，用 credential_export_file，不要用 credential_get。",
+        "Save a static credential (API key, password, token, SSH private key, etc.). The credential type is created first if it does not exist. Passing template is recommended (search with credential_templates, e.g. openai, anthropic, github, or the generic bearer / header / query / basic): the user is prompted for each secret field in a dialog, and proxied calls (credential_http_request) and verification are configured automatically. If both value and value_file are omitted, a native hidden input dialog lets the user type the value directly (recommended - the secret never passes through the AI context); if the user already gave the secret in the chat, pass it via value and store it proactively. Import multi-line content (e.g. private keys) from a file with value_file; add delete_source_file: true to have the user confirm deleting the original file once the save succeeds, so the plaintext doesn't end up in two places. Overwriting an existing credential requires overwrite=true and the user is asked to confirm. Later, to use a file-shaped secret like an SSH private key with a local program (e.g. ssh -i), use credential_export_file, not credential_get.",
     ))]
     async fn credential_set(&self, Parameters(a): Parameters<SetArgs>) -> CallToolResult {
         wrap(super::http::credential_set_impl(self, a)).await
@@ -546,8 +585,8 @@ impl Server {
     }
 
     #[tool(description = kv_i18n::t(
-        "查看或修改 KeyValet 的凭证授权模式。每个新会话都必须通过系统认证解锁 Secure Enclave。grant_mode：per_use（每次使用凭证都按 Touch ID）、per_credential（默认，每个会话中每个凭证按一次）、per_session（会话解锁后批准全部凭证）、remember（在 remember_hours 小时内记住凭证授权，0 表示永久；不跳过新会话硬件解锁）。放宽模式或延长记住时长需要 Touch ID；收紧立即生效。修改对当前会话也立即生效。forget=true 清除记住的凭证授权。只在用户明确要求时修改设置。",
-        "View or change KeyValet's credential grant mode. Every new session requires system authentication to unlock Secure Enclave. grant_mode: per_use (Touch ID for every use), per_credential (default; Touch ID once per credential per session), per_session (grant all credentials after session unlock), remember (remember credential grants for remember_hours hours; 0 = forever; new sessions still require hardware unlock). Loosening the mode or extending the window requires Touch ID; tightening applies immediately. Changes take effect in the current session too. forget=true clears remembered credential grants. Only change settings when the user explicitly asks.",
+        "查看或修改 KeyValet 的凭证授权模式。每个新会话都必须通过系统认证解锁凭证库。grant_mode：per_use（每次使用凭证都按 系统认证）、per_credential（默认，每个会话中每个凭证按一次）、per_session（会话解锁后批准全部凭证）、remember（在 remember_hours 小时内记住凭证授权，0 表示永久；不跳过新会话凭证库解锁）。放宽模式或延长记住时长需要 系统认证；收紧立即生效。修改对当前会话也立即生效。forget=true 清除记住的凭证授权。只在用户明确要求时修改设置。",
+        "View or change KeyValet's credential grant mode. Every new session requires system authentication to unlock the vault. grant_mode: per_use (system authentication for every use), per_credential (default; system authentication once per credential per session), per_session (grant all credentials after session unlock), remember (remember credential grants for remember_hours hours; 0 = forever; new sessions still require vault unlock). Loosening the mode or extending the window requires system authentication; tightening applies immediately. Changes take effect in the current session too. forget=true clears remembered credential grants. Only change settings when the user explicitly asks.",
     ))]
     async fn credential_settings(&self, Parameters(a): Parameters<SettingsArgs>) -> CallToolResult {
         wrap(async {
@@ -583,6 +622,123 @@ impl Server {
             ))
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod protection_status_tests {
+    use super::*;
+
+    fn report() -> Value {
+        serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../kv-ipc/tests/fixtures/hello-protection.json"
+        )))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn locked_status_returns_current_tpm_without_promoting_unconfirmed_key_protection() {
+        let expected = report();
+        let view = protection_status_view(
+            std::future::ready((7, json!({"state": "locked", "session": "test-session"}))),
+            None,
+            std::future::ready(Ok(expected.clone())),
+        )
+        .await;
+        assert_eq!(view["state"], "locked");
+        assert_eq!(view["vault_protection"], expected);
+        assert_eq!(
+            view["vault_protection"]["key_protection"]["hardware"],
+            "unknown"
+        );
+        assert!(view.get("grants").is_none());
+        assert!(view.get("protection_error").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_complete_session_report_does_not_open_an_extra_helper_connection() {
+        let grants = json!({"vault_protection": report(), "grant_mode": "per_credential"});
+        let view = protection_status_view(
+            std::future::ready((7, json!({"state": "unlocked"}))),
+            Some((7, grants.clone())),
+            async { panic!("a complete session report must not poll the startup probe") },
+        )
+        .await;
+        assert_eq!(view["vault_protection"], report());
+        assert_eq!(view["grants"], grants);
+        assert!(view.get("protection_error").is_none());
+    }
+
+    #[tokio::test]
+    async fn old_and_incomplete_session_reports_use_a_fresh_probe_and_preserve_grants() {
+        for incomplete in [
+            json!({"provider": "windows_hello", "tpm_backed": null}),
+            json!({"key_protection": {}, "tpm": {}}),
+            Value::Null,
+        ] {
+            let grants =
+                json!({"vault_protection": incomplete, "granted_credentials": ["approved-name"]});
+            let view = protection_status_view(
+                std::future::ready((7, json!({"state": "unlocked"}))),
+                Some((7, grants.clone())),
+                std::future::ready(Ok(report())),
+            )
+            .await;
+            assert_eq!(view["vault_protection"], report());
+            assert_eq!(view["grants"], grants);
+            assert!(view.get("protection_error").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn state_is_refreshed_after_the_probe_and_old_grants_do_not_survive_lock_or_reunlock() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        for current_state in ["locked", "unlocking", "unlocked"] {
+            let generation = AtomicU64::new(7);
+            let old_grants = json!({"granted_credentials": ["old-session-name"]});
+            let view = protection_status_view(
+                async {
+                    let current = generation.load(Ordering::SeqCst);
+                    assert_eq!(
+                        current, 8,
+                        "take the state snapshot after the awaited probe"
+                    );
+                    (current, json!({"state": current_state}))
+                },
+                Some((7, old_grants)),
+                async {
+                    generation.store(8, Ordering::SeqCst);
+                    Ok(report())
+                },
+            )
+            .await;
+            assert_eq!(view["state"], current_state);
+            assert_eq!(view["vault_protection"], report());
+            assert!(view.get("grants").is_none());
+            assert!(!view.to_string().contains("old-session-name"));
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_or_invalid_protection_is_an_explicit_error_without_losing_session_state() {
+        let grants = json!({"grant_mode": "per_use"});
+        for probe in [
+            Err(crate::session::SessionError("helper disconnected".into())),
+            Ok(json!({"key_protection": {}, "tpm": {}})),
+        ] {
+            let view = protection_status_view(
+                std::future::ready((7, json!({"state": "unlocked", "session": "test-session"}))),
+                Some((7, grants.clone())),
+                std::future::ready(probe),
+            )
+            .await;
+            assert_eq!(view["state"], "unlocked");
+            assert_eq!(view["session"], "test-session");
+            assert_eq!(view["grants"], grants);
+            assert!(view["vault_protection"].is_null());
+            assert!(!view["protection_error"].as_str().unwrap().is_empty());
+        }
     }
 }
 

@@ -1,0 +1,38 @@
+[Unit]
+Description=KeyValet credential helper
+After=polkit.service
+Requires=polkit.service
+
+[Service]
+Type=simple
+User=keyvalet
+Group=keyvalet
+ExecStart=/usr/local/lib/keyvalet/bin/kv-helper --daemon
+StateDirectory=keyvalet
+StateDirectoryMode=0700
+RuntimeDirectory=keyvalet
+RuntimeDirectoryMode=0755
+UMask=0077
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+LimitCORE=0
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# /proc must remain readable for peer process start times and loopback TCP ownership.
+# The installer adds SupplementaryGroups=tss when that device-access group exists.
+
+[Install]
+WantedBy=multi-user.target

@@ -69,6 +69,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn aes_round_keys_are_zeroized_on_drop() {
+        fn requires_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+        requires_zeroize_on_drop::<aes::Aes256>();
+    }
+
+    #[test]
     fn encrypt_then_decrypt_roundtrips() {
         let key = [7u8; KEY_BYTES];
         let nonce = [9u8; NONCE_BYTES];

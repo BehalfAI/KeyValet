@@ -1,5 +1,5 @@
 #!/bin/sh
-# KeyValet one-line installer (macOS).
+# KeyValet one-line installer (macOS and GNU/Linux).
 #
 #   curl -fsSL https://keyvalet.dev/install.sh | sh
 #
@@ -24,11 +24,14 @@ ACTION=install
 say()  { printf '\033[1m==>\033[0m %s\n' "$1"; }
 fail() { printf '\033[31mError:\033[0m %s\n' "$1" >&2; exit 1; }
 
-[ "$(uname -s)" = Darwin ] || fail "KeyValet currently supports macOS only."
+PLATFORM=$(uname -s)
+case "$PLATFORM" in Darwin|Linux) ;; *) fail "Use install.ps1 on Windows; this installer supports macOS and Linux." ;; esac
 [ "$(id -u)" != 0 ] || fail "Run as your normal user (not root); you'll be asked for your password when needed."
 
-OS_MAJOR=$(sw_vers -productVersion | cut -d. -f1)
-[ "$OS_MAJOR" -ge 14 ] 2>/dev/null || fail "KeyValet requires macOS 14 or later."
+if [ "$PLATFORM" = Darwin ]; then
+  OS_MAJOR=$(sw_vers -productVersion | cut -d. -f1)
+  [ "$OS_MAJOR" -ge 14 ] 2>/dev/null || fail "KeyValet requires macOS 14 or later."
+fi
 
 # Version: explicit > latest release > main
 REF="${KEYVALET_VERSION:-}"
@@ -42,19 +45,28 @@ fi
 MODE=source
 if [ "$ACTION" = install ]; then
   ARCH=$(uname -m)
-  TRANSLATED=$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)
-  if [ "$ARCH" = arm64 ] || [ "$TRANSLATED" = 1 ]; then
+  if [ "$PLATFORM" = Linux ]; then
+    case "$ARCH" in x86_64) PACKAGE_ARCH=x64 ;; aarch64) PACKAGE_ARCH=arm64 ;; *) fail "Linux packages support x86_64 and aarch64; use a source checkout for another architecture." ;; esac
+    if [ "$REF" != main ] || [ -n "${KEYVALET_ARCHIVE:-}" ]; then MODE=prebuilt; fi
+  else
+    TRANSLATED=$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)
+    if [ "$ARCH" = arm64 ] || [ "$TRANSLATED" = 1 ]; then
     if [ "$REF" != main ] || [ -n "${KEYVALET_ARCHIVE:-}" ]; then
       MODE=prebuilt
     fi
-  else
+    else
     say "Intel Mac: building from source (Secure Enclave on T2 Macs is untested)."
+    fi
   fi
 fi
 
 require_source_toolchain() {
   command -v cargo >/dev/null 2>&1 || fail "The Rust toolchain (cargo) is required. Install it from https://rustup.rs"
-  xcrun --find swiftc >/dev/null 2>&1 || fail "Xcode Command Line Tools (swiftc) are required. Install them with: xcode-select --install"
+  if [ "$PLATFORM" = Darwin ]; then
+    xcrun --find swiftc >/dev/null 2>&1 || fail "Xcode Command Line Tools (swiftc) are required. Install them with: xcode-select --install"
+  else
+    command -v cc >/dev/null 2>&1 || fail "A C compiler is required; on Ubuntu/Debian: sudo apt install build-essential"
+  fi
 }
 
 TMP=$(mktemp -d)
@@ -62,22 +74,30 @@ trap 'rm -rf "$TMP"' EXIT
 
 if [ "$MODE" = prebuilt ]; then
   ASSET="keyvalet-$REF-macos-arm64.tar.gz"
+  [ "$PLATFORM" != Linux ] || ASSET="keyvalet-$REF-linux-$PACKAGE_ARCH.tar.gz"
   mkdir -p "$TMP/pkg"
   if [ -n "${KEYVALET_ARCHIVE:-}" ]; then
     [ -f "$KEYVALET_ARCHIVE" ] || fail "KEYVALET_ARCHIVE not found: $KEYVALET_ARCHIVE"
     cp "$KEYVALET_ARCHIVE" "$TMP/pkg/$ASSET"
     say "Using local package $KEYVALET_ARCHIVE (checksum NOT verified)"
   else
-    say "Downloading KeyValet release $REF (Apple Silicon)"
+    say "Downloading KeyValet release $REF ($PLATFORM)"
     ASSET_URL="https://github.com/$REPO/releases/download/$REF/$ASSET"
     SUMS_URL="https://github.com/$REPO/releases/download/$REF/SHA256SUMS"
+    [ "$PLATFORM" != Linux ] || SUMS_URL="https://github.com/$REPO/releases/download/$REF/${ASSET%.tar.gz}.sha256"
     if ! curl -fsSL "$ASSET_URL" -o "$TMP/pkg/$ASSET"; then
       say "No prebuilt package at $ASSET_URL (release without assets?); falling back to a source build"
       MODE=source
+      # Before Linux assets are published, an unpinned Linux install builds main.
+      if [ "$PLATFORM" = Linux ] && [ -z "${KEYVALET_VERSION:-}" ]; then REF=main; fi
     else
       curl -fsSL "$SUMS_URL" -o "$TMP/SHA256SUMS" || fail "Could not download SHA256SUMS for release $REF"
       grep " $ASSET\$" "$TMP/SHA256SUMS" > "$TMP/check" || fail "SHA256SUMS has no entry for $ASSET"
-      (cd "$TMP/pkg" && shasum -a 256 -c "$TMP/check" >/dev/null) || fail "Checksum mismatch for $ASSET -- aborting (no fallback)"
+      if [ "$PLATFORM" = Linux ]; then
+        (cd "$TMP/pkg" && sha256sum -c "$TMP/check" >/dev/null) || fail "Checksum mismatch for $ASSET -- aborting (no fallback)"
+      else
+        (cd "$TMP/pkg" && shasum -a 256 -c "$TMP/check" >/dev/null) || fail "Checksum mismatch for $ASSET -- aborting (no fallback)"
+      fi
       say "Checksum verified against SHA256SUMS from release $REF"
     fi
   fi
@@ -119,7 +139,7 @@ if [ "$ACTION" = uninstall ]; then
   exit 0
 fi
 
-run sh scripts/install.sh
+run sh scripts/install.sh "$@"
 
 if [ -z "${KEYVALET_NO_REGISTER:-}" ] && command -v claude >/dev/null 2>&1; then
   if claude mcp get keyvalet >/dev/null 2>&1; then

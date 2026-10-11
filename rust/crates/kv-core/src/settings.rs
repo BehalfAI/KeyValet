@@ -152,23 +152,68 @@ pub fn read_settings(vault_dir: &Path) -> Settings {
     }
 }
 
+// Keep a stable inode: replacing/removing this file would let two processes hold different locks.
+// The lock covers only the disk transaction, never a user prompt.
+fn lock_settings(vault_dir: &Path) -> std::io::Result<std::fs::File> {
+    let path = vault_dir.join(".settings.lock");
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(&path)?;
+    kv_platform::fs::set_private_permissions(&path)?;
+    #[cfg(target_os = "linux")]
+    kv_platform::linux::inherit_private_owner(&path)?;
+    file.lock()?;
+    Ok(file)
+}
+
 pub fn write_settings(vault_dir: &Path, s: &Settings) -> std::io::Result<()> {
+    let _lock = lock_settings(vault_dir)?;
+    write_settings_locked(vault_dir, s)
+}
+
+/// Commit a proposal only if its settings snapshot is still current. Prompts must happen before
+/// this call; a concurrent tightening or forget operation invalidates the old approval.
+pub fn compare_and_write_settings(
+    vault_dir: &Path,
+    expected: &Settings,
+    next: &Settings,
+) -> std::io::Result<bool> {
+    let _lock = lock_settings(vault_dir)?;
+    if read_settings(vault_dir) != *expected {
+        return Ok(false);
+    }
+    write_settings_locked(vault_dir, next)?;
+    Ok(true)
+}
+
+fn write_settings_locked(vault_dir: &Path, s: &Settings) -> std::io::Result<()> {
+    use std::io::Write;
+
     let raw = RawSettings {
         grant_mode: Some(serde_json::Value::String(s.grant_mode.as_str().to_string())),
         remember_hours: Some(serde_json::json!(s.remember_hours)),
         remember_until: s.remember_until,
     };
     let body = serde_json::to_string_pretty(&raw).unwrap() + "\n";
-    let tmp = file(vault_dir).with_extension(format!("json.tmp-{}", std::process::id()));
-    std::fs::write(&tmp, body)?;
+    // Multiple daemon sessions run in this process. A PID-only temporary name lets their
+    // writes clobber one another, or makes one rename remove the other's pending file.
+    let mut tmp = tempfile::Builder::new()
+        .prefix("settings.json.tmp-")
+        .tempfile_in(vault_dir)?;
+    kv_platform::fs::set_private_permissions(tmp.path())?;
+    #[cfg(target_os = "linux")]
+    kv_platform::linux::inherit_private_owner(tmp.path())?;
+    tmp.write_all(body.as_bytes())?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(file(vault_dir)).map_err(|e| e.error)?;
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-    }
-    #[cfg(windows)]
-    kv_platform::fs::set_private_permissions(&tmp)?;
-    std::fs::rename(&tmp, file(vault_dir))
+    std::fs::File::open(vault_dir)?.sync_all()?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -243,6 +288,80 @@ mod tests {
         };
         write_settings(dir.path(), &s).unwrap();
         assert_eq!(read_settings(dir.path()), s);
+    }
+
+    #[test]
+    fn concurrent_settings_writes_commit_whole_files_without_temp_collisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let barrier = std::sync::Barrier::new(12);
+        std::thread::scope(|threads| {
+            for worker in 0..12 {
+                let barrier = &barrier;
+                let dir = dir.path();
+                threads.spawn(move || {
+                    let settings = Settings {
+                        grant_mode: GRANT_MODES[worker % GRANT_MODES.len()],
+                        remember_hours: worker as f64,
+                        remember_until: None,
+                    };
+                    barrier.wait();
+                    for _ in 0..8 {
+                        write_settings(dir, &settings).unwrap();
+                        let saved = read_settings(dir);
+                        assert_eq!(
+                            saved.grant_mode,
+                            GRANT_MODES[saved.remember_hours as usize % GRANT_MODES.len()]
+                        );
+                    }
+                });
+            }
+        });
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn settings_writes_leave_preexisting_temp_paths_untouched_and_clean_up_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_temp = file(dir.path()).with_extension(format!("json.tmp-{}", std::process::id()));
+        std::fs::write(&old_temp, "unrelated file").unwrap();
+        write_settings(dir.path(), &DEFAULTS).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&old_temp).unwrap(),
+            "unrelated file"
+        );
+
+        std::fs::remove_file(file(dir.path())).unwrap();
+        std::fs::create_dir(file(dir.path())).unwrap();
+        assert!(write_settings(dir.path(), &DEFAULTS).is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn concurrent_settings_proposals_cannot_both_commit_the_same_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        write_settings(dir.path(), &DEFAULTS).unwrap();
+        let barrier = std::sync::Barrier::new(8);
+        let committed = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|threads| {
+            for worker in 0..8 {
+                let barrier = &barrier;
+                let committed = &committed;
+                let dir = dir.path();
+                threads.spawn(move || {
+                    let next = Settings {
+                        grant_mode: GrantMode::PerUse,
+                        remember_hours: worker as f64,
+                        remember_until: None,
+                    };
+                    barrier.wait();
+                    if compare_and_write_settings(dir, &DEFAULTS, &next).unwrap() {
+                        committed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+        assert_eq!(committed.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(read_settings(dir.path()).grant_mode, GrantMode::PerUse);
     }
 
     #[test]

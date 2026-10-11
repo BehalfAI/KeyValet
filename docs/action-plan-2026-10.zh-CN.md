@@ -3,6 +3,7 @@
 - 日期：2026-10-08
 - 决策更新：2026-10-09，平台支持与密钥保护顺序已确认，见[产品 §1.4](product-2026-10.zh-CN.md#14-平台支持与密钥保护)及架构 §8.0；macOS 首版、安装整合与本机真实 vault 迁移已完成，其他平台按后续阶段推进。
 - 进度更新：2026-10-10，阶段 0 的代码项与站点 / 文案项全部收口（v0.1.0、v0.2.0 已发布，0.2.1 已就绪待打 tag），剩余项都是需要人操作的发布动作，见「2026-10-10 阶段 0 收口」一节；第一次月度复盘见 `review-2026-10.zh-CN.md`。
+- 产品主线确认：2026-10-10，凭证安全、AI 长任务、多种 Agent 接入；人负责授权、审批和撤权。后续任务围绕同一真实长任务在不同 Agent 上的安全调用、中断恢复与撤销验收，见[产品定义](product-2026-10.zh-CN.md#11-一句话)及[竞品细查与差异验收](product-modes-and-pricing.zh-CN.md#87-keyvalet-的差异验收)。新增任务授权与子代理机制仍待实现，不作为已发布能力。
 - 用法：这是五份规划文档（战略、产品、架构、营销、开源）的执行版。每一条都写明做什么、产出是什么、怎么算完成。按顺序做，遇到门槛先复盘再往下走。
 - 时间假设：一个人，每周约 40 小时投入 KeyValet（其余时间自由职业），其中约 8 小时营销与社区。
 - 章节索引：战略 S、产品 P、架构 A、营销 M、开源 O，例如「A §7.6」指架构文档第 7.6 节。
@@ -155,13 +156,15 @@
 
 ### Windows（2026-10-10 起，与第 2 月并行）
 
-| # | 任务 | 产出 | 完成标准 |
+当前是**开发预览**，代码实现与 Windows 真机验收分开记录。构建、安装、签名和验收细节见 [windows.md](windows.md)。
+
+| # | 任务 | 当前进度 | 完成标准 |
 | --- | --- | --- | --- |
-| W1 | `代码` 工作区在 Windows 上能编译、clippy、跑单测：unix 专有代码收进 `kv-platform` 的 seam 后用 `cfg` 隔离；Windows 路径常量、ACL 版 `trust`、`set_private_permissions` / `mem::lock`、UI 语言；kv-helper 的命名管道监听（`\\.\pipe\keyvalet-helper` / `-agent`）与 kv-mcp 的管道连接；CI 加 `windows-latest` job | 代码 + CI | macOS 四件套仍绿；`cargo check/clippy --target x86_64-pc-windows-msvc` 在 Mac 上干净；Windows CI 绿；所有 Windows 上未实现的路径都 fail-closed 并有明确提示 |
-| W2 | `代码` `KeyValetHelper` 服务注册 / 启停；vault 目录 DACL（SYSTEM + Administrators）；管道 DACL（安装用户 SID + SYSTEM）；按 `GetNamedPipeClientProcessId` → 进程令牌识别调用方 SID；agent 身份校验（同用户 + 安装路径 + Authenticode 发布者，`--allow-unsigned-agent` 仅供开发） | 服务 + 代码 | 另一个本机用户连不上管道；未签名 agent 默认被拒并审计 |
-| W3 | `代码` `kv-agent.exe`：Hello `MasterKeyProvider`（`ProviderId::WindowsHello`，签固定挑战 + HKDF，设备绑定沿用）；`tpm_backed` 状态；TaskDialog 确认框；密码输入对话框；`protection` / `setup-hello` / 恢复口令流程 | agent + CLI | 真机：创建 → 解锁 → 恢复口令 → 轮换；无 Hello 的机器明确拒绝 |
-| W4 | `代码` `install.ps1`（自提权、下载 zip 校验 SHA256SUMS、装服务和登录任务、写 Claude Code / Codex / Cursor 的 Windows 路径配置）；release 工作流出 x64 + arm64 zip；WSL 桥 `kv-bridge.exe`（需要 Linux 版 kv-mcp，随 Linux 一起）；hooks 在 Windows 路径下验证 | 安装器 + release | 全新 Win11 上 `irm … \| iex` 到首次代理调用 < 5 分钟 |
-| W5 | `代码` 真机矩阵：Hello + TPM、Hello 无 TPM、arm64、WSL；签名（证书到位后）；`docs/runtimes.md` 与官网更新 | 记录 | 矩阵全过；SmartScreen 不拦 |
+| W1 | 工作区编译、clippy、单测；Windows 路径、ACL、内存锁、语言与命名管道；原生 CI | 代码已实现；本机 GNU Windows 交叉 clippy，新增 ARM64 MSVC 构建 job；待运行更新后的 Windows CI | macOS 四件套绿；原生 Windows x64 CI 绿；ARM64 构建绿。Mac 上 GNU 交叉检查不代替 MSVC 链接或真机运行 |
+| W2 | SCM LocalSystem 服务、SYSTEM/Admin vault、管道 SID 与发布者检查、agent/MCP 进程保护 | 已实现；修正普通客户端的管道实例创建权限，校验服务端 SYSTEM/安装路径；SYSTEM 创建并持有受限 agent 和 MCP worker，原生秘密输入在 worker 内完成，客户端 EOF 锁定和清理；拒绝外部启动的 worker | 另一个用户连不上；未签名 agent 默认拒绝并审计；同用户无法读写 worker 内存、改线程上下文或 DACL；服务/agent 启停、MCP 断开及异常清理真机通过 |
+| W3 | Hello provider、设备绑定、TaskDialog、隐藏输入、setup-hello/protection/恢复/轮换 | 已实现；恢复/轮换和帧处理有跨平台合成测试；`tpm_backed` 为 `true` 或未知 `null`，不把证明不可用等同无 TPM；真实 Hello 测试显式 ignore | 真机创建 → 解锁 → 恢复 → 轮换；无 Hello 明确拒绝；受限进程中 WinRT/UI 工作正常 |
+| W4 | PowerShell 安装/升级/卸载、MCP/hooks 配置、x64/ARM64 ZIP、WSL 桥 | 本地安装器和手动签名 artifact 工作流已实现；配置合并、中文、备份、幂等和路径引号离线测试通过；正式包尚未发布；WSL 桥随 Linux 待做 | 全新 Win11 首次代理调用、升级和卸载通过；真实客户端 hooks 生效；签名包发布后再推广在线安装 |
+| W5 | Hello + TPM / 无 TPM、ARM64、WSL、签名、运行记录和官网 | 文档与官网已标开发预览；证书、Windows CI 运行记录和真机矩阵待完成 | 记录完整硬件矩阵、签名/吊销和 SmartScreen 实际表现；由维护者发布 |
 
 Hello 和 agent 在托管 CI 上跑不了（没有交互会话），这部分测试标 `#[ignore]`，在真实 Win11 机器或 VM 上跑——**需要一台 Win11 测试机（物理机或 Parallels 带 vTPM 的 VM）**。
 
@@ -186,7 +189,14 @@ Hello 和 agent 在托管 CI 上跑不了（没有交互会话），这部分测
 | 6.5 | `市场` 事故复盘第三篇（GhostSplice）；5 分钟演示视频；争取第一个播客 | 内容 | — |
 | 6.6 | `市场` r/selfhosted 与 Linux 社区发 Linux 支持；v0.4 发布 | Release | — |
 
-**2026-10-10 Linux 方案决定（排在 v0.1 发布与 5.1 策略引擎之后）：** helper 按规划做常驻服务（系统用户 `keyvalet`、systemd、Unix socket + `SO_PEERCRED` 识别调用者），不沿用 macOS 的「每会话 sudo 启动 root helper」。审批优先用 polkit：每次都要求重新验证（`auth_self`），由用户会话里的 polkit 代理要求输入登录密码或指纹，AI 不知道密码就无法批准；无 GUI 时用 polkit 的终端代理，没有 polkit 时才退回 6.2 的确认码方式（只允许 T0/T1）。Linux 验证在内网 Ubuntu 机器 `ndu` 上通过 ssh 进行。
+**2026-10-10 Linux 本地版已实现：** helper 为系统用户 `keyvalet` 的 systemd 常驻服务，
+Unix socket 的 `SO_PEERCRED` 与进程启动时间用于识别调用者；MCP、CLI、hooks、代理、网关、
+协议引擎、安装卸载与打包已接通。审批采用 polkit `auth_self`，桌面走认证代理，SSH 用
+`keyvalet approve <kv-mcp-pid>` 注册终端代理；没有代理、拒绝或取消时关闭访问，不启用确认码
+降级。TPM 2.0 优先；无 TPM 时必须显式选择软件保护，TPM 故障不回退。Ubuntu 24.04 的 `ndu`
+用于原生检查与真实 Intel TPM 验证；Ubuntu 22.04 / Debian 12 CI 和 ARM64 打包已定义，桌面
+指纹与真实 AI 客户端验收仍待补齐。6.1 的远程配对、relay、能力令牌与 6.2 的未来分级策略
+不包含在本次本地实现中。详见 [Linux 支持与验收记录](linux.md)。
 
 ### 第 4 月
 
@@ -308,7 +318,7 @@ Hello 和 agent 在托管 CI 上跑不了（没有交互会话），这部分测
 | --- | --- | --- |
 | 第 15–17 月 | 首个云端隔离执行方案仅做 AWS Nitro Enclaves + KMS：`kv-enclave` 的授权、解密、凭证使用及 TLS 均留在 enclave；可复现 EIF；PCR0 随客户端发布；iOS 与 Mac 端证明验证（A §11）；BYO-KMS 默认；托管 KMS 信任声明进产品 | 找 3 家有 CI 离线 / 无人值守需求的付费团队试用；Terraform 文档 |
 | 第 18–20 月 | 远程 MCP 端点（Hydra 作 AS、PRM、CIMD）（A §10.4）；ChatGPT 与 Claude App 接入测试；Android App（StrongBox） | Enterprise 自托管 Terraform 发布；SOC 2 Type I 启动；第一份企业合同 |
-| 第 21–24 月 | SCIM；Okta Cross-App Access；Vault/OpenBao 后端；macOS 菜单栏（可选）；Windows TPM + Hello 本地客户端仅在明确需求后另行排期，当前不承诺本季度交付 | SOC 2 Type I 完成；参与 MCP ext-auth 讨论；第 24 个月结局评估（§9） |
+| 第 21–24 月 | SCIM；Okta Cross-App Access；Vault/OpenBao 后端；macOS 菜单栏（可选）；Windows 本地客户端已移到阶段 1，后续按实际反馈完善 | SOC 2 Type I 完成；参与 MCP ext-auth 讨论；第 24 个月结局评估（§9） |
 
 ---
 

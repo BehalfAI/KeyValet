@@ -101,8 +101,9 @@ mod os {
         GRANT_ACCESS, SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
     };
     use windows::Win32::Security::{
-        GetTokenInformation, TokenUser, ACL, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-        PROTECTED_DACL_SECURITY_INFORMATION, PSID, TOKEN_QUERY, TOKEN_USER,
+        CreateWellKnownSid, GetAce, WinBuiltinAdministratorsSid, WinLocalSystemSid,
+        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSID, TOKEN_QUERY, WELL_KNOWN_SID_TYPE,
     };
     use windows::Win32::System::Memory::VirtualLock;
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
@@ -124,25 +125,16 @@ mod os {
             let mut token = Default::default();
             OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
                 .map_err(|e| io::Error::from_raw_os_error(e.code().0))?;
-            let mut len = 0u32;
-            let _ = GetTokenInformation(token, TokenUser, None, 0, &mut len);
-            if len == 0 {
-                return Err(io::Error::last_os_error());
+            struct Token(windows::Win32::Foundation::HANDLE);
+            impl Drop for Token {
+                fn drop(&mut self) {
+                    unsafe {
+                        let _ = windows::Win32::Foundation::CloseHandle(self.0);
+                    }
+                }
             }
-            let mut buf = vec![0u8; len as usize];
-            GetTokenInformation(
-                token,
-                TokenUser,
-                Some(buf.as_mut_ptr() as *mut _),
-                len,
-                &mut len,
-            )
-            .map_err(|e| io::Error::from_raw_os_error(e.code().0))?;
-            let sid = (*(buf.as_ptr() as *const TOKEN_USER)).User.Sid;
-            let sid_len = windows::Win32::Security::GetLengthSid(sid) as usize;
-            let mut out = vec![0u8; sid_len];
-            std::ptr::copy_nonoverlapping(sid.0 as *const u8, out.as_mut_ptr(), sid_len);
-            Ok(out)
+            let _token = Token(token);
+            crate::winbuf::token_user_sid(token)
         }
     }
 
@@ -179,11 +171,77 @@ mod os {
 
     /// The Windows equivalent of `st.uid() == getuid()`: the file's owner SID equals the process
     /// token's user SID.
-    pub fn owned_by_current_user(path: &Path) -> io::Result<bool> {
+    fn well_known(ty: WELL_KNOWN_SID_TYPE) -> io::Result<Vec<u8>> {
+        let mut bytes = vec![0u8; 68];
+        let mut size = bytes.len() as u32;
+        unsafe { CreateWellKnownSid(ty, None, Some(PSID(bytes.as_mut_ptr() as _)), &mut size) }
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        bytes.truncate(size as usize);
+        Ok(bytes)
+    }
+
+    pub fn is_private(path: &Path) -> io::Result<bool> {
         use windows::Win32::Security::EqualSid;
         let me = current_user_sid()?;
         let theirs = owner_sid(path)?;
-        Ok(unsafe { EqualSid(PSID(me.as_ptr() as _), PSID(theirs.as_ptr() as _)).is_ok() })
+        let system = well_known(WinLocalSystemSid)?;
+        let admins = well_known(WinBuiltinAdministratorsSid)?;
+        let matches = |a: &[u8], b: &[u8]| unsafe {
+            EqualSid(PSID(a.as_ptr() as _), PSID(b.as_ptr() as _)).is_ok()
+        };
+        if ![&me, &system, &admins]
+            .iter()
+            .any(|sid| matches(sid, &theirs))
+        {
+            return Ok(false);
+        }
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        unsafe {
+            let mut dacl: *mut ACL = std::ptr::null_mut();
+            let mut sd = windows::Win32::Security::PSECURITY_DESCRIPTOR::default();
+            let status = GetNamedSecurityInfoW(
+                PCWSTR(wide.as_ptr()),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(&mut dacl),
+                None,
+                &mut sd,
+            );
+            if status != ERROR_SUCCESS {
+                return Err(io::Error::from_raw_os_error(status.0 as i32));
+            }
+            let _sd = Guard(sd.0);
+            if dacl.is_null() {
+                return Ok(false);
+            }
+            for i in 0..(*dacl).AceCount as u32 {
+                let mut ptr = std::ptr::null_mut();
+                GetAce(dacl, i, &mut ptr).map_err(|e| io::Error::other(e.to_string()))?;
+                let header = &*(ptr as *const ACE_HEADER);
+                if header.AceFlags & 0x08 != 0 || matches!(header.AceType, 1 | 6 | 10 | 12) {
+                    continue;
+                }
+                if header.AceType != 0 {
+                    return Ok(false);
+                }
+                let ace = &*(ptr as *const ACCESS_ALLOWED_ACE);
+                let sid = PSID(&ace.SidStart as *const _ as _);
+                if ace.Mask != 0
+                    && ![&theirs, &system, &admins]
+                        .iter()
+                        .any(|b| EqualSid(PSID(b.as_ptr() as _), sid).is_ok())
+                {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
     }
 
     /// Owner-only DACL, protected from inheritance (see `kv_platform::fs::set_private_permissions`).
@@ -221,8 +279,20 @@ mod os {
                     ..Default::default()
                 },
             };
+            let system = well_known(WinLocalSystemSid)?;
+            let admins = well_known(WinBuiltinAdministratorsSid)?;
+            let mut entries = vec![entry];
+            if [&system, &admins].iter().any(|sid| {
+                windows::Win32::Security::EqualSid(PSID(sid.as_ptr() as _), owner).is_ok()
+            }) {
+                for sid in [&system, &admins] {
+                    let mut extra = entry;
+                    extra.Trustee.ptstrName = PWSTR(sid.as_ptr() as _);
+                    entries.push(extra);
+                }
+            }
             let mut acl: *mut ACL = std::ptr::null_mut();
-            let status = SetEntriesInAclW(Some(&[entry]), None, &mut acl);
+            let status = SetEntriesInAclW(Some(&entries), None, &mut acl);
             if status != ERROR_SUCCESS {
                 return Err(io::Error::from_raw_os_error(status.0 as i32));
             }
@@ -261,11 +331,14 @@ pub struct Vault {
     metadata: std::sync::Mutex<Option<MasterKeyMetadata>>,
     /// Set only by `open_recovery_read_only`; any newly installed key clears it.
     read_only: AtomicBool,
+    #[cfg(unix)]
+    owner_uid: u32,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ProtectionStatus {
     pub provider: &'static str,
+    pub tpm_backed: Option<bool>,
     pub recovery_configured: bool,
     /// The vault key also depends on the root-only device binding secret.
     pub device_binding: bool,
@@ -304,7 +377,40 @@ impl Vault {
             key: std::sync::Mutex::new(None),
             metadata: std::sync::Mutex::new(None),
             read_only: AtomicBool::new(false),
+            #[cfg(unix)]
+            owner_uid: unsafe { libc::getuid() },
         }
+    }
+
+    /// Root's management CLI operates on the service-owned Linux vault. The daemon
+    /// uses `new` and must own its files itself; regular users cannot adopt another uid.
+    #[cfg(target_os = "linux")]
+    pub fn owned_by(mut self, uid: u32) -> Result<Self> {
+        if unsafe { libc::getuid() } != 0 && unsafe { libc::getuid() } != uid {
+            return Err(VaultError::new(
+                "无权访问该属主的凭证库",
+                "Cannot access another owner's vault",
+            ));
+        }
+        self.owner_uid = uid;
+        Ok(self)
+    }
+
+    fn private_new(&self, path: &Path) -> std::io::Result<std::fs::File> {
+        let file = open_private_new(path)?;
+        self.adopt_file_owner(&file)?;
+        Ok(file)
+    }
+
+    fn adopt_file_owner(&self, _file: &std::fs::File) -> std::io::Result<()> {
+        #[cfg(target_os = "linux")]
+        if unsafe { libc::getuid() } == 0 {
+            use std::os::fd::AsRawFd;
+            if unsafe { libc::fchown(_file.as_raw_fd(), self.owner_uid, u32::MAX) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        Ok(())
     }
 
     /// Creates/checks the directory without loading any key. Refuses directory or file
@@ -313,6 +419,7 @@ impl Vault {
         if !self.dir.exists() {
             std::fs::create_dir(&self.dir)?;
             set_private(&self.dir, 0o700)?;
+            self.adopt_file_owner(&std::fs::File::open(&self.dir)?)?;
         }
         self.assert_private(&self.dir, true)?;
         if self.data_path.symlink_metadata().is_ok() {
@@ -328,8 +435,18 @@ impl Vault {
         self.assert_private(&self.data_path, false)?;
         let file: crate::types::EncryptedFile =
             serde_json::from_slice(&std::fs::read(&self.data_path)?)?;
+        Self::decode_file_payload(&file)?;
         if let Some(m) = &file.master_key {
-            m.enclave.decode()?;
+            if m.provider != m.enclave.provider()? {
+                return Err(VaultError::new(
+                    "密钥提供者与元数据不匹配",
+                    "Key provider does not match its metadata",
+                ));
+            }
+            m.recovery.validate()?;
+            if let Some(binding) = &m.device_binding {
+                binding.digest_bytes()?;
+            }
         }
         Ok(file.master_key)
     }
@@ -339,9 +456,21 @@ impl Vault {
         let metadata = self.disk_metadata()?;
         let protected = metadata.is_some();
         Ok(ProtectionStatus {
-            device_binding: metadata.is_some_and(|m| m.device_binding.is_some()),
-            provider: if protected {
-                "secure_enclave"
+            device_binding: metadata
+                .as_ref()
+                .is_some_and(|m| m.device_binding.is_some()),
+            tpm_backed: match metadata.as_ref().map(|m| &m.provider) {
+                // A TPM interface can be backed by firmware, hardware or a virtual TPM.
+                // Existing Linux metadata contains no validated hardware attestation.
+                Some(ProviderId::Tpm2) => None,
+                Some(ProviderId::SoftwareKey) => Some(false),
+                Some(ProviderId::WindowsHello) => {
+                    metadata.as_ref().unwrap().enclave.hello()?.0.tpm_backed
+                }
+                _ => None,
+            },
+            provider: if let Some(m) = &metadata {
+                m.provider.as_str()
             } else if self.data_path.exists() || self.key_path.symlink_metadata().is_ok() {
                 "migration_required"
             } else {
@@ -354,15 +483,26 @@ impl Vault {
                 .symlink_metadata()
                 .is_ok(),
             legacy_key_present: self.key_path.symlink_metadata().is_ok(),
-            hardware_required: true,
+            hardware_required: !metadata.as_ref().is_some_and(|m| {
+                matches!(
+                    m.provider,
+                    ProviderId::SoftwareKey | ProviderId::WindowsHello
+                )
+            }),
         })
+    }
+
+    /// Opaque/public key descriptor, for provider cleanup after a committed key change.
+    pub fn master_key_metadata(&self) -> Result<Option<MasterKeyMetadata>> {
+        self.prepare()?;
+        self.disk_metadata()
     }
 
     pub fn init_with_provider(&self, provider: &dyn MasterKeyProvider, reason: &str) -> Result<()> {
         self.clear_key();
         self.prepare()?;
         match self.disk_metadata()? {
-            None => Err(VaultError::new("macOS 凭证库必须使用 Secure Enclave；请运行 keyvalet setup-enclave 完成初始化或迁移", "macOS vaults require Secure Enclave; run keyvalet setup-enclave to initialize or migrate")),
+            None => Err(VaultError::new("凭证库必须使用设备密钥；请运行 keyvalet setup-enclave（macOS）或 setup-hello（Windows）", "Vaults require a device key; run keyvalet setup-enclave (macOS) or setup-hello (Windows)")),
             Some(metadata) => {
                 // Check the binding file before prompting: a missing or replaced one can't
                 // succeed anyway.
@@ -456,19 +596,7 @@ impl Vault {
     /// The digest-named path (`device-binding-<hex of the first 16 digest bytes>.key`) for a
     /// binding. The name ties the file to the digest stored in the vault metadata.
     fn binding_path_for(&self, binding: &DeviceBinding) -> Result<PathBuf> {
-        let digest = base64_decode(&binding.digest).map_err(|_| {
-            VaultError::new(
-                "凭证库元数据已损坏（设备绑定摘要无效）",
-                "Vault metadata is corrupt (invalid device binding digest)",
-            )
-        })?;
-        // A SHA-256 digest, not the 32-byte secret length it happens to coincide with.
-        if digest.len() != 32 {
-            return Err(VaultError::new(
-                "凭证库元数据已损坏（设备绑定摘要无效）",
-                "Vault metadata is corrupt (invalid device binding digest)",
-            ));
-        }
+        let digest = binding.digest_bytes()?;
         let id: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
         Ok(self.dir.join(format!("device-binding-{id}.key")))
     }
@@ -524,7 +652,7 @@ impl Vault {
         OsRng.fill_bytes(secret.as_mut());
         let binding = DeviceBinding::for_secret(&secret);
         let path = self.binding_path_for(&binding)?;
-        let mut f = open_private_new(&path)?;
+        let mut f = self.private_new(&path)?;
         let result = (|| -> Result<()> {
             exclude_from_backups(&path);
             f.write_all(secret.as_ref())?;
@@ -626,7 +754,7 @@ impl Vault {
         let (secret, binding, path) = self.create_binding_secret()?;
         let key = binding.bind(&created.key, &secret)?;
         let metadata = MasterKeyMetadata {
-            provider: ProviderId::SecureEnclave,
+            provider: created.metadata.provider()?,
             enclave: created.metadata,
             recovery: WrappedMasterKey::wrap(&key, password)?,
             device_binding: Some(binding),
@@ -706,7 +834,7 @@ impl Vault {
         }
         #[cfg(unix)]
         {
-            if st.uid() != unsafe { libc::getuid() } {
+            if st.uid() != self.owner_uid {
                 return Err(VaultError::new(
                     &format!("{} 的属主不是当前用户（应为 root）", p.display()),
                     &format!(
@@ -718,13 +846,12 @@ impl Vault {
         }
         #[cfg(windows)]
         {
-            // W1 checks the owner SID; the DACL-tightening side lives in set_private (W2 can
-            // extend this to reject inherited grants to unprivileged groups outright).
-            if !os::owned_by_current_user(p)? {
+            use std::os::windows::fs::MetadataExt;
+            if st.file_attributes() & 0x400 != 0 || !os::is_private(p)? {
                 return Err(VaultError::new(
                     &format!("{} 的属主不是当前用户（应为管理员/SYSTEM）", p.display()),
                     &format!(
-                        "{} is not owned by the current user (should be Administrators/SYSTEM)",
+                        "{} must have a private DACL and a trusted owner (Administrators/SYSTEM in production)",
                         p.display()
                     ),
                 ));
@@ -769,10 +896,11 @@ impl Vault {
         Ok(())
     }
 
-    fn decrypt_file(
+    /// Validate the public envelope without decrypting. Status and unlock share this check,
+    /// so unsupported formats and malformed encodings never reach the provider prompt.
+    fn decode_file_payload(
         file: &crate::types::EncryptedFile,
-        key: &[u8; KEY_BYTES],
-    ) -> Result<VaultData> {
+    ) -> Result<([u8; NONCE_BYTES], [u8; crate::crypto::TAG_BYTES], Vec<u8>)> {
         if file.v != 1 || file.alg != "aes-256-gcm" {
             return Err(VaultError::new(
                 "不支持的凭证库格式",
@@ -787,7 +915,20 @@ impl Vault {
         let ct = base64_decode(&file.ct).map_err(|_| decode_err())?;
         let nonce: [u8; NONCE_BYTES] = nonce_v.try_into().map_err(|_| decode_err())?;
         let tag: [u8; crate::crypto::TAG_BYTES] = tag_v.try_into().map_err(|_| decode_err())?;
+        if ct.is_empty() {
+            return Err(decode_err());
+        }
+        Ok((nonce, tag, ct))
+    }
 
+    fn decrypt_file(
+        file: &crate::types::EncryptedFile,
+        key: &[u8; KEY_BYTES],
+    ) -> Result<VaultData> {
+        let (nonce, tag, ct) = Self::decode_file_payload(file)?;
+        let decode_err = || {
+            VaultError::new("凭证库解密失败：数据被篡改或主密钥不匹配", "Failed to decrypt vault: data has been tampered with or the master key does not match")
+        };
         let mut plain: Option<Zeroizing<Vec<u8>>> = None;
         let bound_aad = Self::encryption_aad(file.master_key.as_ref())?;
         let aads: Vec<&[u8]> = if file.master_key.is_some() {
@@ -823,7 +964,12 @@ impl Vault {
     fn encryption_aad(metadata: Option<&MasterKeyMetadata>) -> Result<Vec<u8>> {
         let mut aad = AAD.to_vec();
         if let Some(metadata) = metadata {
-            aad.extend_from_slice(b"/secure-enclave/v1/");
+            match metadata.provider {
+                ProviderId::SecureEnclave => aad.extend_from_slice(b"/secure-enclave/v1/"),
+                ProviderId::WindowsHello => aad.extend_from_slice(b"/windows-hello/v1/"),
+                ProviderId::Tpm2 => aad.extend_from_slice(b"/tpm2/v1/"),
+                ProviderId::SoftwareKey => aad.extend_from_slice(b"/software-key/v1/"),
+            }
             aad.extend_from_slice(&serde_json::to_vec(metadata)?);
         }
         Ok(aad)
@@ -863,7 +1009,7 @@ impl Vault {
         tmp_name.push(format!(".tmp-{}-{}", std::process::id(), random_hex(4)));
         let tmp = PathBuf::from(tmp_name);
         let result = (|| -> Result<()> {
-            let mut f = open_private_new(&tmp)?;
+            let mut f = self.private_new(&tmp)?;
             f.write_all(bytes)?;
             f.sync_all()?;
             std::fs::rename(&tmp, &self.data_path)?;
@@ -1113,6 +1259,7 @@ impl Vault {
         let mut line = serde_json::to_string(&serde_json::Value::Object(entry))?;
         line.push('\n');
         let mut f = open_private_append(&self.audit_path)?;
+        self.adopt_file_owner(&f)?;
         f.write_all(line.as_bytes())?;
         drop(f);
         // Rotate once past 10MB (keeping the previous one), so it never grows unbounded.
@@ -1362,7 +1509,7 @@ impl Vault {
                     updated_at: now.clone(),
                     config: None,
                     state: None,
-                    generation: None,
+                    generation: Some(random_hex(12)),
                 },
             );
             data.types.get_mut(&ty).unwrap().updated_at = now;

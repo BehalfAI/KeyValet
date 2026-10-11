@@ -3,10 +3,11 @@
 //! Direct port of src/helper/protocols/http.ts.
 
 use futures_util::StreamExt;
-use kv_vault::VaultError;
+use kv_vault::{scrub_json, VaultError};
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use zeroize::{Zeroize, Zeroizing};
 
 const TIMEOUT: Duration = Duration::from_millis(15_000);
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -56,9 +57,26 @@ pub struct HttpResult {
     pub json: Value,
 }
 
+impl Drop for HttpResult {
+    fn drop(&mut self) {
+        self.text.zeroize();
+        scrub_json(&mut self.json);
+    }
+}
+
 /// Get the JSON object (returns an empty map when it isn't one), for convenient field access.
-pub fn obj(r: &HttpResult) -> serde_json::Map<String, Value> {
-    r.json.as_object().cloned().unwrap_or_default()
+pub fn obj(r: &HttpResult) -> &serde_json::Map<String, Value> {
+    static EMPTY: std::sync::LazyLock<serde_json::Map<String, Value>> =
+        std::sync::LazyLock::new(serde_json::Map::new);
+    r.json.as_object().unwrap_or(&EMPTY)
+}
+
+struct SecretBody(Zeroizing<Vec<u8>>);
+
+impl AsRef<[u8]> for SecretBody {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
 }
 
 fn client() -> reqwest::Client {
@@ -80,6 +98,8 @@ pub async fn http_request(
     headers: &[(&str, &str)],
     body: Option<String>,
 ) -> kv_vault::Result<HttpResult> {
+    let body =
+        body.map(|body| bytes::Bytes::from_owner(SecretBody(Zeroizing::new(body.into_bytes()))));
     let url = assert_https_url(url, &kv_i18n::t("请求地址", "Request URL"))?;
     let host = url::Url::parse(&url)
         .map(|u| u.host_str().unwrap_or_default().to_string())
@@ -100,6 +120,7 @@ pub async fn http_request(
         req = req.header(*k, *v);
     }
     if let Some(b) = body {
+        // Bytes keeps the zeroizing owner alive across reqwest/hyper body clones.
         req = req.body(b);
     }
     let res = req.send().await.map_err(|_| {
@@ -109,8 +130,14 @@ pub async fn http_request(
         )
     })?;
     let status = res.status().as_u16();
-    let bytes = read_limited(res, MAX_RESPONSE_BYTES, &host).await?;
-    let text = String::from_utf8_lossy(&bytes).to_string();
+    let mut bytes = read_limited(res, MAX_RESPONSE_BYTES, &host).await?;
+    let text = match String::from_utf8(std::mem::take(&mut *bytes)) {
+        Ok(text) => text,
+        Err(error) => {
+            let bytes = Zeroizing::new(error.into_bytes());
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+    };
     let json = serde_json::from_str(&text).unwrap_or(Value::Null);
     Ok(HttpResult { status, text, json })
 }
@@ -121,9 +148,10 @@ pub async fn read_limited(
     res: reqwest::Response,
     limit: usize,
     host: &str,
-) -> kv_vault::Result<Vec<u8>> {
+) -> kv_vault::Result<Zeroizing<Vec<u8>>> {
     let mut stream = res.bytes_stream();
-    let mut out = Vec::new();
+    // Avoid reallocations leaving earlier copies of credential bytes in the allocator.
+    let mut out = Zeroizing::new(Vec::with_capacity(limit));
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|_| {
             VaultError::new(
@@ -131,13 +159,13 @@ pub async fn read_limited(
                 &format!("Failed to read the response from {host}"),
             )
         })?;
-        out.extend_from_slice(&chunk);
-        if out.len() > limit {
+        if chunk.len() > limit - out.len() {
             return Err(VaultError::new(
                 &format!("{host} 的响应过大"),
                 &format!("Response from {host} is too large"),
             ));
         }
+        out.extend_from_slice(&chunk);
     }
     Ok(out)
 }

@@ -1,0 +1,25 @@
+name: Linux package
+on:
+  workflow_dispatch:
+jobs:
+  package:
+    strategy:
+      matrix:
+        runner: [ubuntu-22.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Native package
+        run: |
+          version=$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' rust/crates/kv-cli/Cargo.toml | head -1)
+          sh scripts/package-linux.sh "v$version"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.runner }}
+          path: |
+            dist/keyvalet-*-linux-*.tar.gz
+            dist/keyvalet-*-linux-*.sha256

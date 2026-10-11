@@ -1,0 +1,22 @@
+{
+  "provider": "windows_hello",
+  "tpm_backed": null,
+  "recovery_configured": true,
+  "device_binding": true,
+  "migration_backup_present": false,
+  "legacy_key_present": false,
+  "hardware_required": false,
+  "key_protection": {
+    "scheme": "windows_hello_unconfirmed",
+    "hardware": "unknown",
+    "evidence": "hello_attestation_unavailable",
+    "authentication": "windows_hello",
+    "summary": "TPM hardware backing is unconfirmed"
+  },
+  "tpm": {
+    "availability": "detected",
+    "version": "2.0",
+    "implementation": "unknown",
+    "evidence": "windows_tbs"
+  }
+}

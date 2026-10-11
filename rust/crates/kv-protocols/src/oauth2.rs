@@ -3,11 +3,13 @@
 //! only get a short-lived access token. Direct port of src/helper/protocols/oauth2.ts.
 
 use crate::check::{int, one_of, opt_str, str_list, str_record, str_req};
+use crate::expiry::{expires_at, is_fresh, iso_millis};
 use crate::http::{assert_https_url, obj, post_form, remote_error, HttpResult};
 use crate::jwt::decode_jwt_payload;
 use kv_vault::{Kind, Vault, VaultError};
 use serde_json::{json, Value};
 use std::sync::LazyLock;
+use zeroize::{Zeroize, Zeroizing};
 
 pub const OAUTH_FLOWS: [&str; 3] = ["authorization_code", "device_code", "client_credentials"];
 const AUTH_METHODS: [&str; 3] = ["client_secret_post", "client_secret_basic", "none"];
@@ -46,7 +48,7 @@ pub struct OAuth2Config {
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct OAuth2State {
     #[serde(skip_serializing_if = "Option::is_none")]
-    access_token: Option<String>,
+    access_token: Option<Zeroizing<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     token_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -61,6 +63,21 @@ struct OAuth2State {
     needs_reauth: Option<bool>,
 }
 
+struct SecretMap(std::collections::HashMap<String, String>);
+
+impl std::ops::Deref for SecretMap {
+    type Target = std::collections::HashMap<String, String>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for SecretMap {
+    fn drop(&mut self) {
+        self.0.values_mut().for_each(Zeroize::zeroize);
+    }
+}
+
 pub fn validate_redirect_uri(raw: &Value) -> kv_vault::Result<String> {
     let s = str_req(Some(raw), "redirect_uri", 300)?;
     let u = url::Url::parse(&s).map_err(|_| {
@@ -73,7 +90,13 @@ pub fn validate_redirect_uri(raw: &Value) -> kv_vault::Result<String> {
         u.host_str(),
         Some("127.0.0.1") | Some("localhost") | Some("[::1]")
     );
-    if u.scheme() != "http" || !host_ok {
+    if u.scheme() != "http"
+        || !host_ok
+        || !u.username().is_empty()
+        || u.password().is_some()
+        || u.fragment().is_some()
+        || u.port() == Some(0)
+    {
         return Err(VaultError::new(
             "redirect_uri 必须是本机回环地址，如 http://127.0.0.1:8765/callback",
             "redirect_uri must be a local loopback address, e.g. http://127.0.0.1:8765/callback",
@@ -175,7 +198,7 @@ type Loaded = (
     String,
     kv_vault::CredentialRecord,
     OAuth2Config,
-    std::collections::HashMap<String, String>,
+    SecretMap,
     OAuth2State,
 );
 
@@ -189,11 +212,11 @@ fn load(vault: &Vault, ty: &str, name: &str) -> kv_vault::Result<Loaded> {
     }
     let cfg: OAuth2Config = serde_json::from_value(record.config.clone().unwrap_or_default())
         .map_err(|_| VaultError::new("OAuth2 配置已损坏", "OAuth2 configuration is corrupted"))?;
-    let secrets = record.secrets.clone().unwrap_or_default();
+    let secrets = SecretMap(record.secrets.clone().unwrap_or_default());
     let state: OAuth2State = record
         .state
         .as_ref()
-        .and_then(|s| serde_json::from_value(s.clone()).ok())
+        .and_then(|s| serde::Deserialize::deserialize(s).ok())
         .unwrap_or_default();
     Ok((ty, name, record, cfg, secrets, state))
 }
@@ -212,10 +235,19 @@ fn client_auth(
             use base64::engine::{general_purpose::STANDARD, Engine};
             let enc =
                 |s: &str| url::form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>();
-            let basic = STANDARD.encode(format!("{}:{}", enc(&cfg.client_id), enc(secret)));
+            let encoded_secret = Zeroizing::new(enc(secret));
+            let credentials = Zeroizing::new(format!(
+                "{}:{}",
+                enc(&cfg.client_id),
+                encoded_secret.as_str()
+            ));
+            let basic = Zeroizing::new(STANDARD.encode(credentials.as_bytes()));
             (
                 vec![],
-                vec![("Authorization".to_string(), format!("Basic {basic}"))],
+                vec![(
+                    "Authorization".to_string(),
+                    format!("Basic {}", basic.as_str()),
+                )],
             )
         }
         "client_secret_post" => (
@@ -239,6 +271,8 @@ async fn token_request(
 ) -> kv_vault::Result<HttpResult> {
     let (auth_form, auth_headers) = client_auth(cfg, secrets);
     form.extend(auth_form);
+    let form = Zeroizing::new(form);
+    let auth_headers = Zeroizing::new(auth_headers);
     let form_refs: Vec<(&str, &str)> = form.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let header_refs: Vec<(&str, &str)> = auth_headers
         .iter()
@@ -268,18 +302,16 @@ fn save_tokens(
                 "Token response is missing access_token",
             )
         })?;
-    let expires_in = j.get("expires_in").and_then(Value::as_f64);
-    let next = OAuth2State {
-        access_token: Some(access_token.to_string()),
+    let expiry = expires_at(j.get("expires_in"), None)?;
+    let mut next = OAuth2State {
+        access_token: Some(Zeroizing::new(access_token.to_string())),
         token_type: Some(
             j.get("token_type")
                 .and_then(Value::as_str)
                 .unwrap_or("Bearer")
                 .to_string(),
         ),
-        expires_at: expires_in
-            .filter(|e| e.is_finite() && *e > 0.0)
-            .map(|e| now_ms() + (e * 1000.0) as i64),
+        expires_at: expiry,
         scope: j.get("scope").and_then(Value::as_str).map(String::from),
         account: None,
         authorized_at: None,
@@ -304,48 +336,39 @@ fn save_tokens(
     let refresh_token = j
         .get("refresh_token")
         .and_then(Value::as_str)
-        .map(String::from);
+        .map(|token| Zeroizing::new(token.to_string()));
     vault.patch_record(ty, name, Kind::Oauth2, gen, move |rec| {
         if fresh {
-            rec.state = Some(json!({}));
-            if let Some(s) = &mut rec.secrets {
-                s.remove("refresh_token");
-            }
+            rec.replace_state(Some(json!({})));
+            rec.remove_secret("refresh_token");
         }
         let prev: OAuth2State = rec
             .state
             .as_ref()
-            .and_then(|s| serde_json::from_value(s.clone()).ok())
+            .and_then(|s| serde::Deserialize::deserialize(s).ok())
             .unwrap_or_default();
         let merged = OAuth2State {
             access_token: next_clone.access_token.clone(),
             token_type: next_clone.token_type.clone(),
             expires_at: next_clone.expires_at,
-            scope: next_clone.scope.clone().or(prev.scope),
-            account: account_clone.clone().or(prev.account),
-            authorized_at: Some(prev.authorized_at.unwrap_or_else(now_iso)),
+            scope: next_clone.scope.clone().or_else(|| prev.scope.clone()),
+            account: account_clone.clone().or_else(|| prev.account.clone()),
+            authorized_at: Some(prev.authorized_at.clone().unwrap_or_else(now_iso)),
             needs_reauth: Some(false),
         };
-        rec.state = Some(serde_json::to_value(&merged).unwrap());
+        rec.replace_state(Some(serde_json::to_value(&merged).unwrap()));
         if let Some(rt) = &refresh_token {
-            rec.secrets
-                .get_or_insert_with(Default::default)
-                .insert("refresh_token".to_string(), rt.clone()); // supports refresh token rotation
+            rec.set_secret("refresh_token", rt.to_string()); // supports refresh token rotation
         }
     })?;
-    Ok((OAuth2State { account, ..next }, got_refresh_token))
+    next.account = account;
+    Ok((next, got_refresh_token))
 }
 
 fn is_token_response(r: &HttpResult) -> bool {
     (200..300).contains(&r.status) && obj(r).get("access_token").and_then(Value::as_str).is_some()
 }
 
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
-}
 fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
@@ -529,7 +552,7 @@ fn token_out(s: &OAuth2State) -> Value {
     json!({
         "access_token": s.access_token,
         "token_type": s.token_type.clone().unwrap_or_else(|| "Bearer".to_string()),
-        "expires_at": s.expires_at.map(|e| chrono::DateTime::<chrono::Utc>::from(std::time::UNIX_EPOCH + std::time::Duration::from_millis(e.max(0) as u64)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+        "expires_at": s.expires_at.and_then(iso_millis),
         "scope": s.scope,
         "account": s.account,
     })
@@ -539,7 +562,7 @@ fn summary(s: &OAuth2State, got_refresh_token: bool) -> Value {
     json!({
         "account": s.account,
         "scope": s.scope,
-        "expires_at": s.expires_at.map(|e| chrono::DateTime::<chrono::Utc>::from(std::time::UNIX_EPOCH + std::time::Duration::from_millis(e.max(0) as u64)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+        "expires_at": s.expires_at.and_then(iso_millis),
         "refresh_token": got_refresh_token,
     })
 }
@@ -559,7 +582,7 @@ pub async fn access_token(
     let valid = state.access_token.is_some()
         && state
             .expires_at
-            .is_none_or(|e| e - EXPIRY_MARGIN_MS > now_ms());
+            .is_none_or(|e| is_fresh(e, EXPIRY_MARGIN_MS));
     if valid && !force {
         return Ok(token_out(&state));
     }
@@ -574,7 +597,7 @@ pub async fn access_token(
             return Err(remote_error(&host_of(&cfg.token_url), &r));
         }
         let (mut s, _) = save_tokens(vault, &ty, &name, gen.as_deref(), &r, false)?;
-        s.account = state.account;
+        s.account = state.account.clone();
         return Ok(token_out(&s));
     }
 
@@ -590,21 +613,13 @@ pub async fn access_token(
         let r = token_request(&cfg, &secrets, form).await?;
         if is_token_response(&r) {
             let (mut s, _) = save_tokens(vault, &ty, &name, gen.as_deref(), &r, false)?;
-            s.account = state.account;
+            s.account = state.account.clone();
             return Ok(token_out(&s));
         }
         if obj(&r).get("error").and_then(Value::as_str) == Some("invalid_grant") {
             vault.patch_record(&ty, &name, Kind::Oauth2, gen.as_deref(), |rec| {
-                let mut st = rec
-                    .state
-                    .clone()
-                    .unwrap_or(json!({}))
-                    .as_object()
-                    .cloned()
-                    .unwrap_or_default();
-                st.insert("needs_reauth".into(), json!(true));
-                st.remove("access_token");
-                rec.state = Some(Value::Object(st));
+                rec.set_state_field("needs_reauth", json!(true));
+                rec.remove_state_field("access_token");
             })?;
             let google_note = if cfg.provider == "google" {
                 kv_i18n::t(
@@ -633,7 +648,7 @@ pub fn public_state(record: &kv_vault::CredentialRecord) -> Value {
     let s: OAuth2State = record
         .state
         .as_ref()
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .and_then(|v| serde::Deserialize::deserialize(v).ok())
         .unwrap_or_default();
     json!({
         "authorized": (s.access_token.is_some() || record.secrets.as_ref().is_some_and(|sec| sec.contains_key("refresh_token"))) && !s.needs_reauth.unwrap_or(false),
@@ -641,7 +656,7 @@ pub fn public_state(record: &kv_vault::CredentialRecord) -> Value {
         "has_refresh_token": record.secrets.as_ref().is_some_and(|sec| sec.contains_key("refresh_token")),
         "account": s.account,
         "scope": s.scope,
-        "access_token_expires_at": s.expires_at.map(|e| chrono::DateTime::<chrono::Utc>::from(std::time::UNIX_EPOCH + std::time::Duration::from_millis(e.max(0) as u64)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+        "access_token_expires_at": s.expires_at.and_then(iso_millis),
         "authorized_at": s.authorized_at,
     })
 }
@@ -649,6 +664,17 @@ pub fn public_state(record: &kv_vault::CredentialRecord) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_state_handles_corrupt_dates_without_panicking() {
+        for expiry in [i64::MIN, i64::MAX, 100_000_000_000_000_000] {
+            let mut record = kv_vault::CredentialRecord::default();
+            record.replace_state(Some(
+                json!({"access_token":"synthetic-token", "expires_at":expiry}),
+            ));
+            assert!(public_state(&record)["access_token_expires_at"].is_null());
+        }
+    }
 
     #[test]
     fn redirect_uri_must_be_loopback() {
@@ -659,6 +685,13 @@ mod tests {
             "must be http, not https"
         );
         assert!(validate_redirect_uri(&json!("http://example.com/callback")).is_err());
+        for invalid in [
+            "http://127.0.0.1:0/callback",
+            "http://localhost:8765/callback#fragment",
+            "http://user:password@127.0.0.1:8765/callback",
+        ] {
+            assert!(validate_redirect_uri(&json!(invalid)).is_err(), "{invalid}");
+        }
     }
 
     #[test]

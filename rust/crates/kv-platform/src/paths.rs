@@ -61,6 +61,37 @@ pub const TEAM_ID: &str = "PWCRJPY7YC";
 pub const AGENT_REQUIREMENT: &str =
     "identifier \"dev.keyvalet.touchid\" and anchor apple generic and certificate leaf[subject.OU] = \"PWCRJPY7YC\"";
 
+/// Linux code/configuration is root-owned; the vault and runtime socket belong to the
+/// dedicated, non-login service account. None of these paths accept environment overrides.
+#[cfg(target_os = "linux")]
+pub const INSTALL_DIR: &str = "/usr/local/lib/keyvalet";
+#[cfg(target_os = "linux")]
+pub const HELPER_BIN: &str = "/usr/local/lib/keyvalet/bin/kv-helper";
+#[cfg(target_os = "linux")]
+pub const CLI_BIN: &str = "/usr/local/lib/keyvalet/bin/kv-cli";
+#[cfg(target_os = "linux")]
+pub const MCP_BIN: &str = "/usr/local/lib/keyvalet/bin/kv-mcp";
+#[cfg(target_os = "linux")]
+pub const HOOK_BIN: &str = "/usr/local/lib/keyvalet/bin/kv-hook";
+#[cfg(target_os = "linux")]
+pub const TEMPLATES_DIR: &str = "/usr/local/lib/keyvalet/templates";
+#[cfg(target_os = "linux")]
+pub const VAULT_DIR: &str = "/var/lib/keyvalet";
+#[cfg(target_os = "linux")]
+pub const RUN_DIR: &str = "/run/keyvalet";
+#[cfg(target_os = "linux")]
+pub const HELPER_SOCKET: &str = "/run/keyvalet/helper.sock";
+#[cfg(target_os = "linux")]
+pub const OWNER_UID_FILE: &str = "/etc/keyvalet/owner.uid";
+#[cfg(target_os = "linux")]
+pub const SERVICE_USER: &str = "keyvalet";
+#[cfg(target_os = "linux")]
+pub const SERVICE_NAME: &str = "keyvalet.service";
+#[cfg(target_os = "linux")]
+pub const POLKIT_POLICY: &str = "/usr/share/polkit-1/actions/dev.keyvalet.policy";
+#[cfg(target_os = "linux")]
+pub const PKCHECK_BIN: &str = "/usr/bin/pkcheck";
+
 /// Install directory (SYSTEM/Administrators only writable); binaries under `bin\`.
 #[cfg(windows)]
 pub const INSTALL_DIR: &str = r"C:\Program Files\KeyValet";
@@ -90,6 +121,22 @@ pub const HELPER_PIPE: &str = r"\\.\pipe\keyvalet-helper";
 /// session 0 and cannot show UI).
 #[cfg(windows)]
 pub const AGENT_PIPE: &str = r"\\.\pipe\keyvalet-agent";
+/// Stdio MCP launchers connect here; the service hosts the protected MCP worker separately.
+#[cfg(windows)]
+pub const MCP_PIPE: &str = r"\\.\pipe\keyvalet-mcp";
 /// Windows service name for the helper daemon (LocalSystem).
 #[cfg(windows)]
 pub const SERVICE_NAME: &str = "KeyValetHelper";
+/// Text SID of the user the install was done for; written by install.ps1 and read by the
+/// service at startup. Session acceptance is keyed on it.
+#[cfg(windows)]
+pub const OWNER_SID_FILE: &str = r"C:\ProgramData\KeyValet\owner.sid";
+/// Debugging escape hatch: when this (ACL-trusted) marker exists, the agent binary's signature
+/// check is skipped and the acceptance is audited as `agent-accepted-unsigned`.
+#[cfg(windows)]
+// The client must read this non-secret policy before sending anything to an unsigned helper.
+// Keep it in the readable, privileged-write installation rather than the private vault.
+pub const ALLOW_UNSIGNED_AGENT: &str = r"C:\Program Files\KeyValet\allow-unsigned-agent";
+/// Authenticode leaf-certificate CN the agent binary must be signed by.
+#[cfg(windows)]
+pub const AGENT_PUBLISHER: &str = "Simvito Limited";
